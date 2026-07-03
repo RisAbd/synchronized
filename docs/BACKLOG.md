@@ -23,6 +23,25 @@
 - 🟢 Фокус-режим плеера + mobile-first — `web/player.html` (П3, П4).
 - 🟢 Порядок в структуре (src/ docs/ data/ media/ web/ work/), пути через `__file__`.
 - 🟢 Исследование пословной привязки — `RESEARCH-word-alignment.md` (главный вывод ниже).
+- 🟢 Git-репо + пуш на `github.com/RisAbd/synchronized` (SSH ок, BatchMode чтоб не висло).
+- 🟢 ngrok + сервер под keepalive-супервизором (всегда висит):
+  `scratchpad/keepalive.sh` перезапускает упавшее. URL: `https://85ee-178-216-214-115.ngrok-free.app`.
+- 🟢 Демо пересобрано из **Google STT** (90% покрытия vs 70% whisper; аят 1:4 восстановлен) —
+  перемотка мапит точнее (`work/audio.gstt.sync-map.json` → web).
+
+## Google STT как распознаватель (указка владельца) + ⚠️ БЕЗОПАСНОСТЬ
+
+Whisper на арабском слабоват; Google STT точнее. Кэш ответов лежит в старом проекте:
+`../speech-to-text-python/gcloud-speech-data/*/gstt_response.json` — `align.py` уже читает формат.
+Для НОВЫХ записей — Google STT API через сервис-аккаунт `../speech-to-text-python/pacific-vault-*.json`.
+**⚠️ КЛЮЧ НЕ КОПИРОВАТЬ В РЕПО и не коммитить — утечёт на GitHub.** Использовать только по пути
+через env `GOOGLE_APPLICATION_CREDENTIALS`. В `.gitignore` уже есть `.env`; кред-файлы держать вне репо.
+
+## Известные баги
+
+- 🐞 При перемотке аудио не всегда мапит на правильный аят (владелец). Причина — редкий/неровный
+  timeline от аллайнера (гэпы в непокрытых местах → показывается прошлый аят). Частично лечится
+  ростом покрытия (Google STT). Глубоко — пословная привязка + forced alignment (отложено).
 
 ## Next (приоритет) — ОБНОВЛЕНО голосовым 01:51 (быстрее к юзабельному прототипу!)
 
