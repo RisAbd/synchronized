@@ -1,0 +1,13 @@
+{
+  "recitations": [
+    {
+      "id": "aswailis-isra",
+      "title": "Сура Аль-Исра (фрагмент)",
+      "title_ar": "سورة الإسراء",
+      "reciter": "الشيخ يونس اسويلص",
+      "surahs": "سورة ٱلْفَاتِحَة · سورة ٱلْإِسْرَاء",
+      "audio": "aswailis-isra.mp3",
+      "duration": 1090
+    }
+  ]
+}

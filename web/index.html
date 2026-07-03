@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>synchronized</title>
+<style>
+  :root { color-scheme: light dark;
+    --bg:#faf7f0; --fg:#201d16; --muted:#8f8674; --line:rgba(120,110,90,.18);
+    --accent:#b8891a; --card:#fffdf7; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#100f0b; --fg:#e9e3d3; --muted:#7a7360; --line:rgba(200,190,160,.14);
+      --accent:#e4bf4a; --card:#191710; } }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--fg);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .wrap { max-width:680px; margin:0 auto; padding:48px 20px 80px; }
+  .brand { display:flex; align-items:baseline; gap:10px; margin-bottom:6px; }
+  h1 { font-size:1.9rem; margin:0; letter-spacing:-.02em; }
+  .dot { color:var(--accent); }
+  .lead { color:var(--muted); margin:0 0 36px; font-size:1.02rem; line-height:1.5; }
+  .card { display:block; text-decoration:none; color:inherit; background:var(--card);
+    border:1px solid var(--line); border-radius:16px; padding:18px 20px; margin-bottom:14px;
+    transition:transform .12s, border-color .12s; }
+  .card:hover { transform:translateY(-2px); border-color:var(--accent); }
+  .ar { font-family:"Amiri","Scheherazade New","Noto Naskh Arabic",serif;
+    font-size:1.7rem; direction:rtl; margin-bottom:6px; line-height:1.4; }
+  .ct { font-weight:600; font-size:1.05rem; margin-bottom:3px; }
+  .meta { color:var(--muted); font-size:.9rem; }
+  .empty { color:var(--muted); text-align:center; padding:40px; }
+  footer { color:var(--muted); font-size:.82rem; text-align:center; margin-top:40px; line-height:1.6; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><h1>synchronized<span class="dot">.</span></h1></div>
+  <p class="lead">Оригинальный текст Корана, синхронный со звучащим чтением: слушай —
+    и следи за словами, текст сам прокручивается.</p>
+  <div id="list"><div class="empty">загрузка…</div></div>
+  <footer>прототип · выбери запись, чтобы открыть плеер</footer>
+</div>
+<script>
+const fmt = t => { t=Math.max(0,t|0); return (t/60|0)+':'+String(t%60).padStart(2,'0'); };
+(async () => {
+  const list = document.getElementById('list');
+  let m;
+  try { m = await (await fetch('manifest.json')).json(); }
+  catch(e){ list.innerHTML='<div class="empty">нет данных (manifest.json не найден)</div>'; return; }
+  const items = m.recitations || [];
+  if(!items.length){ list.innerHTML='<div class="empty">пока нет обработанных записей</div>'; return; }
+  list.innerHTML='';
+  for(const r of items){
+    const a=document.createElement('a'); a.className='card'; a.href='player.html?id='+encodeURIComponent(r.id);
+    a.innerHTML =
+      (r.title_ar ? '<div class="ar">'+r.title_ar+'</div>' : '') +
+      '<div class="ct">'+(r.title||r.id)+'</div>' +
+      '<div class="meta">'+[r.reciter, r.surahs, fmt(r.duration||0)].filter(Boolean).join(' · ')+'</div>';
+    list.appendChild(a);
+  }
+})();
+</script>
+</body>
+</html>

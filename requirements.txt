@@ -1,0 +1,11 @@
+# M1 quran — только stdlib (sqlite3), зависимостей нет.
+
+# M3 asr — локальная транскрипция (уже стоит в системе, зафиксировано для воспроизводимости)
+faster-whisper==1.1.1
+
+# M2 ingest — скачивание аудио с YouTube (понадобится в фазе 1)
+# yt-dlp
+
+# M4 align — fuzzy sequence alignment (выбрать на этапе M4)
+# rapidfuzz
+# minineedle

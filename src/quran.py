@@ -1,0 +1,209 @@
+"""M1 — канонический текст Корана: загрузка, нормализация, плоский корпус токенов.
+
+Чистый модуль без внешнего I/O кроме чтения quran.db. От него зависят align и player.
+
+Идея: помимо оригинального текста (с харакатами) строим единый «поисковый корпус» —
+непрерывный поток нормализованных слов с обратным маппингом
+    global_index -> (surah, ayah, word_index_in_ayah).
+Это фундамент для выравнивания ASR-транскрипции на канон (M4 align).
+
+Нормализация арабского приводит текст к «согласному скелету», устойчивому к тому,
+как чтение распознаёт ASR: снимаются харакаты и кораническая разметка, схлопываются
+варианты алифа/хамзы/я/та-марбуты.
+
+CLI:  python3 quran.py           # статистика + примеры
+"""
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass, field
+from functools import cached_property
+from pathlib import Path
+
+DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "quran.db"
+
+# --- нормализация -----------------------------------------------------------
+
+# всё, что выбрасываем: харакаты (U+064B–U+0652), дагер-алиф (U+0670),
+# кораническая разметка/паузы (U+06D6–U+06DC), знак саджды (U+06E9),
+# tatweel (U+0640, в БД не встречается, но на всякий случай).
+_STRIP = (
+    set(range(0x064B, 0x0653))  # tashkeel
+    | {0x0670}                  # superscript (dagger) alef
+    | set(range(0x06D6, 0x06DD))  # small high signs / pause marks
+    | {0x06E9}                  # sajdah sign
+    | {0x0640}                  # tatweel
+)
+
+# свёртка вариантов букв в единую форму (агрессивно — под fuzzy-матчинг с ASR):
+_FOLD = {
+    "آ": "ا", "أ": "ا", "إ": "ا", "ٱ": "ا", "ٲ": "ا", "ٳ": "ا", "ٱ": "ا",
+    "ى": "ي",
+    "ؤ": "و",
+    "ئ": "ي",
+    "ة": "ه",
+    "ء": "",   # одиночную хамзу убираем
+}
+
+_STRIP_TABLE = {cp: None for cp in _STRIP}
+_FOLD_TABLE = {ord(k): (v or None) for k, v in _FOLD.items()}
+
+
+def normalize(text: str) -> str:
+    """Оригинальный арабский → нормализованный согласный скелет (слова через один пробел)."""
+    text = text.translate(_STRIP_TABLE)
+    text = text.translate(_FOLD_TABLE)
+    return " ".join(text.split())
+
+
+# --- модели -----------------------------------------------------------------
+
+
+@dataclass
+class Verse:
+    surah: int          # номер суры (1..114)
+    ayah: int           # номер аята внутри суры
+    text: str           # оригинал с харакатами
+    sacdah: bool = False
+
+    @cached_property
+    def norm(self) -> str:
+        return normalize(self.text)
+
+    @cached_property
+    def words(self) -> list[str]:
+        return self.norm.split()
+
+    @property
+    def ref(self) -> str:
+        return f"{self.surah}:{self.ayah}"
+
+
+@dataclass
+class Surah:
+    number: int
+    title: str
+    verses_count: int
+    revelation_place: str
+    bismillah_pre: bool
+    verses: list[Verse] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Token:
+    """Одно нормализованное слово корпуса + его адрес в каноне."""
+    text: str            # нормализованное слово
+    surah: int
+    ayah: int
+    word_index: int      # индекс слова внутри аята (с 0)
+    global_index: int    # индекс в плоском корпусе (с 0)
+
+    @property
+    def ref(self) -> str:
+        return f"{self.surah}:{self.ayah}:{self.word_index}"
+
+
+# --- корпус -----------------------------------------------------------------
+
+
+class Quran:
+    def __init__(self, surahs: list[Surah]):
+        self.surahs = surahs
+        self._by_number = {s.number: s for s in surahs}
+
+        verses: list[Verse] = []
+        tokens: list[Token] = []
+        for s in surahs:
+            for v in s.verses:
+                verses.append(v)
+                for wi, w in enumerate(v.words):
+                    tokens.append(
+                        Token(text=w, surah=v.surah, ayah=v.ayah,
+                              word_index=wi, global_index=len(tokens))
+                    )
+        self.verses = verses
+        self.tokens = tokens
+
+    # ---- загрузка ----
+    @classmethod
+    def load(cls, db_path: str | Path = DEFAULT_DB) -> "Quran":
+        db_path = Path(db_path)
+        if not db_path.is_file():
+            raise FileNotFoundError(
+                f"quran.db не найден: {db_path}. Забрать: "
+                "curl 'https://raw.githubusercontent.com/RisAbd/quran-data/"
+                "refs/heads/master/qurandatabase.org/quran.db' -o quran.db"
+            )
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            srows = conn.execute(
+                "select id, number, title, verses_count, revelation_place, "
+                "bismillah_pre from surahs order by number"
+            ).fetchall()
+            vrows = conn.execute(
+                "select surah_id, number, text, sacdah from surah_verses "
+                "order by surah_id, number"
+            ).fetchall()
+
+        verses_by_surah_id: dict[int, list[Verse]] = {}
+        # порядок сур по id совпадает с number в этой БД, но не полагаемся —
+        # сгруппируем по surah_id и привяжем номер суры через map id->number.
+        id_to_number = {r["id"]: r["number"] for r in srows}
+        for r in vrows:
+            sid = r["surah_id"]
+            verses_by_surah_id.setdefault(sid, []).append(
+                Verse(surah=id_to_number[sid], ayah=r["number"],
+                      text=r["text"], sacdah=bool(r["sacdah"]))
+            )
+
+        surahs = [
+            Surah(number=r["number"], title=r["title"],
+                  verses_count=r["verses_count"],
+                  revelation_place=r["revelation_place"],
+                  bismillah_pre=bool(r["bismillah_pre"]),
+                  verses=verses_by_surah_id.get(r["id"], []))
+            for r in srows
+        ]
+        return cls(surahs)
+
+    # ---- доступ ----
+    def surah(self, number: int) -> Surah:
+        return self._by_number[number]
+
+    def verse(self, surah: int, ayah: int) -> Verse:
+        return self._by_number[surah].verses[ayah - 1]
+
+    def locate(self, global_index: int) -> Token:
+        """Обратный маппинг: позиция в корпусе -> адрес в каноне."""
+        return self.tokens[global_index]
+
+    @cached_property
+    def corpus_text(self) -> str:
+        """Весь Коран как один нормализованный поток слов (для поиска/выравнивания)."""
+        return " ".join(t.text for t in self.tokens)
+
+    def __repr__(self) -> str:
+        return f"<Quran surahs={len(self.surahs)} verses={len(self.verses)} tokens={len(self.tokens)}>"
+
+
+# --- демо -------------------------------------------------------------------
+
+if __name__ == "__main__":
+    q = Quran.load()
+    print(q)
+    print(f"corpus chars: {len(q.corpus_text):,}")
+
+    print("\n--- Фатиха (1:1) ---")
+    v = q.verse(1, 1)
+    print("оригинал :", v.text)
+    print("норма    :", v.norm)
+    print("слова    :", v.words)
+
+    print("\n--- корпус: первые 12 токенов ---")
+    for t in q.tokens[:12]:
+        print(f"  #{t.global_index:<3} {t.ref:<8} {t.text}")
+
+    print("\n--- locate(roundtrip) ---")
+    t = q.tokens[10000]
+    print(f"  token #{t.global_index} = {t.text!r} @ {t.ref} "
+          f"(сура {q.surah(t.surah).title})")
