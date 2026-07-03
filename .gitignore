@@ -24,3 +24,7 @@ web/audio/
 # спайки/черновики (не в репо)
 scratch_*
 /scratch/
+
+# Django
+db.sqlite3
+service/staticfiles/

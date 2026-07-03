@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>synchronized</title>
+<style>
+  :root { color-scheme: light dark;
+    --bg:#faf7f0; --fg:#201d16; --muted:#8f8674; --line:rgba(120,110,90,.18);
+    --accent:#b8891a; --card:#fffdf7; --chip:#f0ead9;
+    --ok:#3f9142; --warn:#c8891a; --err:#c0492f; --proc:#2f77c0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#100f0b; --fg:#e9e3d3; --muted:#7a7360; --line:rgba(200,190,160,.14);
+      --accent:#e4bf4a; --card:#191710; --chip:#211e15; } }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--fg);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .wrap { max-width:680px; margin:0 auto; padding:40px 20px 80px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; letter-spacing:-.02em; }
+  .dot { color:var(--accent); }
+  .lead { color:var(--muted); margin:0 0 28px; line-height:1.5; }
+  form.add { display:flex; flex-direction:column; gap:10px; background:var(--card);
+    border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:28px; }
+  form.add input { background:transparent; border:1px solid var(--line); color:var(--fg);
+    border-radius:10px; padding:11px 13px; font-size:1rem; }
+  form.add input:focus { outline:none; border-color:var(--accent); }
+  .row { display:flex; gap:10px; } .row input { flex:1; min-width:0; }
+  button { background:var(--accent); color:#fff; border:none; border-radius:10px;
+    padding:12px 16px; font-size:1rem; font-weight:600; cursor:pointer; }
+  button:active { transform:translateY(1px); }
+  .card { display:flex; align-items:center; gap:12px; text-decoration:none; color:inherit;
+    background:var(--card); border:1px solid var(--line); border-radius:14px;
+    padding:14px 16px; margin-bottom:12px; }
+  .card .ar { font-family:"Amiri","Scheherazade New",serif; font-size:1.5rem; direction:rtl; }
+  .card .body { flex:1; min-width:0; }
+  .card .ct { font-weight:600; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card .meta { color:var(--muted); font-size:.86rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .badge { font-size:.76rem; font-weight:700; padding:3px 9px; border-radius:999px; white-space:nowrap; }
+  .b-ready { background:color-mix(in srgb,var(--ok) 20%,transparent); color:var(--ok); }
+  .b-processing,.b-queued { background:color-mix(in srgb,var(--proc) 20%,transparent); color:var(--proc); }
+  .b-error { background:color-mix(in srgb,var(--err) 20%,transparent); color:var(--err); }
+  .del { color:var(--muted); text-decoration:none; font-size:1.2rem; padding:2px 6px; }
+  .empty { color:var(--muted); text-align:center; padding:34px; }
+  footer { color:var(--muted); font-size:.8rem; text-align:center; margin-top:36px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>synchronized<span class="dot">.</span></h1>
+  <p class="lead">Оригинальный текст Корана синхронно со звучащим чтением. Вставь ссылку —
+    сервис обработает и даст плеер с авто-прокруткой.</p>
+
+  <form class="add" method="post" action="{% url 'add' %}">
+    {% csrf_token %}
+    <input name="source_url" placeholder="Ссылка на YouTube или путь к аудиофайлу" required>
+    <div class="row">
+      <input name="title" placeholder="Название (необязательно)">
+      <input name="reciter" placeholder="Чтец (необязательно)">
+    </div>
+    <button type="submit">Добавить</button>
+  </form>
+
+  <div id="list">
+  {% for r in recs %}
+    <div class="card-wrap" data-id="{{ r.id }}" data-status="{{ r.status }}">
+      {% if r.is_ready %}
+      <a class="card" href="{% url 'player' r.id %}">
+        {% if r.title_ar %}<span class="ar">{{ r.title_ar }}</span>{% endif %}
+        <span class="body">
+          <span class="ct">{{ r.title|default:r.source_url }}</span>
+          <span class="meta">{{ r.reciter }}{% if r.reciter and r.surahs_label %} · {% endif %}{{ r.surahs_label }}</span>
+        </span>
+        <span class="badge b-ready">готово</span>
+      </a>
+      {% else %}
+      <div class="card">
+        <span class="body">
+          <span class="ct">{{ r.title|default:r.source_url }}</span>
+          <span class="meta status-line">
+            {% if r.status == 'error' %}{{ r.error|truncatechars:80 }}
+            {% elif r.stage %}шаг: {{ r.stage }}…{% else %}{{ r.get_status_display }}…{% endif %}
+          </span>
+        </span>
+        <span class="badge b-{{ r.status }}">{{ r.get_status_display }}</span>
+        <form method="post" action="{% url 'delete' r.id %}" onsubmit="return confirm('Удалить?')">
+          {% csrf_token %}<button class="del" style="background:none;padding:0" title="удалить">✕</button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+  {% empty %}
+    <div class="empty">Пока пусто. Вставь ссылку выше.</div>
+  {% endfor %}
+  </div>
+
+  <footer>прототип · обработка идёт в фоне, страница сама обновит статусы</footer>
+</div>
+
+<script>
+// авто-опрос статуса для не-готовых записей; как всё готово — перезагрузка
+const pending = [...document.querySelectorAll('.card-wrap')]
+  .filter(el => !['ready','error'].includes(el.dataset.status));
+if (pending.length) {
+  setInterval(async () => {
+    let changed = false;
+    for (const el of pending) {
+      try {
+        const s = await (await fetch(`/r/${el.dataset.id}/status`)).json();
+        if (s.ready || s.status === 'error') { changed = true; }
+        const line = el.querySelector('.status-line');
+        if (line) line.textContent = s.status === 'error' ? (s.error||'ошибка')
+          : (s.stage ? `шаг: ${s.stage}…` : `${s.status}…`);
+      } catch(e){}
+    }
+    if (changed) location.reload();
+  }, 2500);
+}
+</script>
+</body>
+</html>
