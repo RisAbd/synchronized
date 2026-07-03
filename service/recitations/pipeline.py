@@ -93,17 +93,28 @@ def _recognize(audio_path: Path, recognizer: str, rec, out: Path):
     tr_path = out / "transcript.json"
 
     if recognizer == "google":
-        # кэш ответов Google STT (ключ = gstt_key записи или stem аудио). Ключ НЕ используем —
-        # только кэш. Живой Google STT API для новых записей — отдельная задача (см. BACKLOG).
-        key = rec.gstt_key or audio_path.stem
-        cache = Path(settings.GSTT_CACHE_DIR) / key / "gstt_response.json"
-        if not cache.is_file():
-            raise FileNotFoundError(
-                f"нет кэша Google STT для '{key}' ({cache}). "
-                f"Живой Google STT API пока не подключён — сравнить можно там, где есть кэш.")
-        raw = json.loads(cache.read_text())
-        raw_path.write_text(json.dumps(raw, ensure_ascii=False))
-        words = align_mod.load_transcript(cache)
+        # 1) уже распознавали этот прогон (raw.json есть) — переиспользуем, чтобы не жечь квоту.
+        # 2) иначе кэш ответов из старого проекта (ключ = gstt_key записи или stem аудио) — бесплатно.
+        # 3) иначе живой Google STT API (если задан ключ+бакет) — сохраняем ответ в raw.json.
+        if raw_path.is_file() and "results" in json.loads(raw_path.read_text() or "{}"):
+            src = raw_path
+        else:
+            key = rec.gstt_key or audio_path.stem
+            cache = Path(settings.GSTT_CACHE_DIR) / key / "gstt_response.json"
+            if cache.is_file():
+                raw = json.loads(cache.read_text())
+                raw_path.write_text(json.dumps(raw, ensure_ascii=False))
+            else:
+                import gstt
+                if not (settings.GSTT_LIVE and gstt.is_available()):
+                    raise FileNotFoundError(
+                        f"нет кэша Google STT для '{key}' ({cache}), а живой API выключен "
+                        f"(нужны env GOOGLE_APPLICATION_CREDENTIALS + SYNC_GSTT_BUCKET, "
+                        f"SYNC_GSTT_LIVE≠0).")
+                resp = gstt.recognize(audio_path, bucket_name=settings.GSTT_BUCKET)
+                raw_path.write_text(json.dumps(resp, ensure_ascii=False, indent=2))
+            src = raw_path
+        words = align_mod.load_transcript(src)
     elif recognizer == "whisper":
         _ensure_cudnn_path()
         import asr

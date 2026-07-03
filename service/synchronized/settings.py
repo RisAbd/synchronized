@@ -115,3 +115,10 @@ DEFAULT_RECOGNIZERS = [r.strip() for r in os.environ.get(
 GSTT_CACHE_DIR = os.environ.get(
     "GSTT_CACHE_DIR",
     str(REPO_ROOT.parent / "speech-to-text-python" / "gcloud-speech-data"))
+# Живой Google STT API для новых записей (нет кэша). Ключ сервис-аккаунта — ТОЛЬКО через
+# env GOOGLE_APPLICATION_CREDENTIALS (в репо не коммитим), бакет — SYNC_GSTT_BUCKET.
+# Живой вызов включается сам, когда заданы и ключ (файл существует), и бакет; можно жёстко
+# выключить SYNC_GSTT_LIVE=0 (чтобы случайно не жечь квоту).
+GOOGLE_APPLICATION_CREDENTIALS = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+GSTT_BUCKET = os.environ.get("SYNC_GSTT_BUCKET", "")
+GSTT_LIVE = os.environ.get("SYNC_GSTT_LIVE", "1") != "0"

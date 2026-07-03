@@ -4,6 +4,14 @@ __pycache__/
 .idea/
 .env
 
+# ⚠️ ключи сервис-аккаунтов Google (боевой Google STT) — НИКОГДА не коммитить, утечёт на GitHub.
+# Ключ держим ВНЕ репо, путь передаём через env GOOGLE_APPLICATION_CREDENTIALS.
+*service-account*.json
+*-credentials.json
+pacific-vault-*.json
+gcloud-key*.json
+/creds/
+
 # крупные медиа рецитаций — не тащим в репо (голосовые .ogg-постановки задач храним)
 *.mp4
 *.mp3

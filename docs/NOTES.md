@@ -131,4 +131,9 @@ export LD_LIBRARY_PATH="$HOME/.local/lib/python3.12/site-packages/nvidia/cudnn/l
 - Плеер: `?asr=<key>` выбирает прогон (иначе авто); переключатель прогонов с метриками; статус
   записи агрегируется из прогонов. Legacy `Recitation.data` — фолбэк (миграция 0003 перенесла
   старые записи в прогоны: rec1→google, whisper-записи→whisper).
-- ⚠️ google пока только из кэша (`gstt_key`/stem). Живой Google STT API — в бэклоге.
+- google: raw.json прогона → кэш старого проекта (`gstt_key`/stem) → **живой Google STT API**
+  (`src/gstt.py`). Живой путь: ffmpeg→FLAC 16k mono → blob бакета `SYNC_GSTT_BUCKET` →
+  `long_running_recognize` (`ar`, без спец-модели — не поддержана) → формат `gstt_response.json`.
+  Ключ ТОЛЬКО через env `GOOGLE_APPLICATION_CREDENTIALS` (в репо не коммитим, `.gitignore`),
+  выключатель `SYNC_GSTT_LIVE=0`. Идемпотентно (raw.json/кэш) — пересчёт не жжёт квоту.
+  Проверено: rec5 живым google coverage **1.0** vs whisper 0.722.
