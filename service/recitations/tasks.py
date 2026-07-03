@@ -31,8 +31,21 @@ def run_pipeline(rec_id: int) -> None:
         rec.save(update_fields=["status", "stage", "updated_at"])
     except Exception as e:  # noqa: BLE001
         rec.status = Recitation.Status.ERROR
-        rec.error = f"{type(e).__name__}: {e}\n{traceback.format_exc()[-1500:]}"
+        rec.error = _friendly_error(rec, e)
         rec.save(update_fields=["status", "error", "updated_at"])
+
+
+def _friendly_error(rec, e: Exception) -> str:
+    """Человеческое сообщение для фронта (без сырого дампа yt-dlp/трейсбека).
+    Полный трейс печатаем в лог сервера — на страницу его не тащим."""
+    traceback.print_exc()
+    msg = str(e)
+    low = msg.lower()
+    if "yt-dlp" in low or "youtube" in low or (rec.stage or "").startswith("ingest"):
+        return ("Не удалось скачать аудио с YouTube (анти-бот/ограничение доступа). "
+                "Попробуй другую ссылку или загрузи аудиофайл напрямую. "
+                "Обход через свежий yt-dlp/куки — в планах.")
+    return f"Ошибка обработки ({rec.stage or '?'}): {type(e).__name__}: {msg[:200]}"
 
 
 # Celery-задача (используется, когда задан брокер)
