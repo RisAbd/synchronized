@@ -35,6 +35,7 @@ DIAG_TOL = 4        # допуск дрейфа диагонали внутри 
 GAP_TOL = 6         # разрыв по ASR-индексу, после которого начинается новый сегмент
 MIN_SEG_WORDS = 3   # короче — считаем шумом, не сегментом
 BACK_TOL = 250      # допустимый откат назад по корпусу (повторы аятов), в токенах
+INTERP_MAX_GAP = 40  # макс. разрыв в словах корпуса, который добиваем интерполяцией времени
 
 
 # --- контракт вход/выход ----------------------------------------------------
@@ -231,18 +232,37 @@ def _segment(points: list[dict], quran: Quran):
     # это скачок назад с возвратом, они выпадают из цепочки.
     keep = _longest_forward_chain(raw)
 
-    # timeline (по аятам) и word_timeline (по словам) — только по выжившим сегментам
+    # timeline (по аятам) и word_timeline (по словам) — только по выжившим сегментам.
+    # word_timeline делаем ПЛОТНЫМ: выровнены лишь часть ASR-слов, между якорями —
+    # дыры. Идём по корпусу слово-за-словом и раздаём времена линейно между соседними
+    # якорями, чтобы подсветка ехала плавно, а не залипала на последнем выровненном
+    # слове и не прыгала. Остаточную неточность границ смазывает окно 2-3 слов в плеере.
     out = []
     timeline = []
     word_timeline = []
+
+    def push_word(t, tok_corpus):
+        tok = quran.tokens[tok_corpus]
+        if word_timeline and word_timeline[-1]["corpus"] == tok_corpus:
+            return
+        if word_timeline and t <= word_timeline[-1]["t"]:
+            t = round(word_timeline[-1]["t"] + 0.001, 3)  # держим строгий рост времени
+        word_timeline.append({"t": t, "surah": tok.surah, "ayah": tok.ayah,
+                              "wi": tok.word_index, "corpus": tok_corpus})
+
+    anchors = [p for seg in keep for p in seg["points"]]
+    for idx, p in enumerate(anchors):
+        push_word(p["t"], p["corpus"])
+        if idx + 1 < len(anchors):
+            q = anchors[idx + 1]
+            c0, c1, t0, t1 = p["corpus"], q["corpus"], p["t"], q["t"]
+            if 2 <= (c1 - c0) <= INTERP_MAX_GAP and t1 > t0:
+                span = c1 - c0
+                for c in range(c0 + 1, c1):        # добиваем пропущенные слова корпуса
+                    push_word(round(t0 + (c - c0) / span * (t1 - t0), 3), c)
+
     for seg in keep:
         for p in seg["points"]:
-            # пословная дорожка: время -> конкретное слово в аяте (для подсветки слова)
-            if not (word_timeline and word_timeline[-1]["t"] == p["t"]
-                    and word_timeline[-1]["corpus"] == p["corpus"]):
-                word_timeline.append({"t": p["t"], "t_end": p["t_end"],
-                                      "surah": p["surah"], "ayah": p["ayah"],
-                                      "wi": p["word_index"], "corpus": p["corpus"]})
             if timeline and (timeline[-1]["surah"], timeline[-1]["ayah"]) == (p["surah"], p["ayah"]):
                 timeline[-1]["t_end"] = p["t_end"]
                 continue

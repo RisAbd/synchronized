@@ -41,10 +41,10 @@
   .ayah.near { color:var(--muted); }
   .ayah.active { color:var(--hl-fg); font-size:clamp(1.9rem,7.6vw,3rem); line-height:1.7; }
   .ayah.active .num { color:var(--accent); }
-  .w { border-radius:8px; padding:0 .06em; transition:color .18s, background .18s; }
-  /* окно 2-3 слов: соседи мягко, текущее — ярко (зелёным, как на ТВ-референсе) */
-  .w.warm { color:var(--accent); }
-  .w.hot { color:#fff; background:var(--hot); }
+  .w { border-radius:8px; padding:.02em .12em; transition:color .2s, background .2s; }
+  /* окно 2-3 слов: соседи мягко подсвечены, текущее — ярко (зелёным, ТВ-референс) */
+  .w.warm { color:var(--hl-fg); background:color-mix(in srgb, var(--hot) 22%, transparent); }
+  .w.hot { color:#fff; background:var(--hot); box-shadow:0 1px 8px rgba(46,139,69,.35); }
   #badge { position:fixed; z-index:30; bottom:14px; inset-inline-start:14px;
     display:flex; align-items:center; gap:8px; direction:rtl; background:var(--card);
     border:1px solid var(--line); border-radius:999px; padding:6px 14px;
