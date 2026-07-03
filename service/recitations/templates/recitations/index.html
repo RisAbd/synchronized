@@ -40,6 +40,13 @@
   .b-processing,.b-queued { background:color-mix(in srgb,var(--proc) 20%,transparent); color:var(--proc); }
   .b-error { background:color-mix(in srgb,var(--err) 20%,transparent); color:var(--err); }
   .del { color:var(--muted); text-decoration:none; font-size:1.2rem; padding:2px 6px; }
+  fieldset.rec-pick { border:1px solid var(--line); border-radius:10px; margin:0; padding:8px 12px 10px; }
+  fieldset.rec-pick legend { color:var(--muted); font-size:.8rem; padding:0 6px; }
+  label.rz { display:flex; align-items:baseline; gap:8px; padding:4px 0; cursor:pointer; font-size:.92rem; }
+  label.rz small { color:var(--muted); font-size:.78rem; }
+  .runs { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+  .rz-chip { font-size:.72rem; font-weight:600; padding:2px 8px; border-radius:999px;
+    background:var(--chip); color:var(--muted); white-space:nowrap; }
   .empty { color:var(--muted); text-align:center; padding:34px; }
   footer { color:var(--muted); font-size:.8rem; text-align:center; margin-top:36px; }
 </style>
@@ -57,6 +64,16 @@
       <input name="title" placeholder="Название (необязательно)">
       <input name="reciter" placeholder="Чтец (необязательно)">
     </div>
+    <fieldset class="rec-pick">
+      <legend>Распознаватели (можно несколько — сравнить точность)</legend>
+      {% for rz in recognizers %}
+      <label class="rz">
+        <input type="checkbox" name="recognizers" value="{{ rz.key }}"
+          {% if rz.key in default_recognizers %}checked{% endif %}>
+        <span>{{ rz.label }}</span><small>{{ rz.note }}</small>
+      </label>
+      {% endfor %}
+    </fieldset>
     <button type="submit">Добавить</button>
   </form>
 
@@ -69,6 +86,13 @@
         <span class="body">
           <span class="ct">{{ r.title|default:r.source_url }}</span>
           <span class="meta">{{ r.reciter }}{% if r.reciter and r.surahs_label %} · {% endif %}{{ r.surahs_label }}</span>
+          <span class="runs">
+            {% for run in r.runs.all %}
+              {% if run.status == 'ready' %}<span class="rz-chip">{{ run.label }} · {{ run.metrics.wt|default:0 }} сл{% if run.metrics.coverage %} · {{ run.metrics.coverage }}{% endif %}</span>
+              {% elif run.status == 'error' %}<span class="rz-chip" title="{{ run.error }}">{{ run.label }} · ошибка</span>
+              {% else %}<span class="rz-chip">{{ run.label }} · {{ run.get_status_display }}…</span>{% endif %}
+            {% endfor %}
+          </span>
         </span>
         <span class="badge b-ready">готово</span>
       </a>

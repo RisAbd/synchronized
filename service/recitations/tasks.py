@@ -1,7 +1,10 @@
-"""Фоновая обработка записи: Celery-задача + диспетчер.
+"""Фоновая обработка записи: Celery-задачи + диспетчер.
 
 В docker-compose работает через Celery+Redis. В dev без брокера — запускаем в потоке,
 чтобы прототип был полезен сразу, без поднятия очереди.
+
+Модель обработки: ingest аудио — ОДИН раз на запись, затем по прогону AsrRun на каждый
+выбранный распознаватель (для сравнения точности). Статус записи агрегируется из прогонов.
 """
 from __future__ import annotations
 
@@ -11,9 +14,39 @@ import traceback
 from django.conf import settings
 
 
+def _aggregate(rec) -> None:
+    """Свести статус записи из статусов её прогонов."""
+    from .models import Status
+    statuses = [r.status for r in rec.runs.all()]
+    if not statuses:
+        return
+    if any(s == Status.READY for s in statuses):
+        rec.status = Status.READY
+    elif all(s == Status.ERROR for s in statuses):
+        rec.status = Status.ERROR
+    elif any(s == Status.PROCESSING for s in statuses):
+        rec.status = Status.PROCESSING
+    else:
+        rec.status = Status.QUEUED
+    rec.stage = ""
+    rec.save(update_fields=["status", "stage", "updated_at"])
+
+
+def _run_safe(run) -> None:
+    """Прогнать один AsrRun, аккуратно ведя его статус/ошибку."""
+    from .models import Status
+    from . import pipeline
+    try:
+        pipeline.run_one(run)
+    except Exception as e:  # noqa: BLE001
+        run.status = Status.ERROR
+        run.error = _friendly_error(run.stage, e)
+        run.save(update_fields=["status", "error", "updated_at"])
+
+
 def run_pipeline(rec_id: int) -> None:
-    """Прогнать конвейер для записи, аккуратно ведя статус/ошибку."""
-    from .models import Recitation
+    """Обработать запись целиком: общий ingest + все её прогоны (queued/error)."""
+    from .models import Recitation, Status
     from . import pipeline
 
     try:
@@ -21,48 +54,84 @@ def run_pipeline(rec_id: int) -> None:
     except Recitation.DoesNotExist:
         return
 
-    rec.status = Recitation.Status.PROCESSING
+    rec.status = Status.PROCESSING
     rec.error = ""
-    rec.save(update_fields=["status", "error", "updated_at"])
+    rec.stage = "ingest"
+    rec.save(update_fields=["status", "error", "stage", "updated_at"])
+
+    # общий шаг — скачать/подготовить аудио один раз; фатальная ошибка = вся запись в error
     try:
-        pipeline.process(rec)
-        rec.status = Recitation.Status.READY
-        rec.stage = ""
-        rec.save(update_fields=["status", "stage", "updated_at"])
+        pipeline.ensure_audio(rec)
     except Exception as e:  # noqa: BLE001
-        rec.status = Recitation.Status.ERROR
-        rec.error = _friendly_error(rec, e)
+        msg = _friendly_error("ingest", e)
+        rec.status = Status.ERROR
+        rec.error = msg
         rec.save(update_fields=["status", "error", "updated_at"])
+        rec.runs.update(status=Status.ERROR, error=msg)
+        return
+
+    for run in rec.runs.filter(status__in=[Status.QUEUED, Status.ERROR]):
+        _run_safe(run)
+    _aggregate(rec)
 
 
-def _friendly_error(rec, e: Exception) -> str:
+def run_single(run_id: int) -> None:
+    """Прогнать/перегнать один распознаватель (кнопка «пересчитать/добавить распознаватель»)."""
+    from .models import AsrRun
+    try:
+        run = AsrRun.objects.select_related("recitation").get(pk=run_id)
+    except AsrRun.DoesNotExist:
+        return
+    _run_safe(run)
+    _aggregate(run.recitation)
+
+
+def _friendly_error(stage: str, e: Exception) -> str:
     """Человеческое сообщение для фронта (без сырого дампа yt-dlp/трейсбека).
     Полный трейс печатаем в лог сервера — на страницу его не тащим."""
     traceback.print_exc()
     msg = str(e)
     low = msg.lower()
-    if "yt-dlp" in low or "youtube" in low or (rec.stage or "").startswith("ingest"):
+    if "yt-dlp" in low or "youtube" in low or (stage or "").startswith("ingest"):
         return ("Не удалось скачать аудио с YouTube (анти-бот/ограничение доступа). "
                 "Попробуй другую ссылку или загрузи аудиофайл напрямую. "
                 "Обход через свежий yt-dlp/куки — в планах.")
-    return f"Ошибка обработки ({rec.stage or '?'}): {type(e).__name__}: {msg[:200]}"
+    if "google stt" in low or "gstt" in low:
+        return msg  # уже человекочитаемо (нет кэша и т.п.)
+    return f"Ошибка обработки ({stage or '?'}): {type(e).__name__}: {msg[:200]}"
 
 
-# Celery-задача (используется, когда задан брокер)
+# Celery-задачи (используются, когда задан брокер)
 try:
     from synchronized.celery import app as _celery_app
 
     @_celery_app.task(name="recitations.run_pipeline")
     def run_pipeline_task(rec_id: int):
         run_pipeline(rec_id)
+
+    @_celery_app.task(name="recitations.run_single")
+    def run_single_task(run_id: int):
+        run_single(run_id)
 except Exception:  # celery недоступен — не критично для dev
     run_pipeline_task = None
+    run_single_task = None
+
+
+def _bg(fn, arg: int) -> None:
+    threading.Thread(target=fn, args=(arg,), daemon=True).start()
 
 
 def dispatch(rec_id: int) -> None:
-    """Поставить обработку: Celery при наличии брокера, иначе фоновый поток."""
+    """Поставить обработку всей записи: Celery при наличии брокера, иначе фоновый поток."""
     if settings.CELERY_BROKER_URL and run_pipeline_task is not None:
         run_pipeline_task.delay(rec_id)
     else:
-        t = threading.Thread(target=run_pipeline, args=(rec_id,), daemon=True)
-        t.start()
+        _bg(run_pipeline, rec_id)
+
+
+def dispatch_run(run_id: int) -> None:
+    """Поставить один прогон (пересчёт/добавление распознавателя)."""
+    if settings.CELERY_BROKER_URL and run_single_task is not None:
+        run_single_task.delay(run_id)
+    else:
+        _bg(run_single, run_id)

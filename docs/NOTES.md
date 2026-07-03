@@ -112,3 +112,23 @@ export LD_LIBRARY_PATH="$HOME/.local/lib/python3.12/site-packages/nvidia/cudnn/l
 - В старом ASR транскрипция без харакатов и с ошибками — именно поэтому нужен устойчивый
   fuzzy-alignment, а не точное совпадение.
 - Смены сур в тарауих — главная нетривиальность (M4.C), под неё уже есть реальные записи.
+
+## Сервис: несколько распознавателей + хранилище по записям (2026-07)
+
+Указки владельца: (1) завести виды распознавателей (whisper/google), гонять несколько и давать
+выбор — сравнивать точность; (2) хранить сырые аутпуты рядом с аудио, раскладывать по папкам.
+
+Архитектура:
+- Модель **`AsrRun`** (FK на `Recitation`) = один прогон конвейера конкретным распознавателем
+  поверх ОБЩЕГО аудио записи. Несколько прогонов = сравнение. `metrics` (coverage, wt, tl,
+  duration, elapsed_sec) + `data` (выход build_data для плеера). `unique(recitation, recognizer)`.
+- Реестр **`recitations/recognizers.py`** — `REGISTRY`/`PRIORITY`. Добавить распознаватель =
+  запись тут + ветка в `pipeline._recognize`. Приоритет авто-выбора: google > whisper.
+- Раскладка **`media/rec/<id>/`**: `audio.mp3` + `asr/<recognizer>/{raw.json,transcript.json,sync-map.json}`.
+  `raw.json` — сырой ответ whisper/API как есть (дебаг). ingest — один раз на запись (`ensure_audio`).
+- Пайплайн: `ensure_audio` (идемпотентно) → `run_one(run)` (asr→align→build) на каждый прогон.
+  `tasks.run_pipeline` (вся запись) / `run_single` (один распознаватель, кнопка пересчёта).
+- Плеер: `?asr=<key>` выбирает прогон (иначе авто); переключатель прогонов с метриками; статус
+  записи агрегируется из прогонов. Legacy `Recitation.data` — фолбэк (миграция 0003 перенесла
+  старые записи в прогоны: rec1→google, whisper-записи→whisper).
+- ⚠️ google пока только из кэша (`gstt_key`/stem). Живой Google STT API — в бэклоге.

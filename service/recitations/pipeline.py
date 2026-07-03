@@ -1,6 +1,13 @@
 """Мост между Django-сервисом и ядром конвейера в `src/`.
 
-Гоняет: ingest → распознавание (whisper локально | Google STT из кэша) → align → данные плеера.
+Гоняет: ingest (один раз на запись) → распознавание (whisper|google) → align → данные плеера.
+Сырые ответы ASR и промежуточные выгрузки кладём по папкам записи, чтобы всё дебажилось:
+
+    media/rec/<id>/audio.mp3
+    media/rec/<id>/asr/<recognizer>/raw.json        — сырой ответ whisper/API как есть
+    media/rec/<id>/asr/<recognizer>/transcript.json — нормализованный вход align (дебаг)
+    media/rec/<id>/asr/<recognizer>/sync-map.json    — выход align (points/segments/timeline)
+
 Ядро (`src/`) остаётся тонким и импортируемым; здесь только оркестрация под сервис.
 """
 from __future__ import annotations
@@ -9,6 +16,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -17,6 +25,16 @@ from django.conf import settings
 # подключаем ядро пайплайна
 if str(settings.PIPELINE_SRC) not in sys.path:
     sys.path.insert(0, str(settings.PIPELINE_SRC))
+
+
+# --- пути хранилища записи --------------------------------------------------
+
+def rec_dir(rec_id: int) -> Path:
+    return Path(settings.REC_DATA_DIR) / str(rec_id)
+
+
+def run_dir(rec_id: int, recognizer: str) -> Path:
+    return rec_dir(rec_id) / "asr" / recognizer
 
 
 def _ensure_cudnn_path():
@@ -38,69 +56,118 @@ def _quran():
     return Quran.load()
 
 
-def _recognize(audio_path: Path, recognizer: str) -> dict:
-    """Вернуть транскрипт {words:[{word,start,end}]}. Бэкенды: whisper | google(кэш)."""
+# --- шаги конвейера ---------------------------------------------------------
+
+def ensure_audio(rec) -> Path:
+    """Получить аудио записи ОДИН раз и положить в media/rec/<id>/audio.<ext>.
+    Идемпотентно: если файл уже есть — просто возвращаем путь (в т.ч. legacy web/audio)."""
+    d = rec_dir(rec.id)
+    d.mkdir(parents=True, exist_ok=True)
+
+    if rec.audio_filename:
+        p = d / rec.audio_filename
+        if p.is_file():
+            return p
+        legacy = Path(settings.AUDIO_DIR) / rec.audio_filename  # демо-записи
+        if legacy.is_file():
+            return legacy
+
+    import ingest
+    src = Path(ingest.fetch(rec.source_url, settings.WORK_DIR))
+    audio_name = f"audio{src.suffix or '.mp3'}"
+    dst = d / audio_name
+    if src.resolve() != dst.resolve():
+        shutil.copyfile(src, dst)
+    rec.audio_filename = audio_name
+    rec.save(update_fields=["audio_filename", "updated_at"])
+    return dst
+
+
+def _recognize(audio_path: Path, recognizer: str, rec, out: Path):
+    """Распознать аудио выбранным бэкендом, СОХРАНИТЬ сырой ответ рядом (raw.json),
+    вернуть нормализованные слова для align. Новый распознаватель = ветка здесь + запись
+    в recognizers.REGISTRY."""
+    import align as align_mod
+    out.mkdir(parents=True, exist_ok=True)
+    raw_path = out / "raw.json"
+    tr_path = out / "transcript.json"
+
     if recognizer == "google":
-        # кэш ответов Google STT из старого проекта; ключ НЕ используется (только кэш).
-        stem = audio_path.stem
-        cache = Path(settings.GSTT_CACHE_DIR) / stem / "gstt_response.json"
+        # кэш ответов Google STT (ключ = gstt_key записи или stem аудио). Ключ НЕ используем —
+        # только кэш. Живой Google STT API для новых записей — отдельная задача (см. BACKLOG).
+        key = rec.gstt_key or audio_path.stem
+        cache = Path(settings.GSTT_CACHE_DIR) / key / "gstt_response.json"
         if not cache.is_file():
-            raise FileNotFoundError(f"нет кэша Google STT: {cache}")
-        return {"_gstt_path": str(cache)}  # align.load_transcript прочитает формат сам
-    # whisper (по умолчанию)
-    _ensure_cudnn_path()
-    import asr
-    return asr.transcribe(str(audio_path), language="ar")
+            raise FileNotFoundError(
+                f"нет кэша Google STT для '{key}' ({cache}). "
+                f"Живой Google STT API пока не подключён — сравнить можно там, где есть кэш.")
+        raw = json.loads(cache.read_text())
+        raw_path.write_text(json.dumps(raw, ensure_ascii=False))
+        words = align_mod.load_transcript(cache)
+    elif recognizer == "whisper":
+        _ensure_cudnn_path()
+        import asr
+        raw = asr.transcribe(str(audio_path), language="ar")
+        raw_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2))
+        words = align_mod.load_transcript(raw_path)
+    else:
+        raise ValueError(f"неизвестный распознаватель: {recognizer!r}")
+
+    # нормализованный вход align — для дебага (что реально скормили аллайнеру)
+    tr_path.write_text(json.dumps(
+        [{"word": w.word, "start": w.start, "end": w.end, "norm": w.norm} for w in words],
+        ensure_ascii=False, indent=2))
+    return words
 
 
-def process(rec, on_stage=None) -> None:
-    """Полный конвейер для записи Recitation. Мутирует и сохраняет объект."""
+def run_one(run, on_stage=None) -> None:
+    """Прогнать конвейер одним распознавателем для прогона AsrRun. Мутирует/сохраняет run.
+    Аудио должно быть уже получено (ensure_audio). Бросает исключение при ошибке —
+    статус/ошибку ведёт вызывающий (tasks)."""
+    from .models import AsrRun
+
+    rec = run.recitation
+
     def stage(name):
-        rec.stage = name
-        rec.save(update_fields=["stage", "updated_at"])
+        run.stage = name
+        run.save(update_fields=["stage", "updated_at"])
         if on_stage:
             on_stage(name)
 
-    import ingest
     import align as align_mod
     from player import build_data
 
-    work = Path(settings.WORK_DIR)
-
-    # 1) ingest — получаем аудио
-    stage("ingest")
-    audio = ingest.fetch(rec.source_url, work)
-    audio = Path(audio)
-
-    # аудио для отдачи плееру кладём в AUDIO_DIR под стабильным именем
-    audio_name = f"rec{rec.id}{audio.suffix}"
-    dst = Path(settings.AUDIO_DIR) / audio_name
-    if audio.resolve() != dst.resolve():
-        shutil.copyfile(audio, dst)
-    rec.audio_filename = audio_name
-    rec.save(update_fields=["audio_filename", "updated_at"])
-
-    # 2) распознавание
-    stage("asr")
-    tr = _recognize(dst, settings.RECOGNIZER)
-    if "_gstt_path" in tr:
-        words = align_mod.load_transcript(tr["_gstt_path"])
-    else:
-        tr_path = work / f"rec{rec.id}.transcript.json"
-        tr_path.write_text(json.dumps(tr, ensure_ascii=False))
-        words = align_mod.load_transcript(tr_path)
-
-    # 3) align → sync-map
-    stage("align")
     q = _quran()
-    sync_map = align_mod.align(words, q)
+    run.status = AsrRun.Status.PROCESSING
+    run.error = ""
+    run.save(update_fields=["status", "error", "updated_at"])
+    t0 = time.monotonic()
 
-    # 4) данные плеера
+    audio = ensure_audio(rec)
+
+    stage("asr")
+    out = run_dir(rec.id, run.recognizer)
+    words = _recognize(audio, run.recognizer, rec, out)
+
+    stage("align")
+    sync_map = align_mod.align(words, q)
+    (out / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
+
     stage("build")
-    data = build_data(sync_map, q, audio_name)
-    dur = data["timeline"][-1]["t"] if data["timeline"] else 0
+    data = build_data(sync_map, q, rec.audio_filename)
+    dur = data["timeline"][-1]["t"] if data.get("timeline") else 0
     data["duration"] = round(dur)
-    rec.data = data
-    if not rec.title_ar:
-        rec.title_ar = data["sections"][0]["title"] if data.get("sections") else ""
-    rec.save(update_fields=["data", "title_ar", "updated_at"])
+
+    wt = data.get("word_timeline") or []
+    tl = data.get("timeline") or []
+    run.data = data
+    run.metrics = {**sync_map.get("meta", {}),
+                   "wt": len(wt), "tl": len(tl), "duration": round(dur),
+                   "elapsed_sec": round(time.monotonic() - t0, 1)}
+    run.status = AsrRun.Status.READY
+    run.stage = ""
+    run.save(update_fields=["data", "metrics", "status", "stage", "updated_at"])
+
+    if not rec.title_ar and data.get("sections"):
+        rec.title_ar = data["sections"][0]["title"]
+        rec.save(update_fields=["title_ar", "updated_at"])

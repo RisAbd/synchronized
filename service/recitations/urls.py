@@ -5,6 +5,7 @@ from . import views
 urlpatterns = [
     path("", views.index, name="index"),
     path("add", views.add, name="add"),
+    path("r/<int:pk>/run", views.run, name="run"),
     path("r/<int:pk>/delete", views.delete, name="delete"),
     path("r/<int:pk>/", views.player, name="player"),
     path("r/<int:pk>/data.json", views.data_json, name="data_json"),

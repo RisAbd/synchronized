@@ -14,9 +14,17 @@ load_dotenv(BASE_DIR / ".env")
 
 # --- пути к ядру пайплайна и данным (переиспользуем существующую структуру репо) ---
 PIPELINE_SRC = REPO_ROOT / "src"       # quran/ingest/asr/align/player
-AUDIO_DIR = REPO_ROOT / "web" / "audio"  # готовое аудио для отдачи плееру
-WORK_DIR = REPO_ROOT / "work"            # промежуточные выгрузки конвейера
-for _d in (AUDIO_DIR, WORK_DIR):
+AUDIO_DIR = REPO_ROOT / "web" / "audio"  # legacy: аудио демо-записей (фолбэк отдачи)
+WORK_DIR = REPO_ROOT / "work"            # временные выгрузки (ingest и т.п.)
+# Хранилище по записям: media/rec/<id>/ — аудио + сырые ответы ASR по папкам распознавателей.
+# Раскладка (чтобы всё лежало нормально и дебажилось):
+#   media/rec/<id>/audio.mp3
+#   media/rec/<id>/asr/<recognizer>/raw.json         — сырой ответ whisper/API как есть
+#   media/rec/<id>/asr/<recognizer>/transcript.json  — нормализованный вход для align
+#   media/rec/<id>/asr/<recognizer>/sync-map.json     — выход align (points/segments/timeline)
+MEDIA_ROOT = Path(os.environ.get("SYNC_MEDIA_ROOT", str(REPO_ROOT / "media")))
+REC_DATA_DIR = MEDIA_ROOT / "rec"
+for _d in (AUDIO_DIR, WORK_DIR, REC_DATA_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # --- базовое ---
@@ -97,9 +105,13 @@ CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", CELERY_BROKER_URL or "cache+memory://")
 CELERY_TASK_ALWAYS_EAGER = not CELERY_BROKER_URL and os.environ.get("CELERY_EAGER", "0") == "1"
 
-# --- распознаватель речи: whisper (локально) | google (кэш/API) ---
+# --- распознаватели речи: whisper (локально) | google (кэш/API) ---
 # ⚠️ ключ Google НЕ хранить в репо — только путь через GOOGLE_APPLICATION_CREDENTIALS.
-RECOGNIZER = os.environ.get("SYNC_RECOGNIZER", "whisper")
+RECOGNIZER = os.environ.get("SYNC_RECOGNIZER", "whisper")  # legacy-дефолт (одиночный)
+# По умолчанию гоняем несколько распознавателей, чтобы сравнивать точность (указка владельца).
+# Порядок = приоритет для авто-выбора активного прогона в плеере.
+DEFAULT_RECOGNIZERS = [r.strip() for r in os.environ.get(
+    "SYNC_RECOGNIZERS", "whisper").split(",") if r.strip()]
 GSTT_CACHE_DIR = os.environ.get(
     "GSTT_CACHE_DIR",
     str(REPO_ROOT.parent / "speech-to-text-python" / "gcloud-speech-data"))

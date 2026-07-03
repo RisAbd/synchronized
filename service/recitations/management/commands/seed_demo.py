@@ -5,7 +5,7 @@ from pathlib import Path
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
-from recitations.models import Recitation
+from recitations.models import AsrRun, Recitation
 
 
 class Command(BaseCommand):
@@ -25,14 +25,21 @@ class Command(BaseCommand):
         if Recitation.objects.filter(title=title).exists():
             self.stdout.write("демо уже есть — пропускаю")
             return
-        Recitation.objects.create(
+        rec = Recitation.objects.create(
             source_url="local:aswailis-isra",
             source_type="file",
             title=title,
             title_ar=data.get("title_ar", "سورة الإسراء"),
             reciter=data.get("reciter", "الشيخ يونس اسويلص"),
+            gstt_key="aswailis_isra",
             status=Recitation.Status.READY,
             audio_filename=audio_name,
             data=data,
+        )
+        wt = data.get("word_timeline") or []
+        tl = data.get("timeline") or []
+        AsrRun.objects.create(
+            recitation=rec, recognizer="google", status=AsrRun.Status.READY, data=data,
+            metrics={"wt": len(wt), "tl": len(tl), "duration": data.get("duration", 0), "legacy": True},
         )
         self.stdout.write(self.style.SUCCESS("демо-запись создана"))
