@@ -1,0 +1,13 @@
+# Django-сервис synchronized (M7)
+Django>=5,<7
+gunicorn
+whitenoise
+python-dotenv
+psycopg2-binary
+celery
+redis
+
+# конвейер (ядро src/) — распознавание/скачивание
+requests
+yt-dlp
+faster-whisper        # ASR; в docker работает на CPU (ctranslate2), на хосте — GPU

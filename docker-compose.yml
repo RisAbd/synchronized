@@ -1,0 +1,65 @@
+# Стандартный стек synchronized: web (Django/gunicorn) + Postgres + Redis + Celery-worker.
+# Запуск:  docker compose up --build
+# Веб: http://localhost:8000
+#
+# ⚠️ ASR: в контейнере faster-whisper работает на CPU (медленно). Для GPU-распознавания
+# гоняй конвейер на хосте (см. README) — ключевой ML тяжело прокидывать в docker с GPU.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: synchronized
+      POSTGRES_USER: synchronized
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-synchronized}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synchronized"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+
+  web:
+    build:
+      context: .
+      dockerfile: service/Dockerfile
+    environment: &appenv
+      DJANGO_DEBUG: "0"
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-prod}
+      DJANGO_ALLOWED_HOSTS: "*"
+      POSTGRES_DB: synchronized
+      POSTGRES_USER: synchronized
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-synchronized}
+      POSTGRES_HOST: db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      SYNC_RECOGNIZER: ${SYNC_RECOGNIZER:-whisper}
+    volumes:
+      - media:/app/web/audio      # готовое аудио плеера
+      - work:/app/work            # промежуточные выгрузки
+    ports:
+      - "8000:8000"
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_started}
+
+  worker:
+    build:
+      context: .
+      dockerfile: service/Dockerfile
+    environment: *appenv
+    command: celery -A synchronized worker -l info --concurrency 1
+    volumes:
+      - media:/app/web/audio
+      - work:/app/work
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_started}
+
+volumes:
+  pgdata:
+  media:
+  work:

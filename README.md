@@ -27,6 +27,7 @@
 synchronized/
 ├── src/     — код: quran, ingest, asr, align, player, run, build_web, server
 ├── docs/    — TZ.md (техзадание), NOTES.md (заметки/решения)
+├── service/ — Django-сервис (M7): библиотека, add-by-link, фон, плеер; docker-compose
 ├── data/    — quran.db (канонический текст)
 ├── media/   — голосовые-постановки задач (.ogg) + их расшифровки
 ├── web/     — веб-фронт (лендинг + плеер); web/audio, web/data — генерятся
@@ -35,6 +36,25 @@ synchronized/
 ```
 
 Пути в коде — относительно расположения файла (`src/`), так что скрипты работают из любой директории.
+
+## Сервис (Django)
+
+Веб-сервис, куда кидаешь ссылку → фоновая обработка (ingest→asr→align) → плеер с
+пословной подсветкой и авто-прокруткой. Список записей со статусами.
+
+```bash
+# dev (SQLite, обработка в потоке — без Redis):
+cd service
+python3 manage.py migrate
+python3 manage.py seed_demo          # демо-запись Аль-Исра
+python3 manage.py runserver 0.0.0.0:8000
+# ASR на GPU: выставь LD_LIBRARY_PATH на cuDNN/cuBLAS (см. src/asr.py); CPU: SYNC_ASR_DEVICE=cpu
+
+# стандартный стек (web + Postgres + Redis + Celery-worker):
+docker compose up --build            # http://localhost:8000
+```
+
+> Тяжёлый ASR (GPU) удобнее гонять на хосте; в docker faster-whisper работает на CPU (медленно).
 
 ## Документы
 

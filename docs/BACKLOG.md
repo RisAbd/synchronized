@@ -49,9 +49,11 @@ Whisper на арабском слабоват; Google STT точнее. Кэш 
 важнее **быстро поднять рабочий, уже полезный прототип**. Глубокую привязку **не шелвим**, делаем
 ПОСЛЕ каркаса.
 
-1. 🟢 **Django-каркас сервиса (M7).** СДЕЛАНО: `service/` — модель Recitation+статусы,
-   add-by-link, список, плеер, data.json, аудио с Range, статус; фон через поток/Celery;
-   seed_demo. Живёт под gunicorn :8000 + ngrok. Осталось: docker-compose/Dockerfile (следом).
+1. 🟢 **Django-каркас сервиса (M7) + docker-compose.** СДЕЛАНО: `service/` — модель
+   Recitation+статусы, add-by-link, список, плеер, data.json, аудио с Range, статус; фон
+   через поток/Celery; seed_demo. Живёт под gunicorn :8000 + ngrok. docker-compose
+   (web+Postgres+Redis+worker) + Dockerfile готовы (`docker compose up --build`); ASR в docker
+   на CPU (GPU — на хосте). Осталось проверить сквозной add-by-link через whisper на хосте.
 2. 🔴 **Пословная подсветка на ТЕКУЩЕЙ распознавалке (пока БЕЗ forced alignment).** Взять `points`
    из `align.py` (t, surah, ayah, word_index) → `word_timeline`; плеер рендерит токены span'ами и
    подсвечивает **окно из 2-3 слов** вокруг текущего (владелец: захват 2-3 слов рядом смазывает

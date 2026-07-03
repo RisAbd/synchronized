@@ -18,15 +18,30 @@ import sys
 from pathlib import Path
 
 
-def transcribe(audio: str | Path, language: str = "ar", model_size: str = "large-v3") -> dict:
+def _load_model(model_size: str):
+    """Грузим модель под доступное устройство. SYNC_ASR_DEVICE=cpu|cuda форсит выбор.
+    По умолчанию пробуем GPU (float16 → int8_float16), при неудаче падаем на CPU (int8)."""
+    import os
     from faster_whisper import WhisperModel
 
+    dev = os.environ.get("SYNC_ASR_DEVICE", "").lower()
+    attempts = ([("cuda", "float16"), ("cuda", "int8_float16"), ("cpu", "int8")]
+                if dev != "cpu" else [("cpu", "int8")])
+    if dev == "cuda":
+        attempts = [("cuda", "float16"), ("cuda", "int8_float16")]
+    last = None
+    for device, compute in attempts:
+        try:
+            return WhisperModel(model_size, device=device, compute_type=compute)
+        except Exception as e:  # noqa: BLE001
+            last = e
+            print(f"whisper {device}/{compute} не вышло ({e})", file=sys.stderr)
+    raise RuntimeError(f"не удалось загрузить whisper: {last}")
+
+
+def transcribe(audio: str | Path, language: str = "ar", model_size: str = "large-v3") -> dict:
     audio = str(audio)
-    try:
-        model = WhisperModel(model_size, device="cuda", compute_type="float16")
-    except Exception as e:
-        print(f"float16 failed ({e}); fallback int8_float16", file=sys.stderr)
-        model = WhisperModel(model_size, device="cuda", compute_type="int8_float16")
+    model = _load_model(model_size)
 
     segments, info = model.transcribe(
         audio,
