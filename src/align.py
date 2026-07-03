@@ -151,7 +151,7 @@ def align(transcript: list[Word], quran: Quran, index: CorpusIndex | None = None
         })
 
     # 4. сегментация: рвём при разрыве по ASR-индексу или скачке диагонали
-    segments, timeline = _segment(points, quran)
+    segments, timeline, word_timeline = _segment(points, quran)
 
     return {
         "meta": {
@@ -162,7 +162,8 @@ def align(transcript: list[Word], quran: Quran, index: CorpusIndex | None = None
         },
         "points": points,
         "segments": segments,
-        "timeline": timeline,   # чистая дорожка для плеера: смены аята во времени
+        "timeline": timeline,            # дорожка по аятам (смены аята во времени)
+        "word_timeline": word_timeline,  # дорожка по словам (время -> слово в аяте)
     }
 
 
@@ -230,11 +231,18 @@ def _segment(points: list[dict], quran: Quran):
     # это скачок назад с возвратом, они выпадают из цепочки.
     keep = _longest_forward_chain(raw)
 
-    # timeline и сводка — только по выжившим сегментам
+    # timeline (по аятам) и word_timeline (по словам) — только по выжившим сегментам
     out = []
     timeline = []
+    word_timeline = []
     for seg in keep:
         for p in seg["points"]:
+            # пословная дорожка: время -> конкретное слово в аяте (для подсветки слова)
+            if not (word_timeline and word_timeline[-1]["t"] == p["t"]
+                    and word_timeline[-1]["corpus"] == p["corpus"]):
+                word_timeline.append({"t": p["t"], "t_end": p["t_end"],
+                                      "surah": p["surah"], "ayah": p["ayah"],
+                                      "wi": p["word_index"], "corpus": p["corpus"]})
             if timeline and (timeline[-1]["surah"], timeline[-1]["ayah"]) == (p["surah"], p["ayah"]):
                 timeline[-1]["t_end"] = p["t_end"]
                 continue
@@ -253,7 +261,7 @@ def _segment(points: list[dict], quran: Quran):
             "n_points": seg["n_points"],
             "confidence": round(seg["confidence"], 2),
         })
-    return out, timeline
+    return out, timeline, word_timeline
 
 
 # --- демо/валидация ---------------------------------------------------------

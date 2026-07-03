@@ -34,12 +34,17 @@ def build_data(sync_map: dict, quran: Quran, audio_src: str) -> dict:
     timeline = sync_map["timeline"]
     spans = _ayah_spans(timeline)
 
-    # разделы текста: по каждой затронутой суре — аяты от min до max
+    # разделы текста: по каждой затронутой суре — аяты от min до max.
+    # words — разбивка отображаемого текста на слова; индекс слова совпадает с word_index
+    # канона (нормализация не меняет число/порядок слов), поэтому по нему подсвечиваем слово.
     sections = []
     for surah in sorted(spans):
         lo, hi = spans[surah]
         s = quran.surah(surah)
-        ayat = [{"ayah": a, "text": quran.verse(surah, a).text} for a in range(lo, hi + 1)]
+        ayat = []
+        for a in range(lo, hi + 1):
+            v = quran.verse(surah, a)
+            ayat.append({"ayah": a, "text": v.text, "words": v.text.split()})
         sections.append({"surah": surah, "title": s.title, "ayat": ayat})
 
     # оглавление: точки смены суры (для навигации-«chapters»)
@@ -52,6 +57,8 @@ def build_data(sync_map: dict, quran: Quran, audio_src: str) -> dict:
     return {
         "audio": audio_src,
         "timeline": [{"t": e["t"], "surah": e["surah"], "ayah": e["ayah"]} for e in timeline],
+        "word_timeline": [{"t": w["t"], "surah": w["surah"], "ayah": w["ayah"], "wi": w["wi"]}
+                          for w in sync_map.get("word_timeline", [])],
         "sections": sections,
         "chapters": chapters,
     }
