@@ -12,15 +12,15 @@
     :root { --bg:#100f0b; --fg:#efe8d6; --muted:#7c745f; --dim:#3f3a2e; --line:rgba(200,190,160,.14);
       --hl-fg:#fff3c4; --accent:#e4bf4a; --hot:#5ed07f; --card:#191710; --chip:#211e15; } }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+  html,body { margin:0; background:var(--bg); color:var(--fg);
     font-family:"Amiri","Scheherazade New","Noto Naskh Arabic","Times New Roman",serif; }
-  /* колоночная раскладка: шапка → (видео) → прокручиваемый текст */
-  /* фиксируем к вьюпорту: на мобиле прячущаяся адресная строка не должна двигать/скроллить
-     страницу (иначе видео сверху уезжает вверх). Скроллится только #text внутри. */
-  body { height:100%; display:flex; flex-direction:column; overflow:hidden;
-    position:fixed; inset:0; overscroll-behavior:none; }
-  header { flex:none; z-index:20; background:var(--card); border-bottom:1px solid var(--line); }
-  .top { display:flex; align-items:center; gap:10px; padding:8px 12px; direction:ltr; }
+  /* Документ скроллится САМ (не внутренний div) → на мобиле прячется адресная строка при свайпе.
+     Шапка с видео приклеена к верху (position:sticky), поэтому не уезжает и не перекрывается
+     (непрозрачный фон + тень); текст скроллится под ней, активное слово тянем к верху под видео. */
+  body { overscroll-behavior-y:contain; overflow-x:hidden; }
+  header { position:sticky; top:0; z-index:20; background:var(--card);
+    border-bottom:1px solid var(--line); box-shadow:0 3px 14px rgba(0,0,0,.14); }
+  .top { display:flex; align-items:center; gap:10px; padding:6px 12px; direction:ltr; }
   .back { text-decoration:none; color:var(--muted); font:600 24px system-ui; padding:0 6px; border-radius:8px; }
   .back:active { background:var(--chip); }
   .title { flex:1; min-width:0; }
@@ -28,17 +28,17 @@
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .title span { font:11px system-ui; color:var(--muted); }
   audio { display:block; width:100%; height:38px; padding:0 8px 8px; }
-  /* окно источника-видео (YouTube): фиксированные ~38% высоты и на мобиле, и на десктопе */
-  #video { flex:none; height:38vh; height:38dvh; background:#000; display:flex; justify-content:center;
+  /* окно источника-видео (YouTube): компактнее (~30% высоты) — тексту нужно больше места */
+  #video { flex:none; height:30vh; height:30dvh; background:#000; display:flex; justify-content:center;
     align-items:center; border-bottom:1px solid var(--line); }
-  #ytwrap { height:100%; width:min(100%, calc(38vh * 16 / 9)); }
+  #ytwrap { height:100%; width:min(100%, calc(30vh * 16 / 9)); }
   #ytwrap iframe { width:100%; height:100%; border:0; display:block; }
-  .chips { display:flex; gap:8px; overflow-x:auto; padding:0 12px 8px; direction:rtl;
+  .chips { display:flex; gap:8px; overflow-x:auto; padding:0 12px 6px; direction:rtl;
     scrollbar-width:none; } .chips::-webkit-scrollbar{display:none}
   .chip { flex:none; background:var(--chip); border:none; color:var(--fg); cursor:pointer;
     font:600 15px "Amiri",serif; padding:6px 14px; border-radius:999px; white-space:nowrap; }
   .chip.on { background:var(--accent); color:#fff; }
-  .asrbar { display:flex; align-items:center; gap:8px; overflow-x:auto; padding:0 12px 8px;
+  .asrbar { display:flex; align-items:center; gap:8px; overflow-x:auto; padding:0 12px 6px;
     direction:ltr; scrollbar-width:none; } .asrbar::-webkit-scrollbar{display:none}
   .asrbar .lbl { font:600 11px system-ui; color:var(--muted); flex:none; }
   .asr { flex:none; text-decoration:none; background:var(--chip); color:var(--fg);
@@ -47,22 +47,25 @@
   .asr.on { background:var(--accent); color:#fff; }
   .asr.err { color:var(--err,#c0492f); }
   .asr small { font-weight:400; opacity:.8; margin-inline-start:5px; }
-  /* текст занимает всё оставшееся место под шапкой/видео и прокручивается */
-  #text { flex:1; min-height:0; position:relative; overflow-y:auto; -webkit-overflow-scrolling:touch;
-    padding:26vh 22px 34vh; padding:26dvh 22px 34dvh; scroll-behavior:smooth; width:100%; max-width:860px; margin:0 auto; }
+  /* текст в общем потоке — скроллится ВЕСЬ документ (см. body). Большой нижний паддинг, чтобы
+     последний аят мог подняться к верху под видео. */
+  #text { position:relative; padding:5vh 20px 62vh; padding:5dvh 20px 62dvh;
+    width:100%; max-width:860px; margin:0 auto; }
   .stitle { text-align:center; color:var(--accent); font:600 clamp(1rem,4vw,1.35rem) system-ui;
     letter-spacing:.02em; margin:22px 0 10px; opacity:.7; }
   .ayah { display:block; text-align:center; color:var(--dim);
-    font-size:clamp(1.15rem,4.6vw,1.7rem); line-height:1.9; margin:14px 0; padding:4px 6px;
+    font-size:clamp(1.4rem,5.6vw,2.05rem); line-height:1.95; margin:16px 0; padding:4px 6px;
     transition:color .35s, font-size .35s; }
   .ayah .num { font:600 .62em system-ui; color:var(--muted); margin:0 .4em; opacity:.8; }
   .ayah.near { color:var(--muted); }
-  .ayah.active { color:var(--hl-fg); font-size:clamp(1.9rem,7.6vw,3rem); line-height:1.7; }
+  .ayah.active { color:var(--hl-fg); font-size:clamp(2.35rem,9.2vw,3.7rem); line-height:1.72; }
   .ayah.active .num { color:var(--accent); }
-  .w { border-radius:8px; padding:.02em .12em; transition:color .2s, background .2s; }
-  /* окно 2-3 слов: соседи мягко подсвечены, текущее — ярко (зелёным, ТВ-референс) */
-  .w.warm { color:var(--hl-fg); background:color-mix(in srgb, var(--hot) 22%, transparent); }
-  .w.hot { color:#fff; background:var(--hot); box-shadow:0 1px 8px rgba(46,139,69,.35); }
+  .w { border-radius:8px; padding:.02em .14em; transition:color .3s, background .3s; }
+  /* окно подсветки: интенсивность --wi (0..1) задаётся из JS по дистанции до текущего слова →
+     плавный градиент от центра к краям (маскирует неточность привязки слова к таймстемпу) */
+  .w.lit { color:var(--hl-fg);
+    background:color-mix(in srgb, var(--hot) calc(var(--wi,0) * 62%), transparent); }
+  .w.hot { color:#fff; background:var(--hot); box-shadow:0 1px 10px rgba(46,139,69,.42); }
   #badge { position:fixed; z-index:30; bottom:14px; inset-inline-start:14px;
     display:flex; align-items:center; gap:8px; direction:rtl; background:var(--card);
     border:1px solid var(--line); border-radius:999px; padding:6px 14px;
@@ -71,7 +74,7 @@
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   #badge .a { font:700 .82rem system-ui; color:var(--accent); direction:ltr; }
   #badge.idle { opacity:.55; }
-  #loading,#err { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  #loading,#err { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
     text-align:center; color:var(--muted); font:15px system-ui; padding:20px; }
 </style>
 </head>
@@ -119,6 +122,8 @@ const badgeAyah = document.getElementById('badgeAyah');
 let TL = [], WT = [], ayahEl = {}, wordEl = {}, chapEls = [], surahTitle = {};
 let activeAyah = null, activeAyahEl = null, nearEls = [], hotEls = [];
 let userScrolling = false, scrollTimer = null, activeChap = -1;
+let scrollTargetEl = null;                       // элемент, который плавно держим под видео
+const headerEl = document.querySelector('header');
 
 // --- источник времени: YouTube-видео (эмбед, П1) либо <audio> ---
 let ytPlayer = null, ytReady = false, useVideo = false, rafOn = false;
@@ -191,14 +196,24 @@ async function init(){
     chipsEl.appendChild(b); chapEls.push({t:c.t, el:b});
   });
 
-  textEl.addEventListener('wheel', pauseScroll, {passive:true});
-  textEl.addEventListener('touchmove', pauseScroll, {passive:true});
+  window.addEventListener('wheel', pauseScroll, {passive:true});
+  window.addEventListener('touchmove', pauseScroll, {passive:true});
   if(!useVideo) startTick();   // видео-режим стартует тик по onReady плеера
 }
 
 // единый цикл подсветки: тянет время из активного источника ~каждый кадр
 function startTick(){ if(rafOn) return; rafOn = true; tick(); }
-function tick(){ update(currentTime()); requestAnimationFrame(tick); }
+function tick(){ update(currentTime()); glide(); requestAnimationFrame(tick); }
+
+// плавный «глайд»: каждый кадр экспоненциально подтягиваем активный элемент к точке под видео
+// (вместо рывков scrollIntoView). Целимся к верху → чтение идёт под видео, а не у низа за бейджем.
+function glide(){
+  if(userScrolling || !scrollTargetEl) return;
+  const desired = headerEl.offsetHeight + window.innerHeight * 0.06;
+  const delta = scrollTargetEl.getBoundingClientRect().top - desired;
+  if(Math.abs(delta) < 0.5) return;
+  window.scrollBy(0, delta * 0.12);
+}
 
 function bsearch(arr, t){ let lo=0,hi=arr.length-1,r=-1;
   while(lo<=hi){const m=(lo+hi)>>1; if(arr[m].t<=t){r=m;lo=m+1;}else hi=m-1;} return r; }
@@ -229,14 +244,18 @@ function update(t){
     badgeSurah.textContent='سورة '+(surahTitle[e.surah]||e.surah);
     badgeAyah.textContent=e.surah+':'+e.ayah;
     setActiveAyah(key);
-    // окно слов: текущее (hot) + соседи (warm) — смазываем неточность границ
-    hotEls.forEach(x=>x.classList.remove('hot','warm')); hotEls=[];
-    for(const dwi of [-1,0,1]){
+    // окно подсветки ±R слов: центр (hot) + соседи с затухающей интенсивностью (градиент) —
+    // шире и мягче → маскирует неточность привязки слова к таймстемпу
+    hotEls.forEach(x=>{ x.classList.remove('hot','lit'); x.style.removeProperty('--wi'); }); hotEls=[];
+    const R=3;
+    for(let dwi=-R; dwi<=R; dwi++){
       const el=wordEl[e.surah+':'+e.ayah+':'+(e.wi+dwi)];
-      if(el){ el.classList.add(dwi===0?'hot':'warm'); hotEls.push(el); }
+      if(!el) continue;
+      if(dwi===0){ el.classList.add('hot'); }
+      else { el.style.setProperty('--wi', (1 - Math.abs(dwi)/(R+1)).toFixed(2)); el.classList.add('lit'); }
+      hotEls.push(el);
     }
-    const hot=wordEl[e.surah+':'+e.ayah+':'+e.wi];
-    if(hot && !userScrolling) hot.scrollIntoView({behavior:'smooth', block:'center'});
+    scrollTargetEl = wordEl[e.surah+':'+e.ayah+':'+e.wi] || scrollTargetEl;
     return;
   }
   // --- запасной аятный режим (если нет word_timeline) ---
@@ -245,10 +264,8 @@ function update(t){
   badge.classList.remove('idle');
   badgeSurah.textContent='سورة '+(surahTitle[e.surah]||e.surah);
   badgeAyah.textContent=e.surah+':'+e.ayah;
-  const changed = key!==activeAyah;
   setActiveAyah(key);
-  if(changed && activeAyahEl && !userScrolling)
-    activeAyahEl.scrollIntoView({behavior:'smooth', block:'center'});
+  scrollTargetEl = activeAyahEl || scrollTargetEl;
 }
 
 function pauseScroll(){ userScrolling=true; badge.classList.add('idle'); clearTimeout(scrollTimer);
