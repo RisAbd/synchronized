@@ -33,8 +33,9 @@
     padding:14px 16px; margin-bottom:12px; }
   .card .ar { font-family:"Amiri","Scheherazade New",serif; font-size:1.5rem; direction:rtl; }
   .card .body { flex:1; min-width:0; }
-  .card .ct { font-weight:600; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .card .meta { color:var(--muted); font-size:.86rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* display:block обязателен — text-overflow:ellipsis не работает на инлайновом span → ссылка уезжала за блок */
+  .card .ct { display:block; font-weight:600; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card .meta { display:block; color:var(--muted); font-size:.86rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .badge { font-size:.76rem; font-weight:700; padding:3px 9px; border-radius:999px; white-space:nowrap; }
   .b-ready { background:color-mix(in srgb,var(--ok) 20%,transparent); color:var(--ok); }
   .b-processing,.b-queued { background:color-mix(in srgb,var(--proc) 20%,transparent); color:var(--proc); }
@@ -49,6 +50,25 @@
     background:var(--chip); color:var(--muted); white-space:nowrap; }
   .empty { color:var(--muted); text-align:center; padding:34px; }
   footer { color:var(--muted); font-size:.8rem; text-align:center; margin-top:36px; }
+  /* «живой» индикатор обработки — крутящееся кольцо рядом со статусом */
+  .spin { display:inline-block; width:12px; height:12px; margin-right:7px; vertical-align:-1px;
+    border:2px solid var(--line); border-top-color:var(--proc); border-radius:50%;
+    animation:spin .7s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  /* панель действий над списком: «добавить» — компактной кнопкой, список идёт первым */
+  .actions { display:flex; justify-content:flex-end; margin-bottom:16px; }
+  .add-btn { display:inline-flex; align-items:center; gap:8px; }
+  /* модалка добавления записи */
+  .modal { position:fixed; inset:0; z-index:50; display:none; align-items:flex-start;
+    justify-content:center; background:rgba(0,0,0,.45); padding:24px 16px; overflow-y:auto; }
+  .modal.open { display:flex; }
+  .modal .sheet { background:var(--card); border:1px solid var(--line); border-radius:16px;
+    padding:18px; width:100%; max-width:520px; margin-top:4vh; }
+  .modal .mhead { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+  .modal .mhead h2 { font-size:1.15rem; margin:0; }
+  .modal .mclose { background:none; color:var(--muted); font-size:1.5rem; line-height:1;
+    padding:2px 8px; border-radius:8px; }
+  form.add { margin-bottom:0; }
 </style>
 </head>
 <body>
@@ -57,25 +77,9 @@
   <p class="lead">Оригинальный текст Корана синхронно со звучащим чтением. Вставь ссылку —
     сервис обработает и даст плеер с авто-прокруткой.</p>
 
-  <form class="add" method="post" action="{% url 'add' %}">
-    {% csrf_token %}
-    <input name="source_url" placeholder="Ссылка на YouTube или путь к аудиофайлу" required>
-    <div class="row">
-      <input name="title" placeholder="Название (необязательно)">
-      <input name="reciter" placeholder="Чтец (необязательно)">
-    </div>
-    <fieldset class="rec-pick">
-      <legend>Распознаватели (можно несколько — сравнить точность)</legend>
-      {% for rz in recognizers %}
-      <label class="rz">
-        <input type="checkbox" name="recognizers" value="{{ rz.key }}"
-          {% if rz.key in default_recognizers %}checked{% endif %}>
-        <span>{{ rz.label }}</span><small>{{ rz.note }}</small>
-      </label>
-      {% endfor %}
-    </fieldset>
-    <button type="submit">Добавить</button>
-  </form>
+  <div class="actions">
+    <button type="button" class="add-btn" id="openAdd">＋ Добавить запись</button>
+  </div>
 
   <div id="list">
   {% for r in recs %}
@@ -84,7 +88,7 @@
       <a class="card" href="{% url 'player' r.id %}">
         {% if r.title_ar %}<span class="ar">{{ r.title_ar }}</span>{% endif %}
         <span class="body">
-          <span class="ct">{{ r.title|default:r.source_url }}</span>
+          <span class="ct">{{ r.title|default:r.source_url|truncatechars:56 }}</span>
           <span class="meta">{{ r.reciter }}{% if r.reciter and r.surahs_label %} · {% endif %}{{ r.surahs_label }}</span>
           <span class="runs">
             {% for run in r.runs.all %}
@@ -99,11 +103,8 @@
       {% else %}
       <div class="card">
         <span class="body">
-          <span class="ct">{{ r.title|default:r.source_url }}</span>
-          <span class="meta status-line">
-            {% if r.status == 'error' %}{{ r.error|truncatechars:80 }}
-            {% elif r.stage %}шаг: {{ r.stage }}…{% else %}{{ r.get_status_display }}…{% endif %}
-          </span>
+          <span class="ct">{{ r.title|default:r.source_url|truncatechars:56 }}</span>
+          <span class="meta">{% if r.status != 'error' %}<span class="spin"></span>{% endif %}<span class="status-line">{% if r.status == 'error' %}{{ r.error|truncatechars:80 }}{% elif r.stage %}шаг: {{ r.stage }}…{% else %}{{ r.get_status_display }}…{% endif %}</span></span>
         </span>
         <span class="badge b-{{ r.status }}">{{ r.get_status_display }}</span>
         <form method="post" action="{% url 'delete' r.id %}" onsubmit="return confirm('Удалить?')">
@@ -113,14 +114,50 @@
       {% endif %}
     </div>
   {% empty %}
-    <div class="empty">Пока пусто. Вставь ссылку выше.</div>
+    <div class="empty">Пока пусто. Нажми «＋ Добавить запись».</div>
   {% endfor %}
   </div>
 
   <footer>прототип · обработка идёт в фоне, страница сама обновит статусы</footer>
 </div>
 
+<div class="modal" id="modal">
+  <div class="sheet">
+    <div class="mhead">
+      <h2>Новая запись</h2>
+      <button type="button" class="mclose" id="closeAdd" title="закрыть">✕</button>
+    </div>
+    <form class="add" method="post" action="{% url 'add' %}">
+      {% csrf_token %}
+      <input name="source_url" placeholder="Ссылка на YouTube или путь к аудиофайлу" required>
+      <div class="row">
+        <input name="title" placeholder="Название (необязательно)">
+        <input name="reciter" placeholder="Чтец (необязательно)">
+      </div>
+      <fieldset class="rec-pick">
+        <legend>Распознаватели (можно несколько — сравнить точность)</legend>
+        {% for rz in recognizers %}
+        <label class="rz">
+          <input type="checkbox" name="recognizers" value="{{ rz.key }}"
+            {% if rz.key in default_recognizers %}checked{% endif %}>
+          <span>{{ rz.label }}</span><small>{{ rz.note }}</small>
+        </label>
+        {% endfor %}
+      </fieldset>
+      <button type="submit">Добавить</button>
+    </form>
+  </div>
+</div>
+
 <script>
+// модалка добавления записи (список — первым, добавление — за кнопкой)
+const modal = document.getElementById('modal');
+const openAdd = document.getElementById('openAdd');
+openAdd.onclick = () => { modal.classList.add('open'); modal.querySelector('input[name=source_url]').focus(); };
+document.getElementById('closeAdd').onclick = () => modal.classList.remove('open');
+modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('open'); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') modal.classList.remove('open'); });
+
 // авто-опрос статуса для не-готовых записей; как всё готово — перезагрузка
 const pending = [...document.querySelectorAll('.card-wrap')]
   .filter(el => !['ready','error'].includes(el.dataset.status));

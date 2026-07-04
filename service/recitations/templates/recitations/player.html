@@ -37,12 +37,7 @@
     align-items:center; border-bottom:1px solid var(--line); }
   #ytwrap { height:100%; width:min(100%, calc(30vh * 16 / 9)); }
   #ytwrap iframe { width:100%; height:100%; border:0; display:block; }
-  .chips { display:flex; gap:8px; overflow-x:auto; padding:0 12px 6px; direction:rtl;
-    scrollbar-width:none; } .chips::-webkit-scrollbar{display:none}
-  .chip { flex:none; background:var(--chip); border:none; color:var(--fg); cursor:pointer;
-    font:600 15px var(--arab-font); padding:6px 14px; border-radius:999px; white-space:nowrap; }
-  .chip.on { background:var(--accent); color:#fff; }
-  /* кнопка выбора арабского шрифта (в шапке) + выпадающая панель */
+  /* кнопка настроек шрифта (в шапке) + выпадающая панель */
   .fontbtn { flex:none; background:var(--chip); border:none; color:var(--fg); cursor:pointer;
     font:600 13px system-ui; padding:7px 12px; border-radius:9px; white-space:nowrap; }
   .fontbtn:active { opacity:.7; }
@@ -96,10 +91,14 @@
     display:flex; align-items:center; gap:8px; direction:rtl; background:var(--card);
     border:1px solid var(--line); border-radius:999px; padding:6px 14px;
     box-shadow:0 4px 18px rgba(0,0,0,.18); font-family:var(--arab-font); font-size:1.05rem;
-    color:var(--fg); pointer-events:none; max-width:calc(100% - 28px);
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    color:var(--fg); cursor:pointer; max-width:calc(100% - 28px);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    -webkit-user-select:none; user-select:none; transition:background .2s; }
   #badge .a { font:700 .82rem system-ui; color:var(--accent); direction:ltr; }
-  #badge.idle { opacity:.55; }
+  #badge:active { transform:scale(.97); }
+  #badge.copied { background:var(--accent); color:#fff; }
+  #badge.copied .a { color:#fff; }
+  #badge.idle { opacity:.55; pointer-events:none; }
   #loading,#err { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
     text-align:center; color:var(--muted); font:15px system-ui; padding:20px; }
 </style>
@@ -109,13 +108,12 @@
   <div class="top">
     <a class="back" href="{% url 'index' %}" title="назад">‹</a>
     <div class="title"><b id="ttl">{{ rec.title|default:"—" }}</b><span id="sub"></span></div>
-    <button class="fontbtn" id="fontbtn" title="арабский шрифт">خط ▾</button>
+    <button class="fontbtn" id="fontbtn" title="настройки шрифта">⚙&#xFE0E; Шрифт</button>
   </div>
   {% if youtube_id %}
   <div id="video"><div id="ytwrap"><div id="yt"></div></div></div>
   {% endif %}
   <audio id="audio" controls preload="metadata"{% if youtube_id %} style="display:none"{% endif %}></audio>
-  <div class="chips" id="chips"></div>
   {% if runs|length > 1 %}
   <div class="asrbar">
     <span class="lbl">распознавание:</span>
@@ -142,10 +140,25 @@ const DATA_URL = "{% url 'data_json' rec.id %}{% if active_key %}?asr={{ active_
 const YOUTUBE_ID = "{{ youtube_id }}";
 const audio = document.getElementById('audio');
 const textEl = document.getElementById('text');
-const chipsEl = document.getElementById('chips');
 const badge = document.getElementById('badge');
 const badgeSurah = document.getElementById('badgeSurah');
 const badgeAyah = document.getElementById('badgeAyah');
+
+// клик по бейджу суры:аята → копируем ссылку «сура:аят» в буфер (краткая визуальная отдача)
+let badgeCopyTimer = null;
+badge.addEventListener('click', async () => {
+  const ref = (badgeAyah.textContent || '').trim();
+  if(!ref) return;
+  try { await navigator.clipboard.writeText(ref); }
+  catch(e){ // fallback для http/старых webview
+    const ta=document.createElement('textarea'); ta.value=ref; ta.style.position='fixed';
+    ta.style.opacity='0'; document.body.appendChild(ta); ta.select();
+    try{ document.execCommand('copy'); }catch(_){} ta.remove();
+  }
+  badge.classList.add('copied');
+  clearTimeout(badgeCopyTimer);
+  badgeCopyTimer = setTimeout(()=>badge.classList.remove('copied'), 700);
+});
 
 // --- выбор арабского шрифта (Google Fonts), сохраняется в localStorage ---
 // Naskh-начертания с хорошо читаемой харакой; Scheherazade — самый крупный/разборчивый по умолчанию.
@@ -182,9 +195,9 @@ document.addEventListener('click', e => {
     fontPanel.classList.remove('open');
 });
 
-let TL = [], WT = [], ayahEl = {}, wordEl = {}, chapEls = [], surahTitle = {};
+let TL = [], WT = [], ayahEl = {}, wordEl = {}, surahTitle = {};
 let activeAyah = null, activeAyahEl = null, nearEls = [], hotEls = [];
-let userScrolling = false, scrollTimer = null, activeChap = -1;
+let userScrolling = false, scrollTimer = null;
 let scrollTargetEl = null;                       // элемент, который плавно держим под видео
 const headerEl = document.querySelector('header');
 
@@ -199,7 +212,7 @@ function currentTime(){
   if(useVideo){ return (ytPlayer && ytPlayer.getCurrentTime) ? ytPlayer.getCurrentTime() : 0; }
   return audio.currentTime || 0;
 }
-// перемотка активного источника (чипы сур)
+// перемотка активного источника (на будущее — напр. переход к аяту)
 function seek(t){
   if(useVideo){ if(ytPlayer){ ytPlayer.seekTo(t, true); ytPlayer.playVideo(); } }
   else { audio.currentTime = t; audio.play(); }
@@ -270,12 +283,6 @@ async function init(){
       textEl.appendChild(el); ayahEl[sec.surah+':'+v.ayah]=el;
     }
   }
-  (d.chapters||[]).forEach((c)=>{
-    const b=document.createElement('button'); b.className='chip';
-    b.textContent='سورة '+c.title;
-    b.onclick=()=>seek(c.t);
-    chipsEl.appendChild(b); chapEls.push({t:c.t, el:b});
-  });
 
   window.addEventListener('wheel', pauseScroll, {passive:true});
   window.addEventListener('touchmove', pauseScroll, {passive:true});
@@ -315,11 +322,6 @@ function setActiveAyah(key){
 }
 
 function update(t){
-  // подсветка активной суры-чипа
-  let ch=-1; for(let k=0;k<chapEls.length;k++) if(chapEls[k].t<=t+0.01) ch=k;
-  if(ch!==activeChap){ if(chapEls[activeChap]) chapEls[activeChap].el.classList.remove('on');
-    if(chapEls[ch]) chapEls[ch].el.classList.add('on'); activeChap=ch; }
-
   if(WT.length){                              // --- пословный режим ---
     const i=bsearch(WT, t); if(i<0) return;
     const e=WT[i], key=e.surah+':'+e.ayah;
