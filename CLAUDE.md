@@ -11,15 +11,31 @@
 
 > Коротко: текущий фокус и свежие договорённости. Детали статусов — в `docs/BACKLOG.md`.
 
-- **Сейчас в работе:** разбор ТЗ 13:05 закрыт по 🔴-блокам (0/0b/0c). Осталось из разбора только 🟡:
-  п.6 возврат чтеца назад (П8, исследовательская) и п.7 whisper GPU в докере. Оба тяжёлые — брать по
-  готовности каркаса. Дальше — верхний невыполненный из «Next»/🔴/🟡 в `docs/BACKLOG.md`.
-- **Сделано 04.07:** (1) блокер add-by-link — `forced` больше не выбираемый распознаватель, а
-  авто-пост-шаг после ASR (тихо пропускается без deps: `falign.available()`); Google-креда в web+worker
-  (`./creds/` gitignored). (2) фронт-мелочи (0b): «⚙ Шрифт», клик по бейджу копирует сура:аят, убран
-  чаптер, ellipsis (display:block!), модалка добавления, живой спиннер. (3) метаинфо П6 (`Recitation.meta`,
-  ffprobe+oEmbed+img.youtube, превью/длительность/размер в списке) + уникальность/поиск П7
-  (`find_by_source` по id видео, `matches_query` с арабской нормализацией `_ar_norm`). Самопроверка скринами — ок.
+- **Сейчас в работе / ЖДЁТ ВЛАДЕЛЬЦА:** docker+GPU — образ и compose готовы (worker получает GPU,
+  whisper+forced ставятся в контейнер), но нужен ОДИН системный шаг под sudo: поставить
+  `nvidia-container-toolkit` на хост (репо NVIDIA не подключён, sudo с паролем — только владелец).
+  Команды — в шапке `docker-compose.yml`. После установки: `docker compose up -d --build`, проверить
+  `docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi`, затем перемолоть записи
+  ЧЕРЕЗ СЕРВИС (кнопка пересчёта/фронт), убедиться что whisper идёт на GPU в воркере. Дальше — верхний
+  невыполненный из `docs/BACKLOG.md` (п.7 whisper = «сменить модель на tarteel-base»).
+- **Сделано 04.07 (сессия 3, голос про forced+docker-GPU):** подготовлен docker с GPU как ЧАСТЬ
+  пайплайна (владелец: хватит молоть руками на хосте — сервис должен сам, на GPU). (1) `service/Dockerfile`:
+  torch CPU-колесо + ctc-forced-aligner/onnxruntime/Unidecode + nvidia-cudnn-cu12==9.1.0.70/nvidia-cublas-cu12==12.4.5.8,
+  `LD_LIBRARY_PATH` на pip-cuDNN, `HOME=/app/.cache`+`HF_HOME` для кэша моделей. (2) `docker-compose.yml`:
+  worker `deploy.resources.reservations.devices` (nvidia, all), bind-mount `./cache` (не качать модели
+  на рестарт), HOME→/app/.cache. (3) forced остаётся авто-пост-шагом (`_maybe_forced`) — теперь его deps
+  есть в контейнере, `falign.available()`==True → сам гоняется в воркере. Осталось: тулкит (см. выше).
+- **Сделано 04.07 (сессия 2, голос 08:39):** (1) whisper теперь ТОЛЬКО GPU — CPU-фолбэк выпилен
+  из `src/asr._load_model` (на арабском CPU даёт кашу, 5 слов на 20 мин). `SYNC_ASR_DEVICE=cpu` — опт-ин.
+  (2) forced выведен из «распознавания» в UI: player.html развёл «распознавание:» (google/whisper) и
+  «выравнивание:» (forced), флаг `AsrRun.is_aligner`. (3) docker web/worker от `user 1000:1000` —
+  контейнеры пишут media/work/db от UID хоста, не root. (4) rec9 перемолот (whisper-GPU+forced+google).
+  Ресёрч Tarteel → `docs/RESEARCH-tarteel-asr.md`.
+- **Сделано 04.07 (сессия 1):** add-by-link (`forced` — авто-пост-шаг, не выбор), Google-креда в
+  web+worker (`./creds/` gitignored), фронт-мелочи 0b, метаинфо П6, уникальность/поиск П7. Скрины — ок.
+- **ВАЖНО — хост-python:** перемолка на хосте (whisper-GPU/forced) — только через `/usr/bin/python3`
+  (system 3.12 с `~/.local/lib/python3.12/site-packages`), НЕ `python`/`python3` (перехватывает pyenv,
+  там нет 3.12 → exit 127). Плюс `export LD_LIBRARY_PATH=…/nvidia/cudnn/lib:…/cublas/lib` для GPU-whisper.
 - **Договорённости:** аудио-ТЗ (`.ogg` + транскрипты) складываю в `media/` (они как ТЗ, трекаются
   в git через whitelist в `.gitignore`). Разбор голосовых ТЗ раскидываю по BACKLOG/TZ/NOTES.
 - Обновлено: 2026-07-04.

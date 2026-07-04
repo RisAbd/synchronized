@@ -72,6 +72,15 @@
    CPU-дружелюбна). План: env `SYNC_WHISPER_MODEL` в `src/asr.py`, ct2-конверсия, каталог модели
    bind-mount в воркер. GPU/large-v3 — эскалация, если base не тянет длинные мелодичные читки. Для
    арабского уже активен google (не блокер), но владелец переподнял приоритет.
+   ⚠️ **UPD 04.07 (сессия 3):** docker+GPU подготовлен (Dockerfile+compose: worker с nvidia GPU,
+   whisper+forced в образе) — БЛОКЕР: нужен `nvidia-container-toolkit` на хост под sudo (только владелец,
+   команды в шапке `docker-compose.yml`). После тулкита large-v3 идёт на GPU прямо в воркере — можно
+   сравнить с tarteel-base честно, а не «на глаз».
+0. 🔴 **[БЛОКЕР — ВЛАДЕЛЕЦ] Поставить `nvidia-container-toolkit` (sudo).** Образ+compose готовы дать
+   worker'у GPU (whisper+forced в контейнере, конец хостовым костылям). Репо NVIDIA не подключён,
+   sudo с паролем → сам не могу. Команды — в шапке `docker-compose.yml`. После: `docker compose up -d --build`,
+   проверить `docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi`, затем
+   перемолоть записи ЧЕРЕЗ СЕРВИС (не руками) и убедиться, что whisper идёт на GPU.
 8. 🟡 **Tarteel-AI — ОЦЕНЕНО (ресёрч 04.07, приоритет поднят владельцем).** Полностью:
    `docs/RESEARCH-tarteel-asr.md`. Кратко: `whisper-base-ar-quran` (Apache-2.0, спец-модель под Коран) —
    прямой кандидат заменить ванильный whisper (см. п.7). Датасет `everyayah` (сегменты по аятам, много

@@ -21,7 +21,8 @@ from pathlib import Path
 def _load_model(model_size: str):
     """Грузим модель. По умолчанию — ТОЛЬКО GPU (cuda): на CPU whisper на арабском бесполезен
     (даёт кашу, напр. 5 слов на 20 мин — см. владелец 04.07), и тратить на него время нельзя.
-    В docker-воркере (CPU) whisper при этом честно падает — распознавание там ведёт google.
+    docker-воркер теперь ходит на GPU (nvidia-container-toolkit + LD_LIBRARY_PATH, см. compose),
+    так что whisper крутится прямо в сервисе. Если GPU нет — whisper падает, распознаёт google.
     SYNC_ASR_DEVICE=cpu — явный опт-ин на CPU (если кто-то реально хочет), cuda — то же, что дефолт."""
     import os
     from faster_whisper import WhisperModel

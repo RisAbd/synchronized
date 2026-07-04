@@ -21,6 +21,8 @@ gcloud-key*.json
 
 # рабочие выгрузки конвейера
 /work/
+# кэш ML-моделей (whisper→HF, MMS-onnx forced) — качается, не в репо
+/cache/
 # хранилище обработки по записям (аудио + сырые ASR-ответы) — генерится, не в репо
 /media/rec/
 *.transcript*.txt

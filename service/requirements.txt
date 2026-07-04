@@ -10,11 +10,22 @@ redis
 # конвейер (ядро src/) — распознавание/скачивание
 requests
 yt-dlp
-faster-whisper        # ASR; в docker работает на CPU (ctranslate2), на хосте — GPU
+faster-whisper        # ASR (ctranslate2); в docker-воркере теперь на GPU (см. Dockerfile + compose)
 
 # Google Speech-to-Text (основной распознаватель для арабского) — лёгкие API-клиенты, не ML.
 # Ключ через env GOOGLE_APPLICATION_CREDENTIALS (см. src/gstt.py, монтируется из ./creds/).
 google-cloud-speech
 google-cloud-storage
-# forced align (ctc-forced-aligner/torch) в docker НЕ ставим — тяжёлый ML, гоняем на хосте
-# (pipeline тихо пропускает forced без deps); onnxruntime уже тянется транзитивно.
+
+# forced align (ctc-forced-aligner, MMS-CTC через onnxruntime) — теперь ставим и в docker:
+# воркер получил GPU, весь конвейер (whisper→forced) крутится в сервисе, без хостовых костылей.
+# torch ставится отдельно CPU-колесом в Dockerfile (форсед гоняет onnxruntime, CUDA-торч не нужен).
+ctc-forced-aligner
+onnxruntime
+Unidecode             # романизация (uroman-fallback) в ctc-forced-aligner
+
+# GPU для faster-whisper в контейнере: ctranslate2 4.x ищет cuDNN 9 / cuBLAS 12 в этих pip-колёсах
+# (LD_LIBRARY_PATH на них — в Dockerfile). Сам драйвер CUDA прокидывает nvidia-container-toolkit
+# с хоста (см. docker-compose.yml, deploy.devices у worker). Версии — как на хосте (проверено).
+nvidia-cudnn-cu12==9.1.0.70
+nvidia-cublas-cu12==12.4.5.8

@@ -8,15 +8,22 @@
 #   ./service/db.sqlite3  ← боевая БД (записи + прогоны ASR с data внутри)
 #   ./media/              ← аудио записей и сырые ответы ASR (media/rec/<id>/...)
 #   ./work/               ← промежуточные выгрузки конвейера
+#   ./cache/              ← кэш моделей (whisper→HF, MMS-onnx forced) — чтобы не докачивать на рестарт
 # Код (./service, ./src) тоже примонтирован → Django на runserver с hot-reload,
 # пересобирать образ после каждой правки не нужно.
 #
-# ⚠️ ASR: whisper бесполезен на CPU (арабский) → в контейнере НЕ гоняется (падает намеренно,
-# см. src/asr._load_model). В докере распознаёт google; whisper — только на хосте (GPU).
-# forced align (torch/ctc) в докере тоже нет — гоняем на хосте (см. manage.py forced_align).
+# ⚠️ GPU: worker гоняет весь ML-конвейер (whisper + forced align) на GPU прямо в контейнере —
+# больше НЕ нужны хостовые прогоны. Требуется на ХОСТЕ nvidia-container-toolkit (systemd/sudo):
+#     curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+#     curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+#     sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+#     sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
+# Проверка:  docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+# Без тулкита worker не стартует (нет драйвера nvidia) — сначала поставь тулкит, потом up.
+# whisper по-прежнему ТОЛЬКО GPU (src/asr._load_model): без GPU распознаёт google.
 #
-# ⚠️ user: 1000:1000 — контейнеры пишут media/work/db от UID хоста (abd), а не root. Иначе
-# root-овнед файлы блокируют перемолку на хосте (forced/whisper-GPU) — было, починили 04.07.
+# ⚠️ user: 1000:1000 — контейнеры пишут media/work/db/cache от UID хоста (abd), а не root
+# (root-овнед файлы блокировали хостовые прогоны — было, починили 04.07).
 
 services:
   redis:
@@ -30,7 +37,7 @@ services:
     restart: unless-stopped
     user: "${SYNC_UID:-1000}:${SYNC_GID:-1000}"
     environment: &appenv
-      HOME: /tmp                 # писать кэши (~/.cache и т.п.) можно, HOME контейнера=/root не наш
+      HOME: /app/.cache          # кэши/модели → примонтированный ./cache (persist, пишется от 1000)
       DJANGO_DEBUG: "1"
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-insecure-key-change-me}
       DJANGO_ALLOWED_HOSTS: "*"
@@ -50,6 +57,7 @@ services:
       - ./src:/app/src            # ядро конвейера (align/asr/quran/ingest)
       - ./media:/app/media        # аудио записей + сырые ответы ASR (persist)
       - ./work:/app/work          # промежуточные выгрузки (persist)
+      - ./cache:/app/.cache       # кэш моделей whisper/MMS (persist, не качать на рестарт)
       - ./creds:/app/creds:ro     # ключ Google STT (вне репо, gitignored) — read-only
     # runserver: hot-reload кода + отдача static в DEBUG
     command: sh -c "python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8000"
@@ -71,6 +79,16 @@ services:
       - ./src:/app/src
       - ./media:/app/media
       - ./work:/app/work
+      - ./cache:/app/.cache       # кэш моделей whisper/MMS (persist, не качать на рестарт)
       - ./creds:/app/creds:ro     # ключ Google STT (вне репо, gitignored) — read-only
+    # GPU для ML-конвейера (whisper + forced). Требует nvidia-container-toolkit на хосте
+    # (см. шапку файла). Без него worker не стартует — ставь тулкит перед `up`.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     depends_on:
       redis: {condition: service_started}
