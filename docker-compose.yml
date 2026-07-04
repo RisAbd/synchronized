@@ -30,11 +30,20 @@ services:
       # POSTGRES_* НЕ задаём → settings.py уходит в SQLite (service/db.sqlite3)
       CELERY_BROKER_URL: redis://redis:6379/0
       SYNC_RECOGNIZER: ${SYNC_RECOGNIZER:-whisper}
+      # распознаватели по умолчанию для новых записей (forced НЕ здесь — он авто-пост-шаг)
+      SYNC_RECOGNIZERS: ${SYNC_RECOGNIZERS:-whisper,google}
+      # Google STT: ключ сервис-аккаунта кладём в ./creds/ (gitignored) → монтируется в /app/creds.
+      # Бакет и live-флаг — через .env (compose читает его автоматически). Без ключа/бакета
+      # gstt.is_available()==False → google тихо уходит в кэш/пропуск, запись живёт по whisper.
+      GOOGLE_APPLICATION_CREDENTIALS: ${SYNC_GSTT_CRED_PATH:-/app/creds/gstt.json}
+      SYNC_GSTT_BUCKET: ${SYNC_GSTT_BUCKET:-}
+      SYNC_GSTT_LIVE: ${SYNC_GSTT_LIVE:-1}
     volumes:
       - ./service:/app/service    # код сервиса + db.sqlite3 (hot-reload + БД)
       - ./src:/app/src            # ядро конвейера (align/asr/quran/ingest)
       - ./media:/app/media        # аудио записей + сырые ответы ASR (persist)
       - ./work:/app/work          # промежуточные выгрузки (persist)
+      - ./creds:/app/creds:ro     # ключ Google STT (вне репо, gitignored) — read-only
     # runserver: hot-reload кода + отдача static в DEBUG
     command: sh -c "python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8000"
     ports:
@@ -54,5 +63,6 @@ services:
       - ./src:/app/src
       - ./media:/app/media
       - ./work:/app/work
+      - ./creds:/app/creds:ro     # ключ Google STT (вне репо, gitignored) — read-only
     depends_on:
       redis: {condition: service_started}

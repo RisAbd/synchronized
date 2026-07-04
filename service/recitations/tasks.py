@@ -32,6 +32,36 @@ def _aggregate(rec) -> None:
     rec.save(update_fields=["status", "stage", "updated_at"])
 
 
+def _maybe_forced(rec) -> None:
+    """Авто-пост-шаг: forced align поверх готового ASR-прогона (уточняет границы слов/аятов
+    по ground-truth тексту аятов). forced — НЕ выбираемый распознаватель, а автоматическое
+    уточнение после ASR. В окружении без зависимостей (CPU-докер без ctc-forced-aligner) —
+    ТИХО пропускаем: не заводим ERROR-прогон, запись остаётся READY по ASR."""
+    from .models import AsrRun, Status
+    from . import pipeline, recognizers as rz
+
+    key = next(iter(rz.ALIGNERS))  # 'forced'
+    if pipeline._forced_source(rec) is None:
+        return  # нет готового ASR-источника с диапазоном аятов — нечего выравнивать
+    try:
+        import falign
+        if not falign.available():
+            return  # зависимостей нет — тихо пропускаем
+    except Exception:
+        return
+
+    run = rec.runs.filter(recognizer=key).first()
+    if run and run.status == Status.READY:
+        return  # уже посчитан
+    if run is None:
+        run = AsrRun.objects.create(recitation=rec, recognizer=key, status=Status.QUEUED)
+    else:
+        run.status = Status.QUEUED
+        run.error = ""
+        run.save(update_fields=["status", "error", "updated_at"])
+    _run_safe(run)
+
+
 def _run_safe(run) -> None:
     """Прогнать один AsrRun, аккуратно ведя его статус/ошибку."""
     from .models import Status
@@ -77,6 +107,7 @@ def run_pipeline(rec_id: int) -> None:
     todo.sort(key=lambda r: recognizers.is_aligner(r.recognizer))
     for run in todo:
         _run_safe(run)
+    _maybe_forced(rec)  # авто-уточнение границ поверх готового ASR (тихо пропустится без deps)
     _aggregate(rec)
 
 
@@ -88,6 +119,9 @@ def run_single(run_id: int) -> None:
     except AsrRun.DoesNotExist:
         return
     _run_safe(run)
+    from . import recognizers as rz
+    if not rz.is_aligner(run.recognizer):
+        _maybe_forced(run.recitation)  # пересчитали ASR → обновим forced поверх него
     _aggregate(run.recitation)
 
 

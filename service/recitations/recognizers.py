@@ -47,3 +47,10 @@ def label_of(key: str) -> str:
 
 def all_recognizers() -> list[Recognizer]:
     return list(REGISTRY.values())
+
+
+def selectable_recognizers() -> list[Recognizer]:
+    """Распознаватели, которые пользователь выбирает при добавлении записи.
+    Без выравнивателей: forced align — не отдельный распознаватель, а автоматический
+    пост-шаг после ASR (см. tasks._maybe_forced)."""
+    return [r for r in REGISTRY.values() if r.key not in ALIGNERS]

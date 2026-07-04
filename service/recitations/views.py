@@ -26,16 +26,19 @@ def index(request):
     recs = Recitation.objects.prefetch_related("runs").all()
     return render(request, "recitations/index.html", {
         "recs": recs,
-        "recognizers": recognizers.all_recognizers(),
+        "recognizers": recognizers.selectable_recognizers(),
         "default_recognizers": settings.DEFAULT_RECOGNIZERS,
     })
 
 
 def _chosen_recognizers(request) -> list[str]:
-    """Список распознавателей из формы (чекбоксы), с фолбэком на дефолт."""
-    chosen = [r for r in request.POST.getlist("recognizers") if recognizers.is_valid(r)]
+    """Список распознавателей из формы (чекбоксы), с фолбэком на дефолт.
+    Выравниватели (forced) сюда не берём — они запускаются автоматически пост-шагом."""
+    def ok(r):
+        return recognizers.is_valid(r) and not recognizers.is_aligner(r)
+    chosen = [r for r in request.POST.getlist("recognizers") if ok(r)]
     if not chosen:
-        chosen = [r for r in settings.DEFAULT_RECOGNIZERS if recognizers.is_valid(r)]
+        chosen = [r for r in settings.DEFAULT_RECOGNIZERS if ok(r)]
     return chosen or ["whisper"]
 
 
@@ -64,7 +67,8 @@ def run(request, pk):
     """Добавить/пересчитать один распознаватель для существующей записи."""
     rec = get_object_or_404(Recitation, pk=pk)
     rkey = (request.POST.get("recognizer") or "").strip()
-    if not recognizers.is_valid(rkey):
+    # forced align — не выбираемый распознаватель, а авто-пост-шаг после ASR (не запускаем вручную)
+    if not recognizers.is_valid(rkey) or recognizers.is_aligner(rkey):
         return HttpResponseRedirect(reverse("player", args=[pk]))
     run_obj, _ = AsrRun.objects.get_or_create(recitation=rec, recognizer=rkey)
     run_obj.status = AsrRun.Status.QUEUED

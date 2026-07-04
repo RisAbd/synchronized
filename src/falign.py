@@ -29,6 +29,14 @@ from pathlib import Path
 _HARAKAT = set("ًٌٍَُِّْٰٕٖٓٔٗ٘")
 
 
+def available() -> bool:
+    """Доступны ли зависимости forced align в этом окружении (CPU-докер их не ставит).
+    Лёгкая проверка импортируемости — без загрузки модели (её тянет только align())."""
+    import importlib.util
+    return all(importlib.util.find_spec(m) is not None
+               for m in ("ctc_forced_aligner", "onnxruntime"))
+
+
 @lru_cache(maxsize=1)
 def _session_and_tokenizer():
     import ctc_forced_aligner as cfa
