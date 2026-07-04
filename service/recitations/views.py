@@ -136,6 +136,13 @@ def data_json(request, pk):
     return JsonResponse(payload)
 
 
+def card(request, pk):
+    """HTML одной карточки списка — для точечной перерисовки на фронте (index.html опрашивает
+    /status и при смене статуса заменяет ТОЛЬКО эту карточку, без перезагрузки страницы)."""
+    rec = get_object_or_404(Recitation.objects.prefetch_related("runs"), pk=pk)
+    return render(request, "recitations/_card.html", {"r": rec})
+
+
 def status(request, pk):
     rec = get_object_or_404(Recitation, pk=pk)
     # строка шага: если какой-то прогон обрабатывается — покажем «<распознаватель>: <шаг>»

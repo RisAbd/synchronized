@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>synchronized</title>
+<link rel="icon" href="data:,"><!-- заглушка: без неё браузер дёргает /favicon.ico → 404 в консоли -->
+
 <style>
   :root { color-scheme: light dark;
     --bg:#faf7f0; --fg:#201d16; --muted:#8f8674; --line:rgba(120,110,90,.18);
@@ -94,39 +96,7 @@
 
   <div id="list">
   {% for r in recs %}
-    <div class="card-wrap" data-id="{{ r.id }}" data-status="{{ r.status }}">
-      {% if r.is_ready %}
-      <a class="card" href="{% url 'player' r.id %}">
-        {% if r.thumbnail %}<img class="thumb" src="{{ r.thumbnail }}" alt="" loading="lazy" onerror="this.style.display='none'">
-        {% elif r.title_ar %}<span class="ar">{{ r.title_ar }}</span>{% endif %}
-        <span class="body">
-          <span class="ct">{{ r.title|default:r.source_url|truncatechars:56 }}</span>
-          <span class="meta">{{ r.reciter }}{% if r.reciter and r.surahs_label %} · {% endif %}{{ r.surahs_label }}</span>
-          {% if r.duration_h or r.filesize_h %}<span class="metsub">{{ r.duration_h }}{% if r.duration_h and r.filesize_h %} · {% endif %}{{ r.filesize_h }}{% if r.ext_h %} · {{ r.ext_h }}{% endif %}</span>{% endif %}
-          <span class="runs">
-            {% for run in r.runs.all %}
-              {% if run.status == 'ready' %}<span class="rz-chip" title="покрытие аудио: доля длительности записи, где есть размещённые слова">{{ run.label }} · {{ run.metrics.wt|default:0 }} сл{% if run.metrics.coverage %} · {% widthratio run.metrics.coverage 1 100 %}%{% endif %}</span>
-              {% elif run.status == 'error' %}<span class="rz-chip" title="{{ run.error }}">{{ run.label }} · ошибка</span>
-              {% else %}<span class="rz-chip">{{ run.label }} · {{ run.get_status_display }}…</span>{% endif %}
-            {% endfor %}
-          </span>
-        </span>
-        <span class="badge b-ready">готово</span>
-      </a>
-      {% else %}
-      <div class="card">
-        {% if r.thumbnail %}<img class="thumb" src="{{ r.thumbnail }}" alt="" loading="lazy" onerror="this.style.display='none'">{% endif %}
-        <span class="body">
-          <span class="ct">{{ r.title|default:r.source_url|truncatechars:56 }}</span>
-          <span class="meta">{% if r.status != 'error' %}<span class="spin"></span>{% endif %}<span class="status-line">{% if r.status == 'error' %}{{ r.error|truncatechars:80 }}{% elif r.stage %}шаг: {{ r.stage }}…{% else %}{{ r.get_status_display }}…{% endif %}</span></span>
-        </span>
-        <span class="badge b-{{ r.status }}">{{ r.get_status_display }}</span>
-        <form method="post" action="{% url 'delete' r.id %}" onsubmit="return confirm('Удалить?')">
-          {% csrf_token %}<button class="del" style="background:none;padding:0" title="удалить">✕</button>
-        </form>
-      </div>
-      {% endif %}
-    </div>
+    <div class="card-wrap" data-id="{{ r.id }}" data-status="{{ r.status }}"{% if r.has_active_runs %} data-busy="1"{% endif %}>{% include "recitations/_card.html" %}</div>
   {% empty %}
     {% if q %}<div class="empty">По запросу «{{ q }}» ничего не найдено.</div>
     {% else %}<div class="empty">Пока пусто. Нажми «＋ Добавить».</div>{% endif %}
@@ -173,24 +143,49 @@ document.getElementById('closeAdd').onclick = () => modal.classList.remove('open
 modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('open'); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') modal.classList.remove('open'); });
 
-// авто-опрос статуса для не-готовых записей; как всё готово — перезагрузка
-const pending = [...document.querySelectorAll('.card-wrap')]
-  .filter(el => !['ready','error'].includes(el.dataset.status));
-if (pending.length) {
-  setInterval(async () => {
-    let changed = false;
-    for (const el of pending) {
-      try {
-        const s = await (await fetch(`/r/${el.dataset.id}/status`)).json();
-        if (s.ready || s.status === 'error') { changed = true; }
-        const line = el.querySelector('.status-line');
-        if (line) line.textContent = s.status === 'error' ? (s.error||'ошибка')
-          : (s.stage ? `шаг: ${s.stage}…` : `${s.status}…`);
-      } catch(e){}
-    }
-    if (changed) location.reload();
-  }, 2500);
+// Авто-опрос статуса — ВСЁ на js, без location.reload() (перезагрузка перетягивала всю
+// страницу с картинками каждые 2.5с, пока шла обработка). Строка шага обновляется по месту;
+// карточка перерисовывается ТОЧЕЧНО (fetch готового html из /card) и только когда реально
+// сменился статус записи или её прогонов. Превью при перерисовке переносим старым <img> —
+// без повторной загрузки и мигания пустым местом.
+const DONE = s => s === 'ready' || s === 'error';
+const watch = new Map(); // id -> «форма» последнего ответа (статусы записи+прогонов)
+for (const el of document.querySelectorAll('.card-wrap'))
+  if (!DONE(el.dataset.status) || el.dataset.busy) watch.set(el.dataset.id, null);
+
+function shapeOf(s) { // что считаем «сменой состояния», требующей перерисовки карточки
+  return s.status + '|' + (s.runs || []).map(r => r.recognizer + ':' + r.status).join(',');
 }
+
+async function redraw(el, id) {
+  const html = await (await fetch(`/r/${id}/card`)).text();
+  const oldImg = el.querySelector('img.thumb');
+  el.innerHTML = html;
+  const img = el.querySelector('img.thumb');
+  if (oldImg && img && img.src === oldImg.src) img.replaceWith(oldImg); // картинка уже загружена — не перекачивать
+}
+
+async function tick() {
+  for (const [id, prev] of watch) {
+    const el = document.querySelector(`.card-wrap[data-id="${id}"]`);
+    if (!el) { watch.delete(id); continue; }
+    let s;
+    try { s = await (await fetch(`/r/${id}/status`)).json(); } catch (e) { continue; }
+    const shape = shapeOf(s);
+    if (shape !== prev) {
+      watch.set(id, shape);
+      if (prev !== null || s.status !== el.dataset.status) { // на первом опросе не дёргаем зря
+        try { await redraw(el, id); } catch (e) {}
+      }
+      el.dataset.status = s.status;
+    }
+    const line = el.querySelector('.status-line'); // строка шага — дёшево, по месту
+    if (line && s.status !== 'error') line.textContent = s.stage ? `шаг: ${s.stage}…` : `${s.status}…`;
+    if (DONE(s.status) && (s.runs || []).every(r => DONE(r.status))) watch.delete(id);
+  }
+  if (watch.size) setTimeout(tick, 2500);
+}
+if (watch.size) setTimeout(tick, 2500);
 </script>
 </body>
 </html>

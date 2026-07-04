@@ -11,4 +11,5 @@ urlpatterns = [
     path("r/<int:pk>/data.json", views.data_json, name="data_json"),
     path("r/<int:pk>/audio", views.audio, name="audio"),
     path("r/<int:pk>/status", views.status, name="status"),
+    path("r/<int:pk>/card", views.card, name="card"),
 ]

@@ -114,6 +114,12 @@ class Recitation(models.Model):
             return True
         return any(r.status == Status.READY for r in self.runs.all())
 
+    @property
+    def has_active_runs(self):
+        """Есть ли прогоны в работе/очереди — карточку надо опрашивать, даже если запись
+        «готова» по старым прогонам (пересчёт: чипы прогонов обновляются вживую)."""
+        return any(r.status in (Status.QUEUED, Status.PROCESSING) for r in self.runs.all())
+
     def _player_data(self):
         run = self.active_run()
         if run and run.data:
