@@ -15,7 +15,10 @@
   html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
     font-family:"Amiri","Scheherazade New","Noto Naskh Arabic","Times New Roman",serif; }
   /* колоночная раскладка: шапка → (видео) → прокручиваемый текст */
-  body { height:100%; display:flex; flex-direction:column; overflow:hidden; }
+  /* фиксируем к вьюпорту: на мобиле прячущаяся адресная строка не должна двигать/скроллить
+     страницу (иначе видео сверху уезжает вверх). Скроллится только #text внутри. */
+  body { height:100%; display:flex; flex-direction:column; overflow:hidden;
+    position:fixed; inset:0; overscroll-behavior:none; }
   header { flex:none; z-index:20; background:var(--card); border-bottom:1px solid var(--line); }
   .top { display:flex; align-items:center; gap:10px; padding:8px 12px; direction:ltr; }
   .back { text-decoration:none; color:var(--muted); font:600 24px system-ui; padding:0 6px; border-radius:8px; }
@@ -26,7 +29,7 @@
   .title span { font:11px system-ui; color:var(--muted); }
   audio { display:block; width:100%; height:38px; padding:0 8px 8px; }
   /* окно источника-видео (YouTube): фиксированные ~38% высоты и на мобиле, и на десктопе */
-  #video { flex:none; height:38vh; background:#000; display:flex; justify-content:center;
+  #video { flex:none; height:38vh; height:38dvh; background:#000; display:flex; justify-content:center;
     align-items:center; border-bottom:1px solid var(--line); }
   #ytwrap { height:100%; width:min(100%, calc(38vh * 16 / 9)); }
   #ytwrap iframe { width:100%; height:100%; border:0; display:block; }
@@ -45,8 +48,8 @@
   .asr.err { color:var(--err,#c0492f); }
   .asr small { font-weight:400; opacity:.8; margin-inline-start:5px; }
   /* текст занимает всё оставшееся место под шапкой/видео и прокручивается */
-  #text { flex:1; position:relative; overflow-y:auto; -webkit-overflow-scrolling:touch;
-    padding:26vh 22px 34vh; scroll-behavior:smooth; width:100%; max-width:860px; margin:0 auto; }
+  #text { flex:1; min-height:0; position:relative; overflow-y:auto; -webkit-overflow-scrolling:touch;
+    padding:26vh 22px 34vh; padding:26dvh 22px 34dvh; scroll-behavior:smooth; width:100%; max-width:860px; margin:0 auto; }
   .stitle { text-align:center; color:var(--accent); font:600 clamp(1rem,4vw,1.35rem) system-ui;
     letter-spacing:.02em; margin:22px 0 10px; opacity:.7; }
   .ayah { display:block; text-align:center; color:var(--dim);
