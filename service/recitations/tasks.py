@@ -70,7 +70,12 @@ def run_pipeline(rec_id: int) -> None:
         rec.runs.update(status=Status.ERROR, error=msg)
         return
 
-    for run in rec.runs.filter(status__in=[Status.QUEUED, Status.ERROR]):
+    # сначала распознаватели, потом выравниватели (forced align): им нужен готовый
+    # прогон-источник для диапазона аятов.
+    from . import recognizers
+    todo = list(rec.runs.filter(status__in=[Status.QUEUED, Status.ERROR]))
+    todo.sort(key=lambda r: recognizers.is_aligner(r.recognizer))
+    for run in todo:
         _run_safe(run)
     _aggregate(rec)
 

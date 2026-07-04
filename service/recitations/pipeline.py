@@ -131,11 +131,25 @@ def _recognize(audio_path: Path, recognizer: str, rec, out: Path):
     return words
 
 
-def run_one(run, on_stage=None) -> None:
-    """Прогнать конвейер одним распознавателем для прогона AsrRun. Мутирует/сохраняет run.
-    Аудио должно быть уже получено (ensure_audio). Бросает исключение при ошибке —
-    статус/ошибку ведёт вызывающий (tasks)."""
+def _forced_source(rec):
+    """Готовый прогон-источник для forced align: из него берём диапазон читаемых аятов.
+    Предпочтение google > whisper > любой готовый НЕ-выравниватель."""
     from .models import AsrRun
+    from . import recognizers as rz
+    ready = {r.recognizer: r for r in rec.runs.all()
+             if r.status == AsrRun.Status.READY and r.data and not rz.is_aligner(r.recognizer)}
+    for key in ("google", "whisper"):
+        if key in ready:
+            return ready[key]
+    return next(iter(ready.values()), None)
+
+
+def run_one(run, on_stage=None) -> None:
+    """Прогнать конвейер одним распознавателем/выравнивателем для прогона AsrRun.
+    Мутирует/сохраняет run. Аудио должно быть уже получено (ensure_audio). Бросает исключение
+    при ошибке — статус/ошибку ведёт вызывающий (tasks)."""
+    from .models import AsrRun
+    from . import recognizers as rz
 
     rec = run.recitation
 
@@ -145,7 +159,6 @@ def run_one(run, on_stage=None) -> None:
         if on_stage:
             on_stage(name)
 
-    import align as align_mod
     from player import build_data
 
     q = _quran()
@@ -155,19 +168,39 @@ def run_one(run, on_stage=None) -> None:
     t0 = time.monotonic()
 
     audio = ensure_audio(rec)
-
-    stage("asr")
     out = run_dir(rec.id, run.recognizer)
-    words = _recognize(audio, run.recognizer, rec, out)
 
-    stage("align")
-    sync_map = align_mod.align(words, q)
-    (out / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
+    if rz.is_aligner(run.recognizer):
+        # forced align: НЕ распознаём, а выравниваем известный текст аятов к аудио.
+        # диапазон читаемого берём из готового ASR-прогона (align.py уже определил, что читается).
+        import falign
+        src = _forced_source(rec)
+        if src is None:
+            raise RuntimeError(
+                "нет готового прогона (google/whisper) для диапазона аятов — сначала распознайте "
+                "запись каким-нибудь ASR, затем добавьте forced align")
+        verses = falign.verses_from_data(src.data)
+        if not verses:
+            raise RuntimeError(f"в прогоне-источнике '{src.recognizer}' нет разделов/аятов")
+        stage("align")
+        out.mkdir(parents=True, exist_ok=True)
+        sync_map = falign.align(audio, verses)
+        (out / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
+    else:
+        import align as align_mod
+        stage("asr")
+        words = _recognize(audio, run.recognizer, rec, out)
+        stage("align")
+        sync_map = align_mod.align(words, q)
+        (out / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
 
     stage("build")
     data = build_data(sync_map, q, rec.audio_filename)
     dur = data["timeline"][-1]["t"] if data.get("timeline") else 0
     data["duration"] = round(dur)
+    # посимвольная дорожка (forced align) — build_data её не копирует, тащим для побуквенной подсветки
+    if sync_map.get("char_timeline"):
+        data["char_timeline"] = sync_map["char_timeline"]
 
     wt = data.get("word_timeline") or []
     tl = data.get("timeline") or []

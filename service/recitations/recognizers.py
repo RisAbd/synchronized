@@ -16,14 +16,24 @@ class Recognizer:
     note: str = ""      # короткое пояснение (точность/особенности)
 
 
-# Порядок важен: google точнее на арабском → выше приоритет авто-выбора.
+# Порядок важен: forced align точнее всех (выравнивает известный текст) → выше приоритет
+# авто-выбора; затем google (точнее whisper на арабском).
 REGISTRY: dict[str, Recognizer] = {
+    "forced": Recognizer("forced", "Forced align", "точные границы: выравнивает текст аятов к аудио (без ошибок ASR); нужен готовый прогон для диапазона"),
     "google": Recognizer("google", "Google STT", "точнее на арабском; из кэша ответов"),
     "whisper": Recognizer("whisper", "Whisper large-v3", "локально; в докере на CPU (медленно), GPU — на хосте; арабский средне"),
 }
 
+# Выравниватели по известному тексту (не распознаватели): им нужен готовый прогон-источник
+# (google/whisper), из которого берётся диапазон читаемых аятов.
+ALIGNERS = {"forced"}
+
 # Приоритет авто-выбора активного прогона (по убыванию предпочтения).
 PRIORITY = list(REGISTRY.keys())
+
+
+def is_aligner(key: str) -> bool:
+    return key in ALIGNERS
 
 
 def is_valid(key: str) -> bool:

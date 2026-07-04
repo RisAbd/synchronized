@@ -142,11 +142,19 @@ export SYNC_RECOGNIZERS=whisper,google   # чтобы google был предвы
    ground-truth текст аятов из quran.db прямо к аудио через `ctc-forced-aligner` (MMS CTC, onnxruntime
    CPU-билд, ~0.3× RT). Выдаёт sync_map, совместимый с `player.build_data` (timeline/word_timeline) +
    `char_timeline` (посимвольная интерполяция внутри точных границ слова; харакат наследуют время базы).
-   Проверено на rec5 (Аль-Фуркан 25:62–77): 174/174 слов, coverage 1.0, ~66с на CPU. **Чинит баг
+   Проверено на rec5 (Аль-Фуркан 25:62–77): 174/174 слов, coverage 1.0, ~60с на CPU. **Чинит баг
    ложного якоря** 25:65→66 (forced ставит старт 66 на 35.08с — как слышит владелец; старая ASR-
-   консенсусная привязка сажала на 28.6с). Осталось: (а) интеграция как выбираемый прогон в сервис
-   (label «Forced align»), (б) посимвольная подсветка в плеере. **Зависимость:** нужен диапазон аятов
-   — берём из готового прогона google/whisper (align.py определяет, что читается).
+   консенсусная привязка сажала на 28.6с). (а) ИНТЕГРИРОВАНО как выбираемый прогон «Forced align»:
+   recognizers.REGISTRY + ALIGNERS/is_aligner; pipeline.run_one ветка (берёт диапазон из готового
+   google/whisper через `_forced_source`); tasks.run_pipeline гонит выравниватели ПОСЛЕ ASR; forced
+   первый в PRIORITY → активен по умолчанию в плеере. rec5 отдаётся с forced по умолчанию (проверено:
+   /r/5/data.json → recognizer=forced, wt=174, ct=1360). Осталось: (б) посимвольная подсветка в
+   плеере (char_timeline уже в data.json). **Зависимость:** нужен диапазон аятов из готового
+   google/whisper (align.py определяет, что читается).
+   ⚠️ **Deploy:** пайплайн в docker-воркере на CPU-slim образе БЕЗ этих deps → forced там упадёт.
+   Пока генерим на ХОСТЕ: `cd service && python manage.py forced_align <id>` (БД+media bind-mount →
+   web-контейнер сразу видит). Контейнерные deps (onnxruntime+ctc-forced-aligner+unidecode) —
+   отдельно, низкий приоритет (как whisper-GPU).
    Истинный CTC-посимвольный тайминг (не интерполяция) — романизация MMS схлопывает огласовки, отложено.
    Установлено в окружении: `unidecode` (uroman fallback), модель `~/ctc_forced_aligner/model.onnx`.
    ⚠️ onnxruntime — CPU-билд (нет CUDAExecutionProvider); GPU-провайдер — отдельно (низкий приоритет).
