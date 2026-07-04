@@ -113,11 +113,14 @@ def analyze_timeline(data: dict) -> dict:
     if non_mono:
         flags.append(f"немонотонных t: {non_mono}")
 
-    # разрывы между словами
+    # разрывы: паузы на границе аятов легитимны (чтец делает вдох) — не флажим.
+    # Патология — большой разрыв ВНУТРИ одного аята (дыра выравнивания).
     dts = [b["t"] - a["t"] for a, b in zip(wt, wt[1:])]
     max_gap = max(dts) if dts else 0
-    if max_gap > 6:
-        flags.append(f"большой разрыв {max_gap:.1f}s между соседними словами")
+    intra_gap = max((b["t"] - a["t"] for a, b in zip(wt, wt[1:])
+                     if (a["surah"], a["ayah"]) == (b["surah"], b["ayah"])), default=0)
+    if intra_gap > 6:
+        flags.append(f"дыра {intra_gap:.1f}s ВНУТРИ аята (пропуск выравнивания)")
 
     # темп: слова/сек по секундным корзинам; всплеск = скомканный участок
     t0, t1 = wt[0]["t"], wt[-1]["t"]
@@ -142,7 +145,8 @@ def analyze_timeline(data: dict) -> dict:
         "words_wt": len(wt), "words_text": total_words, "coverage": coverage,
         "duration": dur, "first_t": round(t0, 2), "last_t": round(t1, 2),
         "pace_wps": round(pace, 2), "head_words_2s": len(head),
-        "max_gap_s": round(max_gap, 2), "non_monotonic": non_mono,
+        "max_gap_s": round(max_gap, 2), "intra_ayah_gap_s": round(intra_gap, 2),
+        "non_monotonic": non_mono,
         "aligner": (data.get("meta") or {}).get("aligner") or "?",
         "flags": flags,
     }

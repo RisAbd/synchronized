@@ -106,12 +106,43 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int = 8) -
             "word_timeline": word_timeline, "char_timeline": char_timeline}
 
 
-def verses_from_data(data: dict) -> list[tuple[int, int, str]]:
+def verses_from_data(data: dict, min_edge_coverage: float = 0.5) -> list[tuple[int, int, str]]:
     """Достать диапазон (surah, ayah, text) из data.json уже готового прогона (google/whisper),
-    где align.py определил, какие аяты читаются."""
-    out = []
+    где align.py определил, какие аяты читаются.
+
+    Обрезка КРАЕВЫХ аятов без реальной опоры (баг 3b): если исходный ASR заякорил у ведущего/
+    хвостового аята малую долю слов (< min_edge_coverage) — значит аудио содержит его лишь
+    частично/вовсе нет, и forced скомкает полный текст в пару секунд (мусор в начале). Считаем
+    покрытие по числу РАЗНЫХ wi в word_timeline источника (интерполяция не выходит за первый/
+    последний якорь, поэтому на краях покрытие честное). Режем только с краёв, до первого
+    хорошо покрытого аята; внутренние не трогаем. Порог с большим запасом (rec5: фантом 0.15 при
+    ближайшем легитимном 0.83), rec6/rec7 не задеты.
+    """
+    verses = []  # (surah, ayah, text, nwords)
     for sec in data.get("sections", []):
         s = sec["surah"]
         for v in sec.get("ayat", []):
-            out.append((s, v["ayah"], v["text"]))
-    return out
+            nwords = len(v.get("words") or v["text"].split())
+            verses.append((s, v["ayah"], v["text"], nwords))
+    if not verses:
+        return []
+
+    wt = data.get("word_timeline") or []
+    if wt and min_edge_coverage > 0:
+        from collections import defaultdict
+        anchored: dict[tuple[int, int], set] = defaultdict(set)
+        for w in wt:
+            anchored[(w["surah"], w["ayah"])].add(w["wi"])
+
+        def covered(v) -> float:
+            su, ay, _, n = v
+            return len(anchored.get((su, ay), ())) / n if n else 1.0
+
+        lo, hi = 0, len(verses)
+        while lo < hi - 1 and covered(verses[lo]) < min_edge_coverage:
+            lo += 1
+        while hi - 1 > lo and covered(verses[hi - 1]) < min_edge_coverage:
+            hi -= 1
+        verses = verses[lo:hi]
+
+    return [(su, ay, txt) for su, ay, txt, _ in verses]
