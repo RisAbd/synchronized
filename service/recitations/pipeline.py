@@ -219,15 +219,16 @@ def _recognize(audio_path: Path, recognizer: str, rec, out: Path):
 
 def _forced_source(rec):
     """Готовый прогон-источник для forced align: из него берём диапазон читаемых аятов.
-    Предпочтение google > whisper > любой готовый НЕ-выравниватель."""
+    Лучший по честному покрытию времени аудио (metrics.coverage), при равенстве —
+    google > whisper. Фикс-приоритет google отдавал forced мусор, когда google плох:
+    rec10 google cov 0.591 с ложным диапазоном 16:98 против whisper 0.803 (реальные 55:1→56)."""
     from .models import AsrRun
     from . import recognizers as rz
-    ready = {r.recognizer: r for r in rec.runs.all()
-             if r.status == AsrRun.Status.READY and r.data and not rz.is_aligner(r.recognizer)}
-    for key in ("google", "whisper"):
-        if key in ready:
-            return ready[key]
-    return next(iter(ready.values()), None)
+    ready = [r for r in rec.runs.all()
+             if r.status == AsrRun.Status.READY and r.data and not rz.is_aligner(r.recognizer)]
+    prio = {"google": 0, "whisper": 1}
+    return max(ready, key=lambda r: ((r.metrics or {}).get("coverage") or 0.0,
+                                     -prio.get(r.recognizer, 9)), default=None)
 
 
 def run_one(run, on_stage=None) -> None:
@@ -285,6 +286,10 @@ def run_one(run, on_stage=None) -> None:
         words = _recognize(audio, run.recognizer, rec, out)
         stage("align")
         sync_map = align_mod.align(words, q)
+        # счётчики ASR↔эталон (идея quran-align): hits/subs/ins/dels/wer против текста
+        # найденного диапазона — объективная «каша» распознавания, попадёт в run.metrics
+        sync_map.setdefault("meta", {})["match"] = align_mod.match_stats(
+            [w.norm for w in words], sync_map, q)
         (out / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
 
     stage("build")

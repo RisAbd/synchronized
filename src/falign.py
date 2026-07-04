@@ -29,6 +29,33 @@ from pathlib import Path
 _HARAKAT = set("ًٌٍَُِّْٰٕٖٓٔٗ٘")
 
 
+# правило плотности из quran-align (segment.cc, MIN_WORD_LEN=100мс): слово короче этого —
+# физически невозможно; несколько подряд — CTC «утрамбовал» текст, которого нет в аудио
+MIN_WORD_SEC = 0.100
+STUFFED_RUN = 3     # столько «мгновенных» слов подряд считаем скомканным участком
+
+
+def _stuffed_indices(word_timeline: list[dict]) -> list[int]:
+    """Индексы слов в «скомканных» участках: ≥ STUFFED_RUN подряд слов короче MIN_WORD_SEC.
+
+    Симптом: чтец пропустил кусок (или диапазон аятов определился с лишком, который не
+    поймала краевая обрезка verses_from_data), а CTC обязан разместить ВЕСЬ текст → лишние
+    слова сжимаются в десятки миллисекунд. В quran-align это же лечится отсевом спанов без
+    опоры распознавания короче k×100 мс. Одиночные короткие слова не трогаем."""
+    bad, run = [], []
+    for i, w in enumerate(word_timeline):
+        # слова без t_end (таймлайны align.py интерполированы) длительности не имеют — пропуск
+        if w.get("t_end") is not None and (w["t_end"] - w["t"]) < MIN_WORD_SEC:
+            run.append(i)
+        else:
+            if len(run) >= STUFFED_RUN:
+                bad.extend(run)
+            run = []
+    if len(run) >= STUFFED_RUN:
+        bad.extend(run)
+    return bad
+
+
 def available() -> bool:
     """Доступны ли зависимости forced align в этом окружении (CPU-докер их не ставит).
     Лёгкая проверка импортируемости — без загрузки модели (её тянет только align())."""
@@ -101,11 +128,26 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int = 8) -
             char_timeline.append({"t": round(ct0, 3), "t_end": round(ct1, 3),
                                    "surah": surah, "ayah": ayah, "wi": wi, "ci": ci})
 
+    # правило плотности (quran-align): выкинуть «скомканные» участки — текст без опоры в аудио
+    stuffed = _stuffed_indices(word_timeline)
+    if stuffed:
+        drop = {(word_timeline[i]["surah"], word_timeline[i]["ayah"], word_timeline[i]["wi"])
+                for i in stuffed}
+        word_timeline = [w for w in word_timeline if (w["surah"], w["ayah"], w["wi"]) not in drop]
+        char_timeline = [c for c in char_timeline if (c["surah"], c["ayah"], c["wi"]) not in drop]
+        timeline, seen_ayah = [], set()   # старт аята мог выпасть — пересобрать по выжившим
+        for w in word_timeline:
+            k = (w["surah"], w["ayah"])
+            if k not in seen_ayah:
+                seen_ayah.add(k)
+                timeline.append({"t": w["t"], "surah": w["surah"], "ayah": w["ayah"]})
+
     meta = {
         "aligner": "forced-mms-ctc",
         "ref_words": len(ref),
         "aligned_units": len(units),
         "coverage": round(n / len(ref), 3) if ref else 0.0,
+        "stuffed_dropped": len(stuffed),
         "wt": len(word_timeline),
         "ct": len(char_timeline),
         "providers": session.get_providers(),

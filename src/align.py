@@ -284,6 +284,43 @@ def _segment(points: list[dict], quran: Quran):
     return out, timeline, word_timeline
 
 
+# --- счётчики ASR↔эталон (идея quran-align match.cc) --------------------------
+
+
+def match_stats(asr_norms: list[str], sync_map: dict, quran: Quran) -> dict:
+    """Сопоставить ASR-слова с эталонным текстом найденного диапазона и посчитать
+    hits (точные совпадения) / subs (сматчено с заменой) / ins (лишние ASR-слова:
+    шум, повторы чтеца) / dels (слова эталона без ASR-опоры). wer = (subs+ins+dels)/ref.
+
+    Эталон — корпусные слова диапазонов выживших сегментов sync-map, в порядке чтения
+    (обе стороны в нормализованной форме M1). Объективная метрика «каши» распознавания,
+    сравнимая между прогонами, — в отличие от самореферентного aligned_ratio.
+    """
+    import difflib
+    ref = []
+    for seg in sync_map.get("segments", []):
+        ref.extend(quran.tokens[c].text
+                   for c in range(seg["corpus_start"], seg["corpus_end"] + 1))
+    if not ref or not asr_norms:
+        return {}
+    sm = difflib.SequenceMatcher(a=asr_norms, b=ref, autojunk=False)
+    hits = subs = ins = dels = 0
+    for op, i0, i1, j0, j1 in sm.get_opcodes():
+        if op == "equal":
+            hits += i1 - i0
+        elif op == "replace":
+            common = min(i1 - i0, j1 - j0)
+            subs += common
+            ins += (i1 - i0) - common      # лишний хвост ASR внутри замены
+            dels += (j1 - j0) - common     # недобранный хвост эталона
+        elif op == "delete":               # кусок только в ASR
+            ins += i1 - i0
+        elif op == "insert":               # кусок только в эталоне
+            dels += j1 - j0
+    return {"ref_words": len(ref), "hits": hits, "subs": subs, "ins": ins, "dels": dels,
+            "wer": round((subs + ins + dels) / len(ref), 3)}
+
+
 # --- демо/валидация ---------------------------------------------------------
 
 

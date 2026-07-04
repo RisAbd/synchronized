@@ -32,11 +32,13 @@ def _aggregate(rec) -> None:
     rec.save(update_fields=["status", "stage", "updated_at"])
 
 
-def _maybe_forced(rec) -> None:
+def _maybe_forced(rec, refresh: bool = False) -> None:
     """Авто-пост-шаг: forced align поверх готового ASR-прогона (уточняет границы слов/аятов
     по ground-truth тексту аятов). forced — НЕ выбираемый распознаватель, а автоматическое
     уточнение после ASR. В окружении без зависимостей (CPU-докер без ctc-forced-aligner) —
-    ТИХО пропускаем: не заводим ERROR-прогон, запись остаётся READY по ASR."""
+    ТИХО пропускаем: не заводим ERROR-прогон, запись остаётся READY по ASR.
+    refresh=True — пересчитать даже готовый forced (после пересчёта ASR диапазон-источник
+    мог измениться; без этого forced залипал на старом расчёте)."""
     from .models import AsrRun, Status
     from . import pipeline, recognizers as rz
 
@@ -51,7 +53,7 @@ def _maybe_forced(rec) -> None:
         return
 
     run = rec.runs.filter(recognizer=key).first()
-    if run and run.status == Status.READY:
+    if run and run.status == Status.READY and not refresh:
         return  # уже посчитан
     if run is None:
         run = AsrRun.objects.create(recitation=rec, recognizer=key, status=Status.QUEUED)
@@ -107,7 +109,9 @@ def run_pipeline(rec_id: int) -> None:
     todo.sort(key=lambda r: recognizers.is_aligner(r.recognizer))
     for run in todo:
         _run_safe(run)
-    _maybe_forced(rec)  # авто-уточнение границ поверх готового ASR (тихо пропустится без deps)
+    # авто-уточнение границ поверх готового ASR (тихо пропустится без deps);
+    # если только что перемололи ASR — освежаем forced (источник диапазона мог смениться)
+    _maybe_forced(rec, refresh=any(not recognizers.is_aligner(r.recognizer) for r in todo))
     _aggregate(rec)
 
 
@@ -121,7 +125,7 @@ def run_single(run_id: int) -> None:
     _run_safe(run)
     from . import recognizers as rz
     if not rz.is_aligner(run.recognizer):
-        _maybe_forced(run.recitation)  # пересчитали ASR → обновим forced поверх него
+        _maybe_forced(run.recitation, refresh=True)  # пересчитали ASR → обновим forced поверх него
     _aggregate(run.recitation)
 
 
