@@ -115,9 +115,10 @@
   {% endif %}
   <audio id="audio" controls preload="metadata"{% if youtube_id %} style="display:none"{% endif %}></audio>
   {% if runs|length > 1 %}
+  {# распознавание (ASR) и выравнивание (forced align) — разные вещи: показываем раздельно #}
   <div class="asrbar">
     <span class="lbl">распознавание:</span>
-    {% for run in runs %}
+    {% for run in runs %}{% if not run.is_aligner %}
       {% if run.status == 'ready' %}
         <a class="asr {% if run.recognizer == active_key %}on{% endif %}" href="?asr={{ run.recognizer }}"
            title="покрытие {{ run.metrics.coverage|default:'—' }}, слов {{ run.metrics.wt|default:0 }}">
@@ -127,7 +128,19 @@
       {% else %}
         <span class="asr" title="{{ run.stage }}">{{ run.label }} · {{ run.get_status_display }}…</span>
       {% endif %}
-    {% endfor %}
+    {% endif %}{% endfor %}
+    {% for run in runs %}{% if run.is_aligner %}
+      <span class="lbl lbl-align">· выравнивание:</span>
+      {% if run.status == 'ready' %}
+        <a class="asr {% if run.recognizer == active_key %}on{% endif %}" href="?asr={{ run.recognizer }}"
+           title="точные границы аятов (выровнен известный текст), покрытие {{ run.metrics.coverage|default:'—' }}">
+          {{ run.label }}<small>{{ run.metrics.wt|default:0 }} сл</small></a>
+      {% elif run.status == 'error' %}
+        <span class="asr err" title="{{ run.error }}">{{ run.label }} · ошибка</span>
+      {% else %}
+        <span class="asr" title="{{ run.stage }}">{{ run.label }} · {{ run.get_status_display }}…</span>
+      {% endif %}
+    {% endif %}{% endfor %}
   </div>
   {% endif %}
 </header>

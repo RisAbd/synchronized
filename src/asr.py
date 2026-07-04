@@ -19,15 +19,17 @@ from pathlib import Path
 
 
 def _load_model(model_size: str):
-    """Грузим модель под доступное устройство. SYNC_ASR_DEVICE=cpu|cuda форсит выбор.
-    По умолчанию пробуем GPU (float16 → int8_float16), при неудаче падаем на CPU (int8)."""
+    """Грузим модель. По умолчанию — ТОЛЬКО GPU (cuda): на CPU whisper на арабском бесполезен
+    (даёт кашу, напр. 5 слов на 20 мин — см. владелец 04.07), и тратить на него время нельзя.
+    В docker-воркере (CPU) whisper при этом честно падает — распознавание там ведёт google.
+    SYNC_ASR_DEVICE=cpu — явный опт-ин на CPU (если кто-то реально хочет), cuda — то же, что дефолт."""
     import os
     from faster_whisper import WhisperModel
 
     dev = os.environ.get("SYNC_ASR_DEVICE", "").lower()
-    attempts = ([("cuda", "float16"), ("cuda", "int8_float16"), ("cpu", "int8")]
-                if dev != "cpu" else [("cpu", "int8")])
-    if dev == "cuda":
+    if dev == "cpu":
+        attempts = [("cpu", "int8")]
+    else:  # дефолт и 'cuda' — только GPU, без CPU-фолбэка
         attempts = [("cuda", "float16"), ("cuda", "int8_float16")]
     last = None
     for device, compute in attempts:
@@ -36,7 +38,9 @@ def _load_model(model_size: str):
         except Exception as e:  # noqa: BLE001
             last = e
             print(f"whisper {device}/{compute} не вышло ({e})", file=sys.stderr)
-    raise RuntimeError(f"не удалось загрузить whisper: {last}")
+    raise RuntimeError(
+        f"whisper: нет GPU (cuda) — распознавание пропущено, CPU-фолбэк отключён намеренно "
+        f"(бесполезен на арабском; SYNC_ASR_DEVICE=cpu чтобы форсить). Последняя ошибка: {last}")
 
 
 def transcribe(audio: str | Path, language: str = "ar", model_size: str = "large-v3") -> dict:

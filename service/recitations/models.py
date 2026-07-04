@@ -197,3 +197,9 @@ class AsrRun(models.Model):
     @property
     def label(self):
         return recognizers.label_of(self.recognizer)
+
+    @property
+    def is_aligner(self):
+        """forced align — не распознаватель, а выравниватель известного текста.
+        В UI показываем отдельно от «распознавание:» (см. player.html)."""
+        return recognizers.is_aligner(self.recognizer)

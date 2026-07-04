@@ -11,7 +11,12 @@
 # Код (./service, ./src) тоже примонтирован → Django на runserver с hot-reload,
 # пересобирать образ после каждой правки не нужно.
 #
-# ⚠️ ASR: faster-whisper в контейнере на CPU (медленно). Для GPU гоняй конвейер на хосте.
+# ⚠️ ASR: whisper бесполезен на CPU (арабский) → в контейнере НЕ гоняется (падает намеренно,
+# см. src/asr._load_model). В докере распознаёт google; whisper — только на хосте (GPU).
+# forced align (torch/ctc) в докере тоже нет — гоняем на хосте (см. manage.py forced_align).
+#
+# ⚠️ user: 1000:1000 — контейнеры пишут media/work/db от UID хоста (abd), а не root. Иначе
+# root-овнед файлы блокируют перемолку на хосте (forced/whisper-GPU) — было, починили 04.07.
 
 services:
   redis:
@@ -23,7 +28,9 @@ services:
       context: .
       dockerfile: service/Dockerfile
     restart: unless-stopped
+    user: "${SYNC_UID:-1000}:${SYNC_GID:-1000}"
     environment: &appenv
+      HOME: /tmp                 # писать кэши (~/.cache и т.п.) можно, HOME контейнера=/root не наш
       DJANGO_DEBUG: "1"
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-insecure-key-change-me}
       DJANGO_ALLOWED_HOSTS: "*"
@@ -56,6 +63,7 @@ services:
       context: .
       dockerfile: service/Dockerfile
     restart: unless-stopped
+    user: "${SYNC_UID:-1000}:${SYNC_GID:-1000}"
     environment: *appenv
     command: celery -A synchronized worker -l info --concurrency 1
     volumes:
