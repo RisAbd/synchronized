@@ -87,7 +87,11 @@
      плавный градиент от центра к краям (маскирует неточность привязки слова к таймстемпу) */
   .w.lit { color:var(--hl-fg);
     background:color-mix(in srgb, var(--hot) calc(var(--wi,0) * 62%), transparent); }
-  .w.hot { color:#fff; background:var(--hot); box-shadow:0 1px 10px rgba(46,139,69,.42); }
+  /* горячее (текущее) слово: karaoke-заливка справа-налево по прогрессу внутри слова
+     (фон задаётся из JS каждый кадр → transition только на цвет, иначе заливка «плывёт»).
+     Заливаем фон, а не режем слово на буквы-спаны — арабская вязь не ломается. */
+  .w.hot { color:#fff; background:var(--hot); box-shadow:0 1px 10px rgba(46,139,69,.42);
+    transition:color .25s; }
   #badge { position:fixed; z-index:30; bottom:14px; inset-inline-start:14px;
     display:flex; align-items:center; gap:8px; direction:rtl; background:var(--card);
     border:1px solid var(--line); border-radius:999px; padding:6px 14px;
@@ -325,7 +329,8 @@ function update(t){
     setActiveAyah(key);
     // окно подсветки ±R слов: центр (hot) + соседи с затухающей интенсивностью (градиент) —
     // шире и мягче → маскирует неточность привязки слова к таймстемпу
-    hotEls.forEach(x=>{ x.classList.remove('hot','lit'); x.style.removeProperty('--wi'); }); hotEls=[];
+    hotEls.forEach(x=>{ x.classList.remove('hot','lit'); x.style.removeProperty('--wi');
+      x.style.background=''; }); hotEls=[];
     const R=3;
     for(let dwi=-R; dwi<=R; dwi++){
       const el=wordEl[e.surah+':'+e.ayah+':'+(e.wi+dwi)];
@@ -334,7 +339,19 @@ function update(t){
       else { el.style.setProperty('--wi', (1 - Math.abs(dwi)/(R+1)).toFixed(2)); el.classList.add('lit'); }
       hotEls.push(el);
     }
-    scrollTargetEl = wordEl[e.surah+':'+e.ayah+':'+e.wi] || scrollTargetEl;
+    // karaoke-заливка текущего слова: прогресс внутри [t_i, t_{i+1}] (ощущение «по буквам»,
+    // маскирует неточность привязки). RTL → льём справа налево; непролитое — приглушённо-зелёное,
+    // чтобы белый текст читался в любой теме.
+    const hotEl = wordEl[e.surah+':'+e.ayah+':'+e.wi];
+    if(hotEl){
+      const nx = WT[i+1];
+      const dur = nx ? Math.max(0.08, nx.t - e.t) : 0.4;
+      let p = (t - e.t) / dur; p = p < 0 ? 0 : p > 1 ? 1 : p;
+      const pct = (p * 100).toFixed(1);
+      hotEl.style.background = 'linear-gradient(to left, var(--hot) ' + pct +
+        '%, color-mix(in srgb, var(--hot) 42%, var(--card)) ' + pct + '%)';
+    }
+    scrollTargetEl = hotEl || scrollTargetEl;
     return;
   }
   // --- запасной аятный режим (если нет word_timeline) ---
