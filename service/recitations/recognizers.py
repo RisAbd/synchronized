@@ -19,7 +19,7 @@ class Recognizer:
 # Порядок важен: google точнее на арабском → выше приоритет авто-выбора.
 REGISTRY: dict[str, Recognizer] = {
     "google": Recognizer("google", "Google STT", "точнее на арабском; из кэша ответов"),
-    "whisper": Recognizer("whisper", "Whisper large-v3", "локально на GPU; арабский средне"),
+    "whisper": Recognizer("whisper", "Whisper large-v3", "локально; в докере на CPU (медленно), GPU — на хосте; арабский средне"),
 }
 
 # Приоритет авто-выбора активного прогона (по убыванию предпочтения).
