@@ -1,7 +1,12 @@
 """Модели записи чтения (recitation) и её ASR-прогонов (по распознавателям)."""
+import re
+
 from django.db import models
 
 from . import recognizers
+
+# id видео из youtube.com/watch?v=…, youtu.be/…, youtube.com/embed/… (11 символов)
+_YT_ID_RE = re.compile(r"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|shorts/)|youtu\.be/)([\w-]{11})")
 
 
 class Status(models.TextChoices):
@@ -39,6 +44,14 @@ class Recitation(models.Model):
 
     def __str__(self):
         return f"{self.title or self.source_url} [{self.status}]"
+
+    @property
+    def youtube_id(self):
+        """id YouTube-видео из source_url (для эмбеда рядом с текстом, П1). '' если не YouTube."""
+        if self.source_type != "youtube":
+            return ""
+        m = _YT_ID_RE.search(self.source_url or "")
+        return m.group(1) if m else ""
 
     # --- прогоны по распознавателям ---
 

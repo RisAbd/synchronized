@@ -1,65 +1,58 @@
-# Стандартный стек synchronized: web (Django/gunicorn) + Postgres + Redis + Celery-worker.
-# Запуск:  docker compose up --build
+# Стек synchronized (dev): web (Django) + Redis + Celery-worker. БД — SQLite.
+# Запуск:  docker compose up -d --build
 # Веб: http://localhost:8000
 #
-# ⚠️ ASR: в контейнере faster-whisper работает на CPU (медленно). Для GPU-распознавания
-# гоняй конвейер на хосте (см. README) — ключевой ML тяжело прокидывать в docker с GPU.
+# ⚠️ ДАННЫЕ. Никаких named volume для БД — их сносит `docker compose down -v`.
+# БД (SQLite) и медиа примонтированы как bind-mount к хосту → переживают ЛЮБОЙ down,
+# down -v, пересборку. Ничего не теряется.
+#   ./service/db.sqlite3  ← боевая БД (записи + прогоны ASR с data внутри)
+#   ./media/              ← аудио записей и сырые ответы ASR (media/rec/<id>/...)
+#   ./work/               ← промежуточные выгрузки конвейера
+# Код (./service, ./src) тоже примонтирован → Django на runserver с hot-reload,
+# пересобирать образ после каждой правки не нужно.
+#
+# ⚠️ ASR: faster-whisper в контейнере на CPU (медленно). Для GPU гоняй конвейер на хосте.
 
 services:
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: synchronized
-      POSTGRES_USER: synchronized
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-synchronized}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U synchronized"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
 
   web:
     build:
       context: .
       dockerfile: service/Dockerfile
+    restart: unless-stopped
     environment: &appenv
-      DJANGO_DEBUG: "0"
-      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-prod}
+      DJANGO_DEBUG: "1"
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-insecure-key-change-me}
       DJANGO_ALLOWED_HOSTS: "*"
-      POSTGRES_DB: synchronized
-      POSTGRES_USER: synchronized
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-synchronized}
-      POSTGRES_HOST: db
+      # POSTGRES_* НЕ задаём → settings.py уходит в SQLite (service/db.sqlite3)
       CELERY_BROKER_URL: redis://redis:6379/0
       SYNC_RECOGNIZER: ${SYNC_RECOGNIZER:-whisper}
     volumes:
-      - media:/app/web/audio      # готовое аудио плеера
-      - work:/app/work            # промежуточные выгрузки
+      - ./service:/app/service    # код сервиса + db.sqlite3 (hot-reload + БД)
+      - ./src:/app/src            # ядро конвейера (align/asr/quran/ingest)
+      - ./media:/app/media        # аудио записей + сырые ответы ASR (persist)
+      - ./work:/app/work          # промежуточные выгрузки (persist)
+    # runserver: hot-reload кода + отдача static в DEBUG
+    command: sh -c "python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8000"
     ports:
       - "8000:8000"
     depends_on:
-      db: {condition: service_healthy}
       redis: {condition: service_started}
 
   worker:
     build:
       context: .
       dockerfile: service/Dockerfile
+    restart: unless-stopped
     environment: *appenv
     command: celery -A synchronized worker -l info --concurrency 1
     volumes:
-      - media:/app/web/audio
-      - work:/app/work
+      - ./service:/app/service
+      - ./src:/app/src
+      - ./media:/app/media
+      - ./work:/app/work
     depends_on:
-      db: {condition: service_healthy}
       redis: {condition: service_started}
-
-volumes:
-  pgdata:
-  media:
-  work:

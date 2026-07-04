@@ -102,6 +102,7 @@ def player(request, pk):
         "rec": rec,
         "active_key": active_key,
         "runs": rec.runs.all(),
+        "youtube_id": rec.youtube_id,
     })
 
 
@@ -117,6 +118,7 @@ def data_json(request, pk):
                     "title_ar": rec.title_ar, "reciter": rec.reciter,
                     "recognizer": run.recognizer if run else None,
                     "metrics": (run.metrics if run else None) or {},
+                    "youtube_id": rec.youtube_id,
                     "audio": reverse("audio", args=[rec.id])})
     return JsonResponse(payload)
 

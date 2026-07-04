@@ -37,4 +37,5 @@ scratch_*
 
 # Django
 db.sqlite3
+db.sqlite3.bak*
 service/staticfiles/
