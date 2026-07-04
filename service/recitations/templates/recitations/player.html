@@ -121,7 +121,7 @@
     {% for run in runs %}{% if not run.is_aligner %}
       {% if run.status == 'ready' %}
         <a class="asr {% if run.recognizer == active_key %}on{% endif %}" href="?asr={{ run.recognizer }}"
-           title="покрытие {{ run.metrics.coverage|default:'—' }}, слов {{ run.metrics.wt|default:0 }}">
+           title="покрытие аудио {% if run.metrics.coverage %}{% widthratio run.metrics.coverage 1 100 %}%{% else %}—{% endif %} (доля времени записи со словами), слов {{ run.metrics.wt|default:0 }}">
           {{ run.label }}<small>{{ run.metrics.wt|default:0 }} сл</small></a>
       {% elif run.status == 'error' %}
         <span class="asr err" title="{{ run.error }}">{{ run.label }} · ошибка</span>
@@ -133,7 +133,7 @@
       <span class="lbl lbl-align">· выравнивание:</span>
       {% if run.status == 'ready' %}
         <a class="asr {% if run.recognizer == active_key %}on{% endif %}" href="?asr={{ run.recognizer }}"
-           title="точные границы аятов (выровнен известный текст), покрытие {{ run.metrics.coverage|default:'—' }}">
+           title="точные границы аятов (выровнен известный текст), покрытие аудио {% if run.metrics.coverage %}{% widthratio run.metrics.coverage 1 100 %}%{% else %}—{% endif %}">
           {{ run.label }}<small>{{ run.metrics.wt|default:0 }} сл</small></a>
       {% elif run.status == 'error' %}
         <span class="asr err" title="{{ run.error }}">{{ run.label }} · ошибка</span>

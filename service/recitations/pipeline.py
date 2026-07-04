@@ -99,6 +99,31 @@ def _ffprobe_duration(path: Path) -> float:
         return 0.0
 
 
+def _audio_time_coverage(word_timeline, audio_duration, bin_sec: float = 10.0) -> float:
+    """ЧЕСТНОЕ покрытие: доля ДЛИТЕЛЬНОСТИ АУДИО, реально покрытая размещёнными словами.
+
+    Раньше `coverage` = aligned/asr_words (align.py) — самореферентно: распознаватель, услышавший
+    6 слов на 20-минутной записи и разместивший все 6, получал 1.0. Здесь знаменатель — реальная
+    длительность аудио (одна для всех прогонов записи → метрика сравнима между whisper/google/forced).
+
+    Бьём аудио на бины по bin_sec и считаем долю бинов, в которых есть хоть одно слово. Не обмануть
+    ни малым числом слов (6 слов в первых 20с из 1295 → ~1-2%), ни двумя словами по краям (это дало бы
+    полный span, но пустые бины в середине → низкое покрытие). Требует слов, РАЗМАЗАННЫХ по всей записи.
+    """
+    if not word_timeline or not audio_duration or audio_duration <= 0:
+        return 0.0
+    nbins = max(1, int(audio_duration // bin_sec) + (1 if audio_duration % bin_sec else 0))
+    hit = set()
+    for w in word_timeline:
+        t = w.get("t")
+        if t is None:
+            continue
+        b = int(t // bin_sec)
+        if 0 <= b < nbins:
+            hit.add(b)
+    return round(len(hit) / nbins, 3)
+
+
 def _yt_title(url: str) -> str:
     """Название YouTube-ролика через публичный oEmbed (без ключа/зависимостей). '' при неудаче."""
     try:
@@ -264,17 +289,28 @@ def run_one(run, on_stage=None) -> None:
 
     stage("build")
     data = build_data(sync_map, q, rec.audio_filename)
-    dur = data["timeline"][-1]["t"] if data.get("timeline") else 0
-    data["duration"] = round(dur)
+    # РЕАЛЬНАЯ длительность аудио (не последняя точка таймлайна — она самореферентна: у 6-словного
+    # whisper timeline кончается на ~20с, хотя запись 1295с). Берём из meta (ffprobe при ingest),
+    # иначе перепробуем ffprobe. Нужна как честный знаменатель покрытия.
+    audio_dur = (rec.meta or {}).get("duration") or _ffprobe_duration(audio)
+    tl_end = data["timeline"][-1]["t"] if data.get("timeline") else 0
+    data["duration"] = round(audio_dur or tl_end)
     # посимвольная дорожка (forced align) — build_data её не копирует, тащим для побуквенной подсветки
     if sync_map.get("char_timeline"):
         data["char_timeline"] = sync_map["char_timeline"]
 
     wt = data.get("word_timeline") or []
     tl = data.get("timeline") or []
+    meta = dict(sync_map.get("meta", {}))
+    # старое coverage движка (aligned/asr_words или n/ref) — самореферентно, НЕ headline. Сохраняем
+    # под ясным именем для дебага, а headline coverage считаем честно по времени аудио.
+    if "coverage" in meta:
+        meta["aligned_ratio"] = meta.pop("coverage")
+    time_cov = _audio_time_coverage(wt, audio_dur or tl_end)
     run.data = data
-    run.metrics = {**sync_map.get("meta", {}),
-                   "wt": len(wt), "tl": len(tl), "duration": round(dur),
+    run.metrics = {**meta,
+                   "coverage": time_cov,
+                   "wt": len(wt), "tl": len(tl), "duration": round(audio_dur or tl_end),
                    "elapsed_sec": round(time.monotonic() - t0, 1)}
     run.status = AsrRun.Status.READY
     run.stage = ""
