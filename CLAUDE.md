@@ -11,20 +11,25 @@
 
 > Коротко: текущий фокус и свежие договорённости. Детали статусов — в `docs/BACKLOG.md`.
 
-- **Сейчас в работе / ЖДЁТ ВЛАДЕЛЬЦА:** docker+GPU — образ и compose готовы (worker получает GPU,
-  whisper+forced ставятся в контейнер), но нужен ОДИН системный шаг под sudo: поставить
-  `nvidia-container-toolkit` на хост (репо NVIDIA не подключён, sudo с паролем — только владелец).
-  Команды — в шапке `docker-compose.yml`. После установки: `docker compose up -d --build`, проверить
-  `docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi`, затем перемолоть записи
-  ЧЕРЕЗ СЕРВИС (кнопка пересчёта/фронт), убедиться что whisper идёт на GPU в воркере. Дальше — верхний
-  невыполненный из `docs/BACKLOG.md` (п.7 whisper = «сменить модель на tarteel-base»).
-- **Сделано 04.07 (сессия 3, голос про forced+docker-GPU):** подготовлен docker с GPU как ЧАСТЬ
-  пайплайна (владелец: хватит молоть руками на хосте — сервис должен сам, на GPU). (1) `service/Dockerfile`:
-  torch CPU-колесо + ctc-forced-aligner/onnxruntime/Unidecode + nvidia-cudnn-cu12==9.1.0.70/nvidia-cublas-cu12==12.4.5.8,
-  `LD_LIBRARY_PATH` на pip-cuDNN, `HOME=/app/.cache`+`HF_HOME` для кэша моделей. (2) `docker-compose.yml`:
-  worker `deploy.resources.reservations.devices` (nvidia, all), bind-mount `./cache` (не качать модели
-  на рестарт), HOME→/app/.cache. (3) forced остаётся авто-пост-шагом (`_maybe_forced`) — теперь его deps
-  есть в контейнере, `falign.available()`==True → сам гоняется в воркере. Осталось: тулкит (см. выше).
+- **Сейчас в работе / СЛЕДУЮЩЕЕ:** верхний невыполненный из `docs/BACKLOG.md` — **п.8/п.7: подключить
+  `tarteel-ai/whisper-base-ar-quran`** как модель whisper-распознавателя (env `SYNC_WHISPER_MODEL` в
+  `src/asr.py`, ct2-конверсия base-модели, гонять на GPU в воркере), сравнить с large-v3/google по
+  честной coverage-метрике. Мотив железный: large-v3 на этих читках измерен честно и ПЛОХ (rec1 0.015 =
+  6 слов на 21 мин, rec9 0.008), google 0.985–1.0.
+- **Сделано 04.07 (сессия 4):** (1) **GPU-докер заведён как часть пайплайна** — владелец поставил
+  `nvidia-container-toolkit` (sudo), `docker compose up -d --build` пересобрал web+worker; в воркере
+  `ctranslate2 cuda devices:1`, `falign.available():True`; все 5 записей перемолоты ЧЕРЕЗ СЕРВИС
+  (dispatch→celery→worker, whisper large-v3 на GPU ~5-7с/запись при кэше в `./cache`, forced авто-пост-шаг).
+  Конец хостовым костылям. (2) **Починена coverage-метрика** (владелец заметил: whisper 6 слов, а cov 1.0!):
+  старая была самореферентной (aligned/asr_words) → headline `coverage` теперь = доля ДЛИТЕЛЬНОСТИ АУДИО,
+  покрытая словами (`pipeline._audio_time_coverage`, бины 10с, знаменатель = реальная длительность →
+  сравнимо между распознавателями). Старое соотношение → `metrics.aligned_ratio`. ⚠️ Метрика ещё НЕ
+  идеальна (длина аудио тоже кривой знаменатель: паузы/вступления/темп чтеца) — доработать до комплексной,
+  занесено в BACKLOG «Позже» как 🟡 (НЕ закрыто).
+- **Раньше (сессия 3):** docker-образ с GPU подготовлен (`service/Dockerfile`: torch CPU-колесо +
+  ctc-forced-aligner/onnxruntime/Unidecode + nvidia-cudnn/cublas, `LD_LIBRARY_PATH` на pip-cuDNN,
+  g++ для сборки C++-расширения ctc-forced-aligner, `HOME=/app/.cache`+`HF_HOME`; `docker-compose.yml`:
+  worker `deploy.resources.reservations.devices` nvidia, bind-mount `./cache`).
 - **Сделано 04.07 (сессия 2, голос 08:39):** (1) whisper теперь ТОЛЬКО GPU — CPU-фолбэк выпилен
   из `src/asr._load_model` (на арабском CPU даёт кашу, 5 слов на 20 мин). `SYNC_ASR_DEVICE=cpu` — опт-ин.
   (2) forced выведен из «распознавания» в UI: player.html развёл «распознавание:» (google/whisper) и
@@ -38,7 +43,7 @@
   там нет 3.12 → exit 127). Плюс `export LD_LIBRARY_PATH=…/nvidia/cudnn/lib:…/cublas/lib` для GPU-whisper.
 - **Договорённости:** аудио-ТЗ (`.ogg` + транскрипты) складываю в `media/` (они как ТЗ, трекаются
   в git через whitelist в `.gitignore`). Разбор голосовых ТЗ раскидываю по BACKLOG/TZ/NOTES.
-- Обновлено: 2026-07-04.
+- Обновлено: 2026-07-04 (сессия 4).
 
 ## Режим работы
 
