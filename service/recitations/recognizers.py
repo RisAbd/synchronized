@@ -21,7 +21,7 @@ class Recognizer:
 REGISTRY: dict[str, Recognizer] = {
     "forced": Recognizer("forced", "Forced align", "точные границы: выравнивает текст аятов к аудио (без ошибок ASR); нужен готовый прогон для диапазона"),
     "google": Recognizer("google", "Google STT", "точнее на арабском; из кэша ответов"),
-    "whisper": Recognizer("whisper", "Whisper large-v3", "локально; в докере на CPU (медленно), GPU — на хосте; арабский средне"),
+    "whisper": Recognizer("whisper", "Whisper (Tarteel)", "локально на GPU; модель tarteel-ai/whisper-base-ar-quran — дообучена под коранический арабский"),
 }
 
 # Выравниватели по известному тексту (не распознаватели): им нужен готовый прогон-источник

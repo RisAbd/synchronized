@@ -46,6 +46,11 @@ services:
       SYNC_RECOGNIZER: ${SYNC_RECOGNIZER:-whisper}
       # распознаватели по умолчанию для новых записей (forced НЕ здесь — он авто-пост-шаг)
       SYNC_RECOGNIZERS: ${SYNC_RECOGNIZERS:-whisper,google}
+      # Модель whisper: дообученная под коранический арабский tarteel-ai/whisper-base-ar-quran,
+      # сконвертированная в CTranslate2 (см. ./cache/ct2-tarteel-base, генерится ct2-transformers-converter).
+      # Ванильный large-v3 на арабском измеренно ПЛОХ (rec9 5 слов на 21 мин), tarteel-base — 464 слова.
+      # Если каталога нет — src/asr._default_model уходит в large-v3. Путь = ./cache смонтирован в /app/.cache.
+      SYNC_WHISPER_MODEL: ${SYNC_WHISPER_MODEL:-/app/.cache/ct2-tarteel-base}
       # Google STT: ключ сервис-аккаунта кладём в ./creds/ (gitignored) → монтируется в /app/creds.
       # Бакет и live-флаг — через .env (compose читает его автоматически). Без ключа/бакета
       # gstt.is_available()==False → google тихо уходит в кэш/пропуск, запись живёт по whisper.

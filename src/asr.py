@@ -18,6 +18,16 @@ import sys
 from pathlib import Path
 
 
+def _default_model() -> str:
+    """Какую whisper-модель грузить. env SYNC_WHISPER_MODEL — либо имя размера (large-v3, small…),
+    либо ПУТЬ к каталогу CTranslate2 (напр. дообученная под коранический арабский
+    tarteel-ai/whisper-base-ar-quran, сконвертированная `ct2-transformers-converter`).
+    Дефолт large-v3 — ванильный, измеренно ПЛОХ на арабском (rec1 6 слов на 21 мин), поэтому
+    в докер-воркере переопределяем на ct2-tarteel (см. docker-compose + ./cache/ct2-tarteel-base)."""
+    import os
+    return os.environ.get("SYNC_WHISPER_MODEL", "").strip() or "large-v3"
+
+
 def _load_model(model_size: str):
     """Грузим модель. По умолчанию — ТОЛЬКО GPU (cuda): на CPU whisper на арабском бесполезен
     (даёт кашу, напр. 5 слов на 20 мин — см. владелец 04.07), и тратить на него время нельзя.
@@ -44,15 +54,23 @@ def _load_model(model_size: str):
         f"(бесполезен на арабском; SYNC_ASR_DEVICE=cpu чтобы форсить). Последняя ошибка: {last}")
 
 
-def transcribe(audio: str | Path, language: str = "ar", model_size: str = "large-v3") -> dict:
+def _use_vad() -> bool:
+    """VAD (silero) по умолчанию ВЫКЛЮЧЕН. На мелодичном таджвиде он катастрофически ошибается —
+    принимает распевное чтение за тишину и выкидывает ~97% аудио (измерено: rec9 18 мин →
+    VAD оставил 34с; с VAD 5 слов, без VAD 896 — сопоставимо с google 915). Включить: SYNC_ASR_VAD=1."""
+    import os
+    return os.environ.get("SYNC_ASR_VAD", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def transcribe(audio: str | Path, language: str = "ar", model_size: str | None = None) -> dict:
     audio = str(audio)
-    model = _load_model(model_size)
+    model = _load_model(model_size or _default_model())
 
     segments, info = model.transcribe(
         audio,
         language=language,
         word_timestamps=True,
-        vad_filter=True,
+        vad_filter=_use_vad(),
         vad_parameters=dict(min_silence_duration_ms=500),
         beam_size=5,
     )
