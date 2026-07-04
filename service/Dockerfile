@@ -12,8 +12,9 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/app/.cache/huggingface \
     HOME=/app/.cache
 
-# ffmpeg нужен для ingest/ASR
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+# ffmpeg — для ingest/ASR; g++ — ctc-forced-aligner собирает C++-расширение из исходников
+# (иначе `command 'g++' failed: No such file or directory` при pip install).
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg g++ \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
