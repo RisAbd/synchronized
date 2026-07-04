@@ -1,7 +1,18 @@
 """Модели записи чтения (recitation) и её ASR-прогонов (по распознавателям)."""
 import re
+import unicodedata
 
 from django.db import models
+
+
+def _ar_norm(s: str) -> str:
+    """Нормализация для поиска: убрать харакат (combining marks) и унифицировать алифы/я/та-марбуту,
+    привести к нижнему регистру. Чтобы «الأنعام» находило хранимое «ٱلْأَنْعَام»."""
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    for a in "آأإٱٲٳ":
+        s = s.replace(a, "ا")
+    return s.replace("ى", "ي").replace("ة", "ه").lower()
 
 from . import recognizers
 
@@ -35,6 +46,8 @@ class Recitation(models.Model):
     gstt_key = models.CharField(max_length=200, blank=True)
     # Данные плеера для legacy-записей (до модели AsrRun). Новые записи держат data в AsrRun.
     data = models.JSONField(null=True, blank=True)
+    # Метаинфо источника (П6): {duration, filesize, ext, thumbnail, yt_title}. Заполняется при ingest.
+    meta = models.JSONField(default=dict, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -44,6 +57,31 @@ class Recitation(models.Model):
 
     def __str__(self):
         return f"{self.title or self.source_url} [{self.status}]"
+
+    @classmethod
+    def find_by_source(cls, url: str):
+        """Найти уже существующую запись по источнику (П7: не запускать повторно).
+        Для YouTube сверяем по id видео (разные формы ссылки → одно видео), иначе по точной ссылке."""
+        url = (url or "").strip()
+        if not url:
+            return None
+        m = _YT_ID_RE.search(url)
+        if m:
+            yid = m.group(1)
+            for r in cls.objects.filter(source_type="youtube"):
+                if r.youtube_id == yid:
+                    return r
+            return None
+        return cls.objects.filter(source_url=url).first()
+
+    def matches_query(self, q: str) -> bool:
+        """Совпадает ли запись с поисковым запросом (по названию/чтецу/ссылке/названиям сур).
+        Арабский нормализуем (без харакат/варианты алифа), чтобы «الأنعام» находило «ٱلْأَنْعَام»."""
+        if not (q or "").strip():
+            return True
+        hay = " ".join([self.title or "", self.reciter or "", self.source_url or "",
+                        self.title_ar or "", self.surahs_label])
+        return _ar_norm(q) in _ar_norm(hay)
 
     @property
     def youtube_id(self):
@@ -84,7 +122,39 @@ class Recitation(models.Model):
 
     @property
     def duration(self):
-        return self._player_data().get("duration", 0)
+        # длительность из плеера (после align) или из метаинфо аудио (доступна до готовности)
+        return self._player_data().get("duration") or (self.meta or {}).get("duration") or 0
+
+    @property
+    def duration_h(self):
+        """Длительность в формате m:ss (или h:mm:ss) — для списка/детализации."""
+        s = int(self.duration or 0)
+        if not s:
+            return ""
+        h, m, sec = s // 3600, (s % 3600) // 60, s % 60
+        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+    @property
+    def filesize_h(self):
+        """Размер файла человекочитаемо (МБ)."""
+        b = (self.meta or {}).get("filesize") or 0
+        if not b:
+            return ""
+        mb = b / (1024 * 1024)
+        return f"{mb:.1f} МБ" if mb >= 0.1 else f"{b // 1024} КБ"
+
+    @property
+    def thumbnail(self):
+        """URL превью (для YouTube — кадр по id; для файлов пусто)."""
+        t = (self.meta or {}).get("thumbnail")
+        if t:
+            return t
+        yid = self.youtube_id
+        return f"https://img.youtube.com/vi/{yid}/hqdefault.jpg" if yid else ""
+
+    @property
+    def ext_h(self):
+        return ((self.meta or {}).get("ext") or "").lstrip(".").upper()
 
     @property
     def surahs_label(self):

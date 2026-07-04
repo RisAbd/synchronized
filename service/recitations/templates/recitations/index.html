@@ -31,7 +31,11 @@
   .card { display:flex; align-items:center; gap:12px; text-decoration:none; color:inherit;
     background:var(--card); border:1px solid var(--line); border-radius:14px;
     padding:14px 16px; margin-bottom:12px; }
-  .card .ar { font-family:"Amiri","Scheherazade New",serif; font-size:1.5rem; direction:rtl; }
+  .card .ar { font-family:"Amiri","Scheherazade New",serif; font-size:1.5rem; direction:rtl; flex:none; }
+  .card .thumb { width:54px; height:54px; border-radius:10px; object-fit:cover; flex:none;
+    background:var(--chip); }
+  .card .metsub { color:var(--dim,var(--muted)); font-size:.78rem; margin-top:2px;
+    display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .card .body { flex:1; min-width:0; }
   /* display:block обязателен — text-overflow:ellipsis не работает на инлайновом span → ссылка уезжала за блок */
   .card .ct { display:block; font-weight:600; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -55,9 +59,13 @@
     border:2px solid var(--line); border-top-color:var(--proc); border-radius:50%;
     animation:spin .7s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
-  /* панель действий над списком: «добавить» — компактной кнопкой, список идёт первым */
-  .actions { display:flex; justify-content:flex-end; margin-bottom:16px; }
-  .add-btn { display:inline-flex; align-items:center; gap:8px; }
+  /* панель действий над списком: поиск + «добавить» компактной кнопкой, список идёт первым */
+  .actions { display:flex; gap:10px; align-items:center; margin-bottom:16px; }
+  .search { flex:1; min-width:0; }
+  .search input { width:100%; background:var(--card); border:1px solid var(--line); color:var(--fg);
+    border-radius:10px; padding:11px 13px; font-size:.95rem; }
+  .search input:focus { outline:none; border-color:var(--accent); }
+  .add-btn { display:inline-flex; align-items:center; gap:8px; white-space:nowrap; flex:none; }
   /* модалка добавления записи */
   .modal { position:fixed; inset:0; z-index:50; display:none; align-items:flex-start;
     justify-content:center; background:rgba(0,0,0,.45); padding:24px 16px; overflow-y:auto; }
@@ -78,7 +86,10 @@
     сервис обработает и даст плеер с авто-прокруткой.</p>
 
   <div class="actions">
-    <button type="button" class="add-btn" id="openAdd">＋ Добавить запись</button>
+    <form class="search" method="get" action="{% url 'index' %}">
+      <input name="q" value="{{ q }}" placeholder="Поиск: название, чтец, ссылка, сура…" autocomplete="off">
+    </form>
+    <button type="button" class="add-btn" id="openAdd">＋ Добавить</button>
   </div>
 
   <div id="list">
@@ -86,10 +97,12 @@
     <div class="card-wrap" data-id="{{ r.id }}" data-status="{{ r.status }}">
       {% if r.is_ready %}
       <a class="card" href="{% url 'player' r.id %}">
-        {% if r.title_ar %}<span class="ar">{{ r.title_ar }}</span>{% endif %}
+        {% if r.thumbnail %}<img class="thumb" src="{{ r.thumbnail }}" alt="" loading="lazy" onerror="this.style.display='none'">
+        {% elif r.title_ar %}<span class="ar">{{ r.title_ar }}</span>{% endif %}
         <span class="body">
           <span class="ct">{{ r.title|default:r.source_url|truncatechars:56 }}</span>
           <span class="meta">{{ r.reciter }}{% if r.reciter and r.surahs_label %} · {% endif %}{{ r.surahs_label }}</span>
+          {% if r.duration_h or r.filesize_h %}<span class="metsub">{{ r.duration_h }}{% if r.duration_h and r.filesize_h %} · {% endif %}{{ r.filesize_h }}{% if r.ext_h %} · {{ r.ext_h }}{% endif %}</span>{% endif %}
           <span class="runs">
             {% for run in r.runs.all %}
               {% if run.status == 'ready' %}<span class="rz-chip">{{ run.label }} · {{ run.metrics.wt|default:0 }} сл{% if run.metrics.coverage %} · {{ run.metrics.coverage }}{% endif %}</span>
@@ -102,6 +115,7 @@
       </a>
       {% else %}
       <div class="card">
+        {% if r.thumbnail %}<img class="thumb" src="{{ r.thumbnail }}" alt="" loading="lazy" onerror="this.style.display='none'">{% endif %}
         <span class="body">
           <span class="ct">{{ r.title|default:r.source_url|truncatechars:56 }}</span>
           <span class="meta">{% if r.status != 'error' %}<span class="spin"></span>{% endif %}<span class="status-line">{% if r.status == 'error' %}{{ r.error|truncatechars:80 }}{% elif r.stage %}шаг: {{ r.stage }}…{% else %}{{ r.get_status_display }}…{% endif %}</span></span>
@@ -114,7 +128,8 @@
       {% endif %}
     </div>
   {% empty %}
-    <div class="empty">Пока пусто. Нажми «＋ Добавить запись».</div>
+    {% if q %}<div class="empty">По запросу «{{ q }}» ничего не найдено.</div>
+    {% else %}<div class="empty">Пока пусто. Нажми «＋ Добавить».</div>{% endif %}
   {% endfor %}
   </div>
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from functools import lru_cache
@@ -67,9 +68,11 @@ def ensure_audio(rec) -> Path:
     if rec.audio_filename:
         p = d / rec.audio_filename
         if p.is_file():
+            _fill_meta(rec, p)
             return p
         legacy = Path(settings.AUDIO_DIR) / rec.audio_filename  # демо-записи
         if legacy.is_file():
+            _fill_meta(rec, legacy)
             return legacy
 
     import ingest
@@ -80,7 +83,65 @@ def ensure_audio(rec) -> Path:
         shutil.copyfile(src, dst)
     rec.audio_filename = audio_name
     rec.save(update_fields=["audio_filename", "updated_at"])
+    _fill_meta(rec, dst)
     return dst
+
+
+def _ffprobe_duration(path: Path) -> float:
+    """Длительность аудио в секундах через ffprobe (0.0 если не вышло)."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=30)
+        return round(float(out.stdout.strip()), 1) if out.stdout.strip() else 0.0
+    except Exception:
+        return 0.0
+
+
+def _yt_title(url: str) -> str:
+    """Название YouTube-ролика через публичный oEmbed (без ключа/зависимостей). '' при неудаче."""
+    try:
+        import urllib.parse
+        import urllib.request
+        api = "https://www.youtube.com/oembed?" + urllib.parse.urlencode(
+            {"url": url, "format": "json"})
+        with urllib.request.urlopen(api, timeout=8) as r:
+            return (json.loads(r.read().decode()) or {}).get("title", "") or ""
+    except Exception:
+        return ""
+
+
+def _fill_meta(rec, path: Path) -> None:
+    """Заполнить rec.meta метаинфой источника (П6): длительность/размер/расширение/превью/название.
+    Идемпотентно и без падений — метаинфо не критично для конвейера. Для YouTube название и превью
+    берём без нового API (oEmbed + img.youtube.com). Если названия у записи нет — подставляем из меты."""
+    meta = dict(rec.meta or {})
+    fields = ["meta"]
+    try:
+        st = path.stat()
+        meta.setdefault("ext", path.suffix)
+        meta["filesize"] = st.st_size
+        if not meta.get("duration"):
+            dur = _ffprobe_duration(path)
+            if dur:
+                meta["duration"] = dur
+    except OSError:
+        pass
+
+    if rec.youtube_id:
+        meta.setdefault("thumbnail", f"https://img.youtube.com/vi/{rec.youtube_id}/hqdefault.jpg")
+        if not meta.get("yt_title"):
+            t = _yt_title(rec.source_url)
+            if t:
+                meta["yt_title"] = t
+                if not rec.title:               # пустое название → подставим из YouTube
+                    rec.title = t[:300]
+                    fields.append("title")
+
+    rec.meta = meta
+    fields.append("updated_at")
+    rec.save(update_fields=fields)
 
 
 def _recognize(audio_path: Path, recognizer: str, rec, out: Path):

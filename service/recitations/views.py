@@ -24,8 +24,13 @@ from .tasks import dispatch, dispatch_run
 
 def index(request):
     recs = Recitation.objects.prefetch_related("runs").all()
+    q = (request.GET.get("q") or "").strip()
+    if q:
+        # поиск по названию/чтецу/ссылке/названиям сур; surahs_label — вычисляемое, фильтруем в Python
+        recs = [r for r in recs if r.matches_query(q)]
     return render(request, "recitations/index.html", {
         "recs": recs,
+        "q": q,
         "recognizers": recognizers.selectable_recognizers(),
         "default_recognizers": settings.DEFAULT_RECOGNIZERS,
     })
@@ -47,6 +52,10 @@ def add(request):
     url = (request.POST.get("source_url") or "").strip()
     if not url:
         return HttpResponseRedirect(reverse("index"))
+    # П7: уже парсили эту ссылку → не создаём дубль, ведём на существующую запись
+    dup = Recitation.find_by_source(url)
+    if dup:
+        return HttpResponseRedirect(reverse("player", args=[dup.id]))
     is_yt = bool(re.search(r"(youtube\.com|youtu\.be)", url))
     rec = Recitation.objects.create(
         source_url=url,
