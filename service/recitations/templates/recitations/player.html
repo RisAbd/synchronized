@@ -126,7 +126,7 @@ let scrollTargetEl = null;                       // элемент, которы
 const headerEl = document.querySelector('header');
 
 // --- источник времени: YouTube-видео (эмбед, П1) либо <audio> ---
-let ytPlayer = null, ytReady = false, useVideo = false, rafOn = false;
+let ytPlayer = null, ytReady = false, useVideo = false, rafOn = false, DATA = null, ytFallbackTimer = null;
 
 const toArabic = n => String(n).replace(/[0-9]/g, d => '٠١٢٣٤٥٦٧٨٩'[d]);
 const fmt = t => { t=Math.max(0,t|0); return (t/60|0)+':'+String(t%60).padStart(2,'0'); };
@@ -147,22 +147,40 @@ if(YOUTUBE_ID){
   useVideo = true;
   const tag = document.createElement('script');
   tag.src = "https://www.youtube.com/iframe_api";
+  tag.onerror = fallbackToAudio;                 // API не загрузился (сеть/блокировка)
   document.head.appendChild(tag);
+  // страховка: видео не инициализировалось за 6с (эмбед запрещён / нет сети) → откат на аудио
+  ytFallbackTimer = setTimeout(fallbackToAudio, 6000);
 }
 window.onYouTubeIframeAPIReady = function(){
-  if(!YOUTUBE_ID) return;
+  if(!YOUTUBE_ID || !useVideo) return;
   ytPlayer = new YT.Player('yt', {
     videoId: YOUTUBE_ID, width:'100%', height:'100%',
     playerVars: { playsinline:1, rel:0, modestbranding:1 },
-    events: { onReady: ()=>{ ytReady = true; startTick(); } }
+    events: {
+      onReady: ()=>{ ytReady = true; clearTimeout(ytFallbackTimer); startTick(); },
+      onError: fallbackToAudio,                   // видео недоступно / эмбед запрещён
+    }
   });
 };
+
+// откат на встроенное <audio>, если YouTube-эмбед не заработал (аудио скачано при ingest)
+function fallbackToAudio(){
+  if(!useVideo || ytReady) return;               // уже играем видео — ничего не делаем
+  clearTimeout(ytFallbackTimer);
+  useVideo = false;
+  const v = document.getElementById('video'); if(v) v.style.display = 'none';
+  audio.style.display = '';
+  if(DATA && DATA.audio) audio.src = DATA.audio;
+  startTick();
+}
 
 init();
 async function init(){
   let d;
   try { d = await (await fetch(DATA_URL)).json(); }
   catch(e){ fail('не удалось загрузить данные'); return; }
+  DATA = d;
 
   document.getElementById('ttl').textContent = d.title || 'запись';
   document.getElementById('sub').textContent = (d.reciter ? d.reciter+' · ' : '') + fmt(d.duration||0);
