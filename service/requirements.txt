@@ -3,11 +3,18 @@ Django>=5,<7
 gunicorn
 whitenoise
 python-dotenv
-psycopg2-binary
 celery
 redis
+# БД — SQLite (bind-mount), Postgres выпилен → psycopg2 не нужен (см. docs/BACKLOG)
 
 # конвейер (ядро src/) — распознавание/скачивание
 requests
 yt-dlp
 faster-whisper        # ASR; в docker работает на CPU (ctranslate2), на хосте — GPU
+
+# Google Speech-to-Text (основной распознаватель для арабского) — лёгкие API-клиенты, не ML.
+# Ключ через env GOOGLE_APPLICATION_CREDENTIALS (см. src/gstt.py, монтируется из ./creds/).
+google-cloud-speech
+google-cloud-storage
+# forced align (ctc-forced-aligner/torch) в docker НЕ ставим — тяжёлый ML, гоняем на хосте
+# (pipeline тихо пропускает forced без deps); onnxruntime уже тянется транзитивно.
