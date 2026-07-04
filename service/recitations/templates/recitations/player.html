@@ -4,16 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
 <title>{{ rec.title|default:"synchronized" }} · synchronized</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Amiri+Quran&family=Lateef&family=Noto+Naskh+Arabic:wght@400;700&family=Scheherazade+New:wght@400;700&display=swap" rel="stylesheet">
 <style>
   :root { color-scheme: light dark;
     --bg:#faf7f0; --fg:#201d16; --muted:#9a917f; --dim:#b9b1a0; --line:rgba(120,110,90,.18);
-    --hl-fg:#141007; --accent:#b8891a; --hot:#2e8b45; --card:#fffdf7; --chip:#f0ead9; }
+    --hl-fg:#141007; --accent:#b8891a; --hot:#2e8b45; --card:#fffdf7; --chip:#f0ead9;
+    /* выбираемый арабский шрифт (перекрывается из JS по localStorage) */
+    --arab-font:"Scheherazade New","Amiri","Noto Naskh Arabic","Times New Roman",serif; }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#100f0b; --fg:#efe8d6; --muted:#7c745f; --dim:#3f3a2e; --line:rgba(200,190,160,.14);
       --hl-fg:#fff3c4; --accent:#e4bf4a; --hot:#5ed07f; --card:#191710; --chip:#211e15; } }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-  html,body { margin:0; background:var(--bg); color:var(--fg);
-    font-family:"Amiri","Scheherazade New","Noto Naskh Arabic","Times New Roman",serif; }
+  html,body { margin:0; background:var(--bg); color:var(--fg); font-family:var(--arab-font); }
   /* Документ скроллится САМ (не внутренний div) → на мобиле прячется адресная строка при свайпе.
      Шапка с видео приклеена к верху (position:sticky), поэтому не уезжает и не перекрывается
      (непрозрачный фон + тень); текст скроллится под ней, активное слово тянем к верху под видео. */
@@ -36,8 +40,26 @@
   .chips { display:flex; gap:8px; overflow-x:auto; padding:0 12px 6px; direction:rtl;
     scrollbar-width:none; } .chips::-webkit-scrollbar{display:none}
   .chip { flex:none; background:var(--chip); border:none; color:var(--fg); cursor:pointer;
-    font:600 15px "Amiri",serif; padding:6px 14px; border-radius:999px; white-space:nowrap; }
+    font:600 15px var(--arab-font); padding:6px 14px; border-radius:999px; white-space:nowrap; }
   .chip.on { background:var(--accent); color:#fff; }
+  /* кнопка выбора арабского шрифта (в шапке) + выпадающая панель */
+  .fontbtn { flex:none; background:var(--chip); border:none; color:var(--fg); cursor:pointer;
+    font:600 13px system-ui; padding:7px 12px; border-radius:9px; white-space:nowrap; }
+  .fontbtn:active { opacity:.7; }
+  #fontpanel { position:fixed; z-index:40; top:0; inset-inline-end:0; margin:8px;
+    background:var(--card); border:1px solid var(--line); border-radius:14px; padding:8px;
+    box-shadow:0 8px 30px rgba(0,0,0,.28); display:none; max-width:calc(100% - 16px);
+    max-height:calc(100dvh - 16px); overflow-y:auto; }
+  #fontpanel.open { display:block; }
+  #fontpanel .fhead { font:600 11px system-ui; color:var(--muted); padding:4px 10px 8px; direction:ltr; }
+  #fontpanel .fopt { display:block; width:100%; min-width:230px; text-align:right; direction:rtl;
+    background:transparent; border:none; color:var(--fg); cursor:pointer;
+    padding:9px 12px; border-radius:10px; font-size:1.65rem; line-height:1.6; }
+  #fontpanel .fopt:active { background:var(--chip); }
+  #fontpanel .fopt.on { background:var(--accent); color:#fff; }
+  #fontpanel .fopt .fn { display:block; font:600 10px system-ui; color:var(--muted);
+    direction:ltr; text-align:left; margin-bottom:1px; }
+  #fontpanel .fopt.on .fn { color:rgba(255,255,255,.85); }
   .asrbar { display:flex; align-items:center; gap:8px; overflow-x:auto; padding:0 12px 6px;
     direction:ltr; scrollbar-width:none; } .asrbar::-webkit-scrollbar{display:none}
   .asrbar .lbl { font:600 11px system-ui; color:var(--muted); flex:none; }
@@ -53,7 +75,7 @@
     width:100%; max-width:860px; margin:0 auto; }
   .stitle { text-align:center; color:var(--accent); font:600 clamp(1rem,4vw,1.35rem) system-ui;
     letter-spacing:.02em; margin:22px 0 10px; opacity:.7; }
-  .ayah { display:block; text-align:center; color:var(--dim);
+  .ayah { display:block; text-align:center; color:var(--dim); font-family:var(--arab-font);
     font-size:clamp(1.4rem,5.6vw,2.05rem); line-height:1.95; margin:16px 0; padding:4px 6px;
     transition:color .35s, font-size .35s; }
   .ayah .num { font:600 .62em system-ui; color:var(--muted); margin:0 .4em; opacity:.8; }
@@ -69,7 +91,7 @@
   #badge { position:fixed; z-index:30; bottom:14px; inset-inline-start:14px;
     display:flex; align-items:center; gap:8px; direction:rtl; background:var(--card);
     border:1px solid var(--line); border-radius:999px; padding:6px 14px;
-    box-shadow:0 4px 18px rgba(0,0,0,.18); font-family:"Amiri",serif; font-size:1.05rem;
+    box-shadow:0 4px 18px rgba(0,0,0,.18); font-family:var(--arab-font); font-size:1.05rem;
     color:var(--fg); pointer-events:none; max-width:calc(100% - 28px);
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   #badge .a { font:700 .82rem system-ui; color:var(--accent); direction:ltr; }
@@ -83,6 +105,7 @@
   <div class="top">
     <a class="back" href="{% url 'index' %}" title="назад">‹</a>
     <div class="title"><b id="ttl">{{ rec.title|default:"—" }}</b><span id="sub"></span></div>
+    <button class="fontbtn" id="fontbtn" title="арабский шрифт">خط ▾</button>
   </div>
   {% if youtube_id %}
   <div id="video"><div id="ytwrap"><div id="yt"></div></div></div>
@@ -108,6 +131,7 @@
 </header>
 <div id="text"><div id="loading">загрузка…</div></div>
 <div id="badge" class="idle"><span class="ar" id="badgeSurah">—</span><span class="a" id="badgeAyah"></span></div>
+<div id="fontpanel"><div class="fhead">Арабский шрифт</div></div>
 
 <script>
 const DATA_URL = "{% url 'data_json' rec.id %}{% if active_key %}?asr={{ active_key }}{% endif %}";
@@ -118,6 +142,41 @@ const chipsEl = document.getElementById('chips');
 const badge = document.getElementById('badge');
 const badgeSurah = document.getElementById('badgeSurah');
 const badgeAyah = document.getElementById('badgeAyah');
+
+// --- выбор арабского шрифта (Google Fonts), сохраняется в localStorage ---
+// Naskh-начертания с хорошо читаемой харакой; Scheherazade — самый крупный/разборчивый по умолчанию.
+const FONTS = [
+  {css:"'Scheherazade New', serif", name:'Scheherazade New'},
+  {css:"'Amiri', serif",            name:'Amiri'},
+  {css:"'Amiri Quran', serif",      name:'Amiri Quran'},
+  {css:"'Noto Naskh Arabic', serif",name:'Noto Naskh Arabic'},
+  {css:"'Lateef', serif",           name:'Lateef'},
+];
+const FONT_KEY = 'sync.arabfont';
+const fontBtn = document.getElementById('fontbtn');
+const fontPanel = document.getElementById('fontpanel');
+const applyFont = css => document.documentElement.style.setProperty('--arab-font', css);
+(function initFonts(){
+  const saved = localStorage.getItem(FONT_KEY);
+  const cur = FONTS.some(f=>f.css===saved) ? saved : FONTS[0].css;
+  applyFont(cur);
+  FONTS.forEach(f=>{
+    const b=document.createElement('button'); b.className='fopt'+(f.css===cur?' on':'');
+    b.style.fontFamily=f.css;
+    b.innerHTML='<span class="fn">'+f.name+'</span>بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ';
+    b.onclick=()=>{
+      localStorage.setItem(FONT_KEY, f.css); applyFont(f.css);
+      fontPanel.querySelectorAll('.fopt').forEach(x=>x.classList.remove('on'));
+      b.classList.add('on'); fontPanel.classList.remove('open');
+    };
+    fontPanel.appendChild(b);
+  });
+})();
+fontBtn.onclick = e => { e.stopPropagation(); fontPanel.classList.toggle('open'); };
+document.addEventListener('click', e => {
+  if(fontPanel.classList.contains('open') && !fontPanel.contains(e.target) && e.target!==fontBtn)
+    fontPanel.classList.remove('open');
+});
 
 let TL = [], WT = [], ayahEl = {}, wordEl = {}, chapEls = [], surahTitle = {};
 let activeAyah = null, activeAyahEl = null, nearEls = [], hotEls = [];
@@ -223,11 +282,13 @@ async function init(){
 function startTick(){ if(rafOn) return; rafOn = true; tick(); }
 function tick(){ update(currentTime()); glide(); requestAnimationFrame(tick); }
 
-// плавный «глайд»: каждый кадр экспоненциально подтягиваем активный элемент к точке под видео
-// (вместо рывков scrollIntoView). Целимся к верху → чтение идёт под видео, а не у низа за бейджем.
+// плавный «глайд»: каждый кадр экспоненциально подтягиваем активный элемент к целевой линии
+// (вместо рывков scrollIntoView). Цель — ~40% доступного под текст окна (чуть выше середины):
+// на больших экранах прилипание к самому верху читалось плохо, середина комфортнее для глаза.
 function glide(){
   if(userScrolling || !scrollTargetEl) return;
-  const desired = headerEl.offsetHeight + window.innerHeight * 0.06;
+  const top = headerEl.offsetHeight;                 // низ приклеенной шапки (видео/чипы)
+  const desired = top + (window.innerHeight - top) * 0.40;
   const delta = scrollTargetEl.getBoundingClientRect().top - desired;
   if(Math.abs(delta) < 0.5) return;
   window.scrollBy(0, delta * 0.12);
