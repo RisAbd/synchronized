@@ -184,7 +184,14 @@ def run_one(run, on_stage=None) -> None:
             raise RuntimeError(f"в прогоне-источнике '{src.recognizer}' нет разделов/аятов")
         stage("align")
         out.mkdir(parents=True, exist_ok=True)
-        sync_map = falign.align(audio, verses)
+        try:
+            sync_map = falign.align(audio, verses)
+        except ImportError as e:
+            # docker-воркер на CPU-slim образе без ctc-forced-aligner/onnxruntime/unidecode
+            raise RuntimeError(
+                "forced align недоступен в этом окружении (нет ctc-forced-aligner/onnxruntime): "
+                f"{e}. Пока запускай на хосте: cd service && python manage.py forced_align "
+                f"{rec.id}") from e
         (out / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
     else:
         import align as align_mod
