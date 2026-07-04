@@ -85,13 +85,18 @@
    `ctranslate2 cuda devices: 1`, `falign.available(): True`. Все 5 записей перемолоты **ЧЕРЕЗ СЕРВИС**
    (`dispatch`→celery→worker, НЕ руками): whisper large-v3 на GPU (~5-7с/запись при кэше модели в
    `./cache`), forced авто-догоняется пост-шагом (`_maybe_forced`). Конец хостовым костылям.
-8. 🟡 **Tarteel-AI — ОЦЕНЕНО (ресёрч 04.07, приоритет поднят владельцем).** Полностью:
-   `docs/RESEARCH-tarteel-asr.md`. Кратко: `whisper-base-ar-quran` (Apache-2.0, спец-модель под Коран) —
-   прямой кандидат заменить ванильный whisper (см. п.7). Датасет `everyayah` (сегменты по аятам, много
-   чтецов) — gold-метрики (WER вместо «на глаз») + gold-сегменты для популярных чтецов (Next п.4). LoRA
-   с диакритикой (`KheemP/whisper-base-quran-lora`) — к харакат-левел (П5). **Следующий шаг** (когда возьму
-   whisper-задачу): ct2-конверсия base-модели → подключить как модель whisper-распознавателя, сравнить с
-   google/текущим whisper на rec9/rec1.
+8. 🟢 **Tarteel-AI — ПОДКЛЮЧЕНО (04.07, сессия 5).** `whisper-base-ar-quran` сконвертирован в
+   CTranslate2 (`ct2-transformers-converter`, каталог `./cache/ct2-tarteel-base`, 290 MB, gitignored),
+   подключён как whisper-модель: env `SYNC_WHISPER_MODEL` (`src/asr._default_model` — имя размера ИЛИ
+   путь к ct2-каталогу), воркер по умолчанию грузит его на GPU (`docker-compose.yml`). **Ключевой
+   побочный фикс:** silero-VAD выключен по умолчанию (`SYNC_ASR_VAD=1` чтобы включить) — на мелодичном
+   таджвиде VAD принимал распев за тишину и выкидывал ~97% аудио (rec9: с VAD 5 слов, без 896). Это
+   БИЛО ЛЮБУЮ модель, не только large-v3. Честная перемолка через сервис (celery→GPU, tarteel, VAD off):
+   whisper ДО→ПОСЛЕ (wt/coverage): rec1 6/0.015→906/0.954, rec5 33/0.286→159/1.0, rec6 74/0.073→992/1.0,
+   rec7 29/0.192→165/1.0, rec9 5/0.008→876/0.946, rec10 0/0.0→334/0.803. Теперь whisper сопоставим с
+   google/forced, а на rec10 обошёл google (188/0.591). Датасет `everyayah` (gold-метрики WER, gold-
+   сегменты) и LoRA с диакритикой (`KheemP/whisper-base-quran-lora` → харакат-левел П5) — остаются на
+   потом (💤). Ресёрч: `docs/RESEARCH-tarteel-asr.md`.
 
 ## Сделано (недавнее)
 

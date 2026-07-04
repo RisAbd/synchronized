@@ -11,11 +11,15 @@
 
 > Коротко: текущий фокус и свежие договорённости. Детали статусов — в `docs/BACKLOG.md`.
 
-- **Сейчас в работе / СЛЕДУЮЩЕЕ:** верхний невыполненный из `docs/BACKLOG.md` — **п.8/п.7: подключить
-  `tarteel-ai/whisper-base-ar-quran`** как модель whisper-распознавателя (env `SYNC_WHISPER_MODEL` в
-  `src/asr.py`, ct2-конверсия base-модели, гонять на GPU в воркере), сравнить с large-v3/google по
-  честной coverage-метрике. Мотив железный: large-v3 на этих читках измерен честно и ПЛОХ (rec1 0.015 =
-  6 слов на 21 мин, rec9 0.008), google 0.985–1.0.
+- **Сделано 04.07 (сессия 5): tarteel ПОДКЛЮЧЕН (закрыл п.8).** `whisper-base-ar-quran` → ct2
+  (`./cache/ct2-tarteel-base`, gitignored), env `SYNC_WHISPER_MODEL` в `src/asr.py`, воркер грузит на
+  GPU по умолчанию (compose). **Ключевой фикс:** silero-VAD ВЫКЛЮЧЕН по умолчанию (`SYNC_ASR_VAD=1` —
+  опт-ин) — на таджвиде VAD принимал распев за тишину, выкидывал ~97% аудио (rec9: с VAD 5 слов, без 896;
+  било ЛЮБУЮ модель). Честная перемолка через сервис: whisper теперь сопоставим с google/forced
+  (rec1 6→906 сл cov 0.954, rec9 5→876, rec6 74→992, rec10 0→334 обошёл google 188). Детали+таблица — BACKLOG п.8.
+- **Сейчас в работе / СЛЕДУЮЩЕЕ:** верхний невыполненный из `docs/BACKLOG.md` (секция «Next»). tarteel
+  закрыт; из крупного осталась доработка coverage-метрики (🟡 «Позже», п. про `_audio_time_coverage`) и
+  фронт-шлифовка на реальном телефоне.
 - **Сделано 04.07 (сессия 4):** (1) **GPU-докер заведён как часть пайплайна** — владелец поставил
   `nvidia-container-toolkit` (sudo), `docker compose up -d --build` пересобрал web+worker; в воркере
   `ctranslate2 cuda devices:1`, `falign.available():True`; все 5 записей перемолоты ЧЕРЕЗ СЕРВИС
