@@ -16,6 +16,7 @@ CLI:  python3 quran.py           # статистика + примеры
 from __future__ import annotations
 
 import sqlite3
+import unicodedata
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -54,6 +55,57 @@ def normalize(text: str) -> str:
     text = text.translate(_STRIP_TABLE)
     text = text.translate(_FOLD_TABLE)
     return " ".join(text.split())
+
+
+def skeleton(word: str) -> str:
+    """Чистый согласный скелет слова: снять ВСЕ комбинирующие знаки (харакат, вакфы, дагер-алиф,
+    мадда, U+06EA и т.п. — НЕЗАВИСИМО от редакции) + свернуть варианты букв. В отличие от
+    `normalize` (её фикс-список `_STRIP` не покрывает диянетовские знаки — U+06EA, мадда U+0653,
+    U+06EC…), опирается на `unicodedata.combining`, поэтому даёт ОДИНАКОВЫЙ скелет для одного и
+    того же слова в разных редакциях (Tanzil/Diyanet). Нужен для маппинга редакций (`map_editions`)."""
+    base = "".join(c for c in word if not unicodedata.combining(c))
+    return base.translate(_FOLD_TABLE)
+
+
+def map_editions(a_words: list[str], b_words: list[str]) -> list[list[int]]:
+    """Сопоставить слова двух редакций одного аята по согласному скелету.
+
+    Обе редакции — один текст, отличаются диакритикой и МЕСТАМИ дроблением слов (Diyanet сливает
+    ذو+مره→ذومره; у Tanzil бывают отдельные токены-вакфы, дающие пустой скелет). Возвращает для
+    КАЖДОГО слова `a_words[i]` список индексов слов `b_words`, которым оно соответствует
+    (обычно [j]; при слиянии/дроблении — [] или несколько). Двухуказательное выравнивание:
+    равные скелеты → 1:1; иначе пробуем слияние (a[i] = b[j]+b[j+1]+…) или дробление
+    (b[j] = a[i]+a[i+1]+…); пустой скелет (вакф) не мапим; при рассинхроне — 1:1 fail-safe."""
+    A = [skeleton(w) for w in a_words]
+    B = [skeleton(w) for w in b_words]
+    res: list[list[int]] = [[] for _ in a_words]
+    na, nb = len(A), len(B)
+    i = j = 0
+    while i < na and j < nb:
+        if A[i] == "":
+            i += 1; continue          # пустой токен (вакф) в A — ни к чему не мапим
+        if B[j] == "":
+            j += 1; continue
+        if A[i] == B[j]:
+            res[i].append(j); i += 1; j += 1; continue
+        # слияние: одно слово A = несколько слов B
+        if A[i].startswith(B[j]):
+            acc, k = B[j], j + 1
+            while k < nb and acc != A[i] and A[i].startswith(acc + B[k]):
+                acc += B[k]; k += 1
+            if acc == A[i]:
+                res[i] = list(range(j, k)); i += 1; j = k; continue
+        # дробление: несколько слов A = одно слово B
+        if B[j].startswith(A[i]):
+            acc, k = A[i], i + 1
+            while k < na and acc != B[j] and B[j].startswith(acc + A[k]):
+                acc += A[k]; k += 1
+            if acc == B[j]:
+                for x in range(i, k):
+                    res[x] = [j]
+                i = k; j += 1; continue
+        res[i].append(j); i += 1; j += 1   # рассинхрон — 1:1 и дальше (fail-safe, без зацикливания)
+    return res
 
 
 # --- модели -----------------------------------------------------------------

@@ -1,5 +1,5 @@
 """Тесты M1. Запуск: python3 test_quran.py   (или pytest test_quran.py)"""
-from quran import Quran, normalize
+from quran import Quran, normalize, skeleton, map_editions
 
 
 def test_normalize_strips_harakat():
@@ -72,6 +72,57 @@ def test_corpus_text_matches_tokens():
 def test_no_empty_tokens():
     q = Quran.load()
     assert all(t.text for t in q.tokens)
+
+
+# --- skeleton / map_editions (маппинг редакций Tanzil↔Diyanet, П9) ---
+
+def test_skeleton_strips_diyanet_marks():
+    # диянетовские знаки (U+06EA в رَح۪يم, дагер-алиф в اللّٰه) снимаются → как у Tanzil
+    assert skeleton("الرَّح۪يمِ") == skeleton("الرَّحِيمِ") == "الرحيم"
+    assert skeleton("اللّٰهِ") == skeleton("اللَّهِ") == "الله"
+    assert skeleton("الْهَوٰىۜ") == skeleton("الْهَوَىٰ") == "الهوي"   # ى→ي, дагер-алиф+вакф долой
+
+
+def test_map_editions_identity():
+    # равные по скелету слова → 1:1
+    assert map_editions(["بِسْمِ", "اللَّهِ"], ["بِسْمِ", "اللّٰهِ"]) == [[0], [1]]
+
+
+def test_map_editions_merge():
+    # 53:6: Diyanet слил ذو+مره → ذومره; оба Tanzil-слова указывают на слитое b[0]
+    a = ["ذُو", "مِرَّةٍ", "فَاسْتَوَىٰ"]           # Tanzil (3)
+    b = ["ذُومِرَّةٍ", "فَاسْتَوٰى"]                 # Diyanet (2, слито)
+    assert map_editions(a, b) == [[0], [0], [1]]
+
+
+def test_map_editions_split():
+    # обратное: одно Tanzil-слово = два Diyanet-слова
+    a = ["ذُومِرَّةٍ", "فَاسْتَوَىٰ"]
+    b = ["ذُو", "مِرَّةٍ", "فَاسْتَوٰى"]
+    assert map_editions(a, b) == [[0, 1], [2]]
+
+
+def test_map_editions_skips_empty_waqf_token():
+    # у Tanzil лишний отдельный токен-вакф (пустой скелет) → не мапится, остальные 1:1
+    a = ["إِنْ", "ۛ", "هِيَ"]
+    b = ["اِنْ", "هِيَ"]
+    assert map_editions(a, b) == [[0], [], [1]]
+
+
+def test_map_editions_real_db_najm():
+    # на реальных данных: каждое НЕпустое слово Tanzil получает хотя бы один индекс Diyanet
+    import sqlite3, pathlib
+    db = pathlib.Path(__file__).resolve().parent.parent / "data" / "quran.db"
+    con = sqlite3.connect(db)
+    row = con.execute("select text, text_diyanet from surah_verses where surah_id=53 and number=6").fetchone()
+    con.close()
+    if not row or not row[1]:
+        return  # text_diyanet ещё не импортирован — тест пропускаем
+    tw, dw = row[0].split(), row[1].split()
+    m = map_editions(tw, dw)
+    for i, w in enumerate(tw):
+        if skeleton(w):
+            assert m[i], f"слово {i} ({w}) не сматчено"
 
 
 if __name__ == "__main__":
