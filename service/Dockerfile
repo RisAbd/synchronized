@@ -4,9 +4,11 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     DJANGO_SETTINGS_MODULE=synchronized.settings \
-    # ctranslate2 (faster-whisper GPU) ищет cuDNN/cuBLAS по LD_LIBRARY_PATH → указываем на
-    # pip-колёса nvidia-*-cu12. Сам драйвер CUDA прокидывает nvidia-container-toolkit с хоста.
-    LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib \
+    # ctranslate2 (faster-whisper GPU) и onnxruntime-gpu (forced align CUDA EP) ищут CUDA-либы
+    # по LD_LIBRARY_PATH → указываем на pip-колёса nvidia-*-cu12 (cuDNN/cuBLAS для ct2; плюс
+    # cuda_runtime/cufft/curand/nvrtc/nvjitlink для onnxruntime CUDA EP). Драйвер CUDA прокидывает
+    # nvidia-container-toolkit с хоста. При сборке от root все колёса лежат в /usr/local (не .local).
+    LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.12/site-packages/nvidia/cufft/lib:/usr/local/lib/python3.12/site-packages/nvidia/curand/lib:/usr/local/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.12/site-packages/nvidia/nvjitlink/lib \
     # модели (whisper→HF hub, MMS-onnx→~/ctc_forced_aligner) кэшируем в примонтированный
     # /app/.cache, иначе по 3-4 ГБ докачки на каждый рестарт контейнера. HOME задаёт путь MMS.
     HF_HOME=/app/.cache/huggingface \

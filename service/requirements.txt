@@ -21,7 +21,10 @@ google-cloud-storage
 # воркер получил GPU, весь конвейер (whisper→forced) крутится в сервисе, без хостовых костылей.
 # torch ставится отдельно CPU-колесом в Dockerfile (форсед гоняет onnxruntime, CUDA-торч не нужен).
 ctc-forced-aligner
-onnxruntime
+# onnxruntime-GPU: forced align на CUDA (RTX в воркере). ORT 1.20.x — сборка под CUDA 12 +
+# cuDNN 9 (тот же стек, что у ct2/whisper). ORT ≥1.27 требует CUDA 13 → НЕ брать (конфликт с
+# cuDNN9/cuBLAS12 ниже). Провайдер подхватывается автоматически (falign._session_and_tokenizer).
+onnxruntime-gpu==1.20.1
 Unidecode             # романизация (uroman-fallback) в ctc-forced-aligner
 
 # GPU для faster-whisper в контейнере: ctranslate2 4.x ищет cuDNN 9 / cuBLAS 12 в этих pip-колёсах
@@ -29,3 +32,10 @@ Unidecode             # романизация (uroman-fallback) в ctc-forced-a
 # с хоста (см. docker-compose.yml, deploy.devices у worker). Версии — как на хосте (проверено).
 nvidia-cudnn-cu12==9.1.0.70
 nvidia-cublas-cu12==12.4.5.8
+# Остальные CUDA-runtime либы для onnxruntime-gpu CUDA EP (cuBLAS/cuDNN выше уже покрыты).
+# Без них CUDAExecutionProvider тихо падает в CPU (libcudart/libcufft/libcurand/libnvrtc not found).
+nvidia-cuda-runtime-cu12==12.9.79
+nvidia-cufft-cu12==11.4.1.4
+nvidia-curand-cu12==10.3.10.19
+nvidia-cuda-nvrtc-cu12==12.9.86
+nvidia-nvjitlink-cu12==12.9.86

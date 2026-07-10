@@ -164,12 +164,21 @@ def _session_and_tokenizer():
     return session, cfa.Tokenizer(), cfa
 
 
-def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int = 8) -> dict:
+def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int | None = None) -> dict:
     """Forced alignment диапазона аятов к аудио.
 
     verses — [(surah, ayah, text), ...] по порядку чтения (текст из quran.db, с харакат).
     Возвращает sync_map: {meta, timeline, word_timeline, char_timeline}.
+
+    batch_size — сколько 30-с окон гнать через wav2vec2 за один session.run. На GPU память
+    ~线ейна по batch_size×окно (feature-extractor layer-norm аллоцирует буфер на весь батч):
+    RTX 3060 (6 ГБ): batch_size=8 (~272с разом) падает OOM (7 ГБ); даже batch_size=2 (1.78 ГБ)
+    падал при свободных 5.7 ГБ (арена onnxruntime растёт неудачно). batch_size=1 стабилен и
+    быстр — forced rec10 (654с аудио) = 17.6с на GPU (против ~6 мин на CPU). Дефолт 1.
+    Переопределяется env SYNC_FALIGN_BATCH. На CPU значение почти не важно (память хостовая).
     """
+    if batch_size is None:
+        batch_size = int(os.environ.get("SYNC_FALIGN_BATCH", "1"))
     session, tokenizer, cfa = _session_and_tokenizer()
 
     # эталон: плоский список слов с привязкой к аяту; индекс слова = word_index в аяте
