@@ -265,11 +265,17 @@ def _detect_repeats(bounds, ref, wav, emissions, stride_ms):
             dec = _skeleton(_greedy_ctc(emissions, stride_ms, g0, g1, id2ch))
             if len(dec) < _REPEAT_MIN_DECODE:
                 continue
-            # лучший «назадний» непрерывный диапазон [ra..rb], rb ≤ i
+            # лучший «назадний» непрерывный диапазон [ra..rb], rb ≤ i, В ПРЕДЕЛАХ ОДНОГО АЯТА.
+            # Ограничение на аят критично: на записях с плотными мелодичными повторами базовое
+            # (монотонное) выравнивание само плывёт, и без него поиск матчит кросс-аятные «свипы»
+            # (напр. rec11 53:10→53:12) — это артефакт, а не возврат. Реальный возврат почти всегда
+            # внутри аята (или чтец перезапускает аят). Кросс-аятные возвраты — задача v2.
             best = None
             for ra in range(max(0, i - _REPEAT_LOOKBACK), i + 1):
                 cand = ""
                 for rb in range(ra, i + 1):
+                    if ref[rb][0] != ref[ra][0] or ref[rb][1] != ref[ra][1]:
+                        break                     # вышли за пределы аята слова ra
                     cand += skel[rb]
                     s = _sim(dec, cand)
                     if best is None or s > best[0]:
