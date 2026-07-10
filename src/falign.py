@@ -35,25 +35,71 @@ MIN_WORD_SEC = 0.100
 STUFFED_RUN = 3     # столько «мгновенных» слов подряд считаем скомканным участком
 
 
-def _stuffed_indices(word_timeline: list[dict]) -> list[int]:
-    """Индексы слов в «скомканных» участках: ≥ STUFFED_RUN подряд слов короче MIN_WORD_SEC.
+def _stuffed_runs(bounds: list[tuple[float, float]]) -> list[tuple[int, int]]:
+    """Скомканные участки как непрерывные диапазоны [i0, i1] индексов слов.
 
-    Симптом: чтец пропустил кусок (или диапазон аятов определился с лишком, который не
-    поймала краевая обрезка verses_from_data), а CTC обязан разместить ВЕСЬ текст → лишние
-    слова сжимаются в десятки миллисекунд. В quran-align это же лечится отсевом спанов без
-    опоры распознавания короче k×100 мс. Одиночные короткие слова не трогаем."""
-    bad, run = [], []
-    for i, w in enumerate(word_timeline):
-        # слова без t_end (таймлайны align.py интерполированы) длительности не имеют — пропуск
-        if w.get("t_end") is not None and (w["t_end"] - w["t"]) < MIN_WORD_SEC:
+    Правило плотности из quran-align (segment.cc, MIN_WORD_LEN=100мс): ≥ STUFFED_RUN подряд
+    слов короче MIN_WORD_SEC = CTC «утрамбовал» текст без опоры в аудио (чтец пропустил кусок
+    или диапазон аятов взят с лишком). Работает прямо по CTC-границам (до сборки word_timeline)
+    и возвращает ГРАНИЦЫ прогонов, а не плоский список — так их можно не ронять, а растянуть
+    по дыре (`_respace_stuffed`). Одиночные короткие слова не трогаем."""
+    runs: list[tuple[int, int]] = []
+    run: list[int] = []
+    for i, (a, b) in enumerate(bounds):
+        if (b - a) < MIN_WORD_SEC:
             run.append(i)
         else:
             if len(run) >= STUFFED_RUN:
-                bad.extend(run)
+                runs.append((run[0], run[-1]))
             run = []
     if len(run) >= STUFFED_RUN:
-        bad.extend(run)
-    return bad
+        runs.append((run[0], run[-1]))
+    return runs
+
+
+def _respace_stuffed(bounds: list[tuple[float, float]], ref: list[tuple],
+                     runs: list[tuple[int, int]]) -> tuple[list[tuple[float, float]], int]:
+    """Растянуть тайминги скомканных слов по дыре ВМЕСТО молчаливого отсева.
+
+    Симптом (rec11, Ан-Наджм 53:3→4): чтец тянет الْهَوَىٰ ~4с (мadd), CTC под-аллоцирует
+    ему ~0.24с, а слова 53:4 (إِنْ هُوَ إِلَّا وَحْيٌ) утрамбовывает в десятки мс и старое
+    правило плотности их РОНЯЛО → в word_timeline 6.4с-дыра → подсветка залипает на الهوى.
+    Здесь мы вместо отсева раскладываем скомканный прогон по свободному интервалу, чтобы
+    подсветка ехала по словам (общий класс «forced скомкал кусок»).
+
+    Раскладка: старт = где CTC поставил прогон, но не раньше конца пред. слова (onset);
+    так «долгое» пред. слово держит фокус до момента, куда CTC поместил утрамбованный кусок,
+    и только потом подсветка идёт по нему. Если от onset до следующей опоры места мало
+    (< N×MIN_WORD_SEC) — берём всю дыру от конца пред. слова. Время делим пропорционально
+    длине согласного скелета слова (длинные держатся дольше). Монотонность сохраняется.
+
+    Возвращает (новые bounds, число растянутых слов)."""
+    bounds = list(bounds)
+    n = len(bounds)
+    total = 0
+    for i0, i1 in runs:
+        L = bounds[i0 - 1][1] if i0 > 0 else bounds[i0][0]
+        R = bounds[i1 + 1][0] if i1 + 1 < n else bounds[i1][1]
+        cnt = i1 - i0 + 1
+        onset = max(L, bounds[i0][0])
+        if R - onset < cnt * MIN_WORD_SEC:
+            onset = L                      # места от CTC-позиции мало → вся дыра
+        span = R - onset
+        if span <= 0:
+            continue                       # нет места (край/инверсия) — оставляем как есть
+        weights = []
+        for j in range(i0, i1 + 1):
+            w = ref[j][3] if j < len(ref) else ""
+            weights.append(sum(1 for ch in w if ch not in _HARAKAT) or 1)
+        wsum = sum(weights)
+        cur = onset
+        for k, j in enumerate(range(i0, i1 + 1)):
+            a = cur
+            b = R if j == i1 else cur + span * weights[k] / wsum
+            bounds[j] = (a, b)
+            cur = b
+            total += 1
+    return bounds, total
 
 
 # --- подтяжка границ слов к тишине (наследие quran-align, boundaries.cc) ------------------
@@ -394,6 +440,20 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int | None
     if os.environ.get("SYNC_FALIGN_SNAP", "1") != "0":
         bounds, snapped = _snap_bounds(bounds, wav)
 
+    # правило плотности (quran-align): «скомканные» участки = текст без опоры в аудио.
+    # По умолчанию (task2 идея 1) НЕ роняем их молча — иначе в word_timeline остаётся дыра и
+    # подсветка залипает на пред. слове; вместо этого растягиваем тайминги прогона по дыре
+    # (подсветка едет по словам). Опт-аут SYNC_FALIGN_RESPACE=0 → старое поведение (отсев).
+    # Сырые границы до растяжки сохраняем для детекта повторов (П8) — чтобы не задеть его валидацию.
+    raw_bounds = list(bounds)
+    runs = _stuffed_runs(bounds)
+    respaced = 0
+    stuffed_idx: list[int] = []
+    if runs and os.environ.get("SYNC_FALIGN_RESPACE", "1") != "0":
+        bounds, respaced = _respace_stuffed(bounds, ref, runs)
+    elif runs:
+        stuffed_idx = [i for i0, i1 in runs for i in range(i0, i1 + 1)]
+
     word_timeline, timeline, char_timeline = [], [], []
     seen_ayah = set()
     for i in range(n):
@@ -418,11 +478,10 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int | None
             char_timeline.append({"t": round(ct0, 3), "t_end": round(ct1, 3),
                                    "surah": surah, "ayah": ayah, "wi": wi, "ci": ci})
 
-    # правило плотности (quran-align): выкинуть «скомканные» участки — текст без опоры в аудио
-    stuffed = _stuffed_indices(word_timeline)
-    if stuffed:
+    # старый путь (SYNC_FALIGN_RESPACE=0): выкинуть «скомканные» участки вместо растяжки
+    if stuffed_idx:
         drop = {(word_timeline[i]["surah"], word_timeline[i]["ayah"], word_timeline[i]["wi"])
-                for i in stuffed}
+                for i in stuffed_idx}
         word_timeline = [w for w in word_timeline if (w["surah"], w["ayah"], w["wi"]) not in drop]
         char_timeline = [c for c in char_timeline if (c["surah"], c["ayah"], c["wi"]) not in drop]
         timeline, seen_ayah = [], set()   # старт аята мог выпасть — пересобрать по выжившим
@@ -432,10 +491,11 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int | None
                 seen_ayah.add(k)
                 timeline.append({"t": w["t"], "surah": w["surah"], "ayah": w["ayah"]})
 
-    # детект возвратов чтеца (П8): вклеить «назадние» точки в дыры-повторы (опт-аут SYNC_FALIGN_REPEATS=0)
+    # детект возвратов чтеца (П8): вклеить «назадние» точки в дыры-повторы (опт-аут SYNC_FALIGN_REPEATS=0).
+    # Кормим СЫРЫМИ границами (до растяжки скомканных) — стянутые дыры не должны влиять на П8.
     repeats = []
     if os.environ.get("SYNC_FALIGN_REPEATS", "1") != "0":
-        repeats = _detect_repeats(bounds, ref, wav, emissions, stride)
+        repeats = _detect_repeats(raw_bounds, ref, wav, emissions, stride)
         if repeats:
             word_timeline.extend(repeats)
             word_timeline.sort(key=lambda w: (w["t"], w["surah"], w["ayah"], w["wi"]))
@@ -445,7 +505,8 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int | None
         "ref_words": len(ref),
         "aligned_units": len(units),
         "coverage": round(n / len(ref), 3) if ref else 0.0,
-        "stuffed_dropped": len(stuffed),
+        "stuffed_dropped": len(stuffed_idx),
+        "stuffed_respaced": respaced,
         "snapped_to_silence": snapped,
         "repeats_inserted": len(repeats),
         "wt": len(word_timeline),
