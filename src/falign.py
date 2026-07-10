@@ -143,6 +143,162 @@ def _snap_bounds(bounds: list[tuple[float, float]], wav):
         return bounds, 0
 
 
+# --- детект возвратов чтеца (П8) -----------------------------------------------------------
+# Forced-align МОНОТОНЕН: проходит текст слева направо один раз и физически не выражает повтор.
+# Но чтецы в таджвиде постоянно останавливаются, отходят на пару слов назад и ПЕРЕЧИТЫВАЮТ.
+# В монотонном таймлайне это выглядит как «дыра»: между словом wi и wi+1 висит несколько секунд
+# аудио, которому не досталось ни одного эталонного слова (повтор некуда было отобразить) →
+# подсветка/скролл замирают, а вживую чтец уже читает заново. Здесь — отдельный ПОСТ-шаг:
+# по акустике находим такие дыры-повторы и вклеиваем в word_timeline «назадние» точки (их wi
+# меньше текущего). Фронт ищет активное слово бинпоиском по t и берёт wi — при монотонном t
+# корпус-позиция может идти назад, поэтому подсветка честно возвращается, а в конце дыры
+# перескакивает вперёд на wi+1 (где чтец возобновил). Фронт менять не надо.
+#
+# Как ловим (акустика + пауза, БЕЗ google/whisper — текст ASR повтор часто не пишет разборчиво):
+#   1. дыра = разрыв ≥ _REPEAT_MIN_GAP между концом слова и началом следующего;
+#   2. в разрыве должна быть РЕЧЬ (доля кадров выше шумового порога ≥ _REPEAT_MIN_SPEECH) —
+#      иначе это обычная пауза/вдох, не повтор;
+#   3. greedy-CTC-декод эмиссий разрыва → романизованные буквы MMS → согласный СКЕЛЕТ (greedy
+#      роняет гласные, поэтому и эталон сводим к скелету, как в align.py);
+#   4. ищем «назадний» непрерывный диапазон эталона [ra..rb] (rb ≤ текущего слова, ra не дальше
+#      _REPEAT_LOOKBACK слов назад), чей скелет ближе всего к декоду разрыва; берём, если похоже
+#      (≥ _REPEAT_MIN_SIM) и явно лучше, чем «вперёд» (чтобы не спутать возврат с медленным
+#      началом следующего слова). Время разрыва раздаём словам диапазона по длине их скелета.
+# Опт-аут: SYNC_FALIGN_REPEATS=0. Fail-safe: любая ошибка → просто нет вставок (align не падает).
+_REPEAT_MIN_GAP = 0.7        # сек: короче — не считаем разрывом (внутрисловные паузы таджвида)
+_REPEAT_MIN_SPEECH = 0.35    # доля кадров-речи в разрыве (иначе пауза/вдох, не повтор)
+_REPEAT_MIN_DECODE = 4       # символов скелета в декоде разрыва (меньше — шум, не слово)
+_REPEAT_LOOKBACK = 8         # на сколько эталонных слов назад ищем повтор
+_REPEAT_MIN_SIM = 0.5        # порог похожести скелетов (Левенштейн-similarity)
+_REPEAT_FWD_MARGIN = 0.05    # «назад» должно быть лучше «вперёд» хотя бы на столько
+_VOWELS = set("aeiou")
+
+
+def _skeleton(s: str) -> str:
+    """Согласный скелет романизованной строки (гласные и апостроф долой)."""
+    return "".join(c for c in s if c not in _VOWELS and c != "'")
+
+
+def _uroman_word(w: str) -> str:
+    """Романизация одного арабского слова так же, как ctc-forced-aligner (unidecode+uroman)."""
+    import ctc_forced_aligner as cfa
+    from unidecode import unidecode
+    return cfa.normalize_uroman(unidecode(w)).replace(" ", "")
+
+
+def _lev(a: str, b: str) -> int:
+    """Расстояние Левенштейна (итеративное, O(len(a)*len(b)) памяти O(len(b)))."""
+    m, n = len(a), len(b)
+    if not m or not n:
+        return max(m, n)
+    prev = list(range(n + 1))
+    for i in range(1, m + 1):
+        cur = [i] + [0] * n
+        ai = a[i - 1]
+        for j in range(1, n + 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ai != b[j - 1]))
+        prev = cur
+    return prev[n]
+
+
+def _sim(a: str, b: str) -> float:
+    return 1.0 - _lev(a, b) / max(len(a), len(b), 1)
+
+
+def _greedy_ctc(emissions, stride_ms: int, t0: float, t1: float, id2ch: dict) -> str:
+    """Greedy-CTC-декод эмиссий во временном окне [t0,t1) → романизованные буквы (collapse+blank).
+    Последний столбец эмиссий — служебный <star> (добавлен нулями, logprob 0 → всегда выигрывал
+    бы argmax над реальными лог-вероятностями ≤0), поэтому argmax берём по [:, :31]."""
+    f0 = max(0, int(t0 * 1000 / stride_ms))
+    f1 = min(emissions.shape[0], int(t1 * 1000 / stride_ms))
+    if f1 <= f0:
+        return ""
+    ids = emissions[f0:f1, :31].argmax(axis=1)
+    out, prev = [], -1
+    for i in ids:
+        i = int(i)
+        if i != prev and i > 3:      # 0..3 = blank/pad/eos/unk; 4..30 = буквы
+            ch = id2ch.get(i, "")
+            if len(ch) == 1:
+                out.append(ch)
+        prev = i
+    return "".join(out)
+
+
+def _detect_repeats(bounds, ref, wav, emissions, stride_ms):
+    """Найти возвраты чтеца → список word_timeline-точек для вклейки (их wi идёт «назад»).
+
+    bounds[i]=(t0,t1) — границы эталонного слова ref[i]=(surah,ayah,wi,arabic), n монотонных слов.
+    Возвращает [] при любой проблеме (fail-safe) или если повторов не найдено."""
+    try:
+        import numpy as np
+        import ctc_forced_aligner as cfa
+        n = len(bounds)
+        if n < 2 or emissions is None:
+            return []
+        id2ch = {v: k for k, v in cfa.VOCAB_DICT.items()}
+        skel = [_skeleton(_uroman_word(ref[i][3])) for i in range(n)]
+
+        # маска речи по RMS-огибающей (тот же порог, что в _snap_bounds)
+        frame_len = max(1, int(SAMPLE_RATE * _SNAP_FRAME_MS / 1000))
+        db = _frame_db(wav, frame_len)
+        speech = None
+        if db is not None and len(db) >= _SNAP_MIN_RUN:
+            thr = float(np.percentile(db, _SNAP_FLOOR_PCT)) + _SNAP_MARGIN_DB
+            speech = db >= thr
+        frame_sec = frame_len / SAMPLE_RATE
+
+        def speech_frac(t0, t1):
+            if speech is None:
+                return 1.0
+            a, b = int(t0 / frame_sec), int(t1 / frame_sec)
+            a, b = max(0, a), min(len(speech), b)
+            return float(speech[a:b].mean()) if b > a else 0.0
+
+        inserts = []
+        for i in range(n - 1):
+            g0, g1 = bounds[i][1], bounds[i + 1][0]
+            if g1 - g0 < _REPEAT_MIN_GAP:
+                continue
+            if speech_frac(g0, g1) < _REPEAT_MIN_SPEECH:
+                continue                              # тихий разрыв — обычная пауза, не повтор
+            dec = _skeleton(_greedy_ctc(emissions, stride_ms, g0, g1, id2ch))
+            if len(dec) < _REPEAT_MIN_DECODE:
+                continue
+            # лучший «назадний» непрерывный диапазон [ra..rb], rb ≤ i
+            best = None
+            for ra in range(max(0, i - _REPEAT_LOOKBACK), i + 1):
+                cand = ""
+                for rb in range(ra, i + 1):
+                    cand += skel[rb]
+                    s = _sim(dec, cand)
+                    if best is None or s > best[0]:
+                        best = (s, ra, rb)
+            if best is None or best[0] < _REPEAT_MIN_SIM:
+                continue
+            # защита от ложняка: «вперёд» (следующие слова) не должно совпадать лучше «назад»
+            fwd = ""
+            for k in range(i + 1, min(n, i + 1 + (best[2] - best[1] + 1))):
+                fwd += skel[k]
+            if fwd and _sim(dec, fwd) >= best[0] - _REPEAT_FWD_MARGIN:
+                continue
+            _, ra, rb = best
+            # раздать время разрыва словам [ra..rb] пропорционально длине их скелета
+            lens = [max(1, len(skel[k])) for k in range(ra, rb + 1)]
+            total = sum(lens)
+            span = g1 - g0
+            acc = g0
+            for off, k in enumerate(range(ra, rb + 1)):
+                wt0 = acc
+                acc += span * lens[off] / total
+                su, ay, wi, _ = ref[k]
+                inserts.append({"t": round(wt0, 3), "t_end": round(acc, 3),
+                                "surah": su, "ayah": ay, "wi": wi, "rep": True})
+        return inserts
+    except Exception:
+        return []
+
+
 def available() -> bool:
     """Доступны ли зависимости forced align в этом окружении (CPU-докер их не ставит).
     Лёгкая проверка импортируемости — без загрузки модели (её тянет только align())."""
@@ -243,6 +399,14 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int | None
                 seen_ayah.add(k)
                 timeline.append({"t": w["t"], "surah": w["surah"], "ayah": w["ayah"]})
 
+    # детект возвратов чтеца (П8): вклеить «назадние» точки в дыры-повторы (опт-аут SYNC_FALIGN_REPEATS=0)
+    repeats = []
+    if os.environ.get("SYNC_FALIGN_REPEATS", "1") != "0":
+        repeats = _detect_repeats(bounds, ref, wav, emissions, stride)
+        if repeats:
+            word_timeline.extend(repeats)
+            word_timeline.sort(key=lambda w: (w["t"], w["surah"], w["ayah"], w["wi"]))
+
     meta = {
         "aligner": "forced-mms-ctc",
         "ref_words": len(ref),
@@ -250,6 +414,7 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int | None
         "coverage": round(n / len(ref), 3) if ref else 0.0,
         "stuffed_dropped": len(stuffed),
         "snapped_to_silence": snapped,
+        "repeats_inserted": len(repeats),
         "wt": len(word_timeline),
         "ct": len(char_timeline),
         "providers": session.get_providers(),
