@@ -382,6 +382,13 @@ export SYNC_RECOGNIZERS=whisper,google   # чтобы google был предвы
      диапазоне — фантом 54:55 исчез вместе с мусорным диапазоном), у whisper в метриках
      появился `match` (wer 0.346). forced в воркере на CPU (~4 мин на 11-мин запись,
      onnxruntime CPU-билд — GPU-провайдер отдельно, известный трейд-офф).
+   - **✅ ПРОВЕРКА ПЕРЕМОЛКИ rec1/5/6/7/9 (памятка 04.07) — ЗАКРЫТА 10.07.** Все записи `ready`,
+     ошибок нет. У ASR-прогонов появился `metrics.match` (wer): rec1 g=0.464/w=0.503, rec5
+     g=0.165/w=0.196, rec6 w=0.148, rec7 g=0.298/w=0.233, rec9 g=0.39/w=0.508. У forced везде
+     `stuffed_dropped=0` (чистые диапазоны). Coverage forced: rec1 0.977, rec5 1.0, rec6 0.982,
+     rec7 1.0, rec9 0.977, rec10 0.985. NB: forced-источник rec7 остался google (оба cov=1.0 →
+     при равенстве google>whisper — предсказание памятки про google→whisper было лишь догадкой,
+     логика источника «лучший по coverage» отработала верно). rec10 forced на whisper (ref 354).
 
 ## Визуальный референс (спутниковое ТВ — `docs/sync_by_char_example.png`)
 
