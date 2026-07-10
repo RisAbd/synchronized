@@ -401,7 +401,10 @@ function update(t){
     const hotEl = wordEl[e.surah+':'+e.ayah+':'+e.wi];
     if(hotEl){
       const nx = WT[i+1];
-      const dur = nx ? Math.max(0.08, nx.t - e.t) : 0.4;
+      // длительность заливки = собственная длина слова (t_end), если есть → на паузе заливка
+      // замирает на 100% (не «ползёт» до следующего слова). Иначе — до следующего слова.
+      const dur = (e.t_end && e.t_end > e.t) ? (e.t_end - e.t)
+                : (nx ? Math.max(0.08, nx.t - e.t) : 0.4);
       let p = (t - e.t) / dur; p = p < 0 ? 0 : p > 1 ? 1 : p;
       const pct = (p * 100).toFixed(1);
       hotEl.style.background = 'linear-gradient(to left, var(--hot) ' + pct +

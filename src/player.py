@@ -57,7 +57,9 @@ def build_data(sync_map: dict, quran: Quran, audio_src: str) -> dict:
     return {
         "audio": audio_src,
         "timeline": [{"t": e["t"], "surah": e["surah"], "ayah": e["ayah"]} for e in timeline],
-        "word_timeline": [{"t": w["t"], "surah": w["surah"], "ayah": w["ayah"], "wi": w["wi"]}
+        # t_end (если есть, forced его даёт) тащим на фронт: плеер по нему замораживает
+        # karaoke-заливку слова на паузах (не «ползёт» прогресс, пока чтец молчит/договаривает).
+        "word_timeline": [{k: w[k] for k in ("t", "t_end", "surah", "ayah", "wi") if k in w}
                           for w in sync_map.get("word_timeline", [])],
         "sections": sections,
         "chapters": chapters,

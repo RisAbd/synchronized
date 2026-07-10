@@ -41,3 +41,6 @@ scratch_*
 db.sqlite3
 db.sqlite3.bak*
 service/staticfiles/
+
+# инбокс указок владельца (не трекаем, но папку не удаляем — просьба владельца 10.07)
+new_tasks/
