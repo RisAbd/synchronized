@@ -56,6 +56,93 @@ def _stuffed_indices(word_timeline: list[dict]) -> list[int]:
     return bad
 
 
+# --- подтяжка границ слов к тишине (наследие quran-align, boundaries.cc) ------------------
+# CTC даёт границы слова с точностью до кадра эмиссий (~40 мс) и нередко «прихватывает» тишину
+# по краям: старт слова заезжает в предшествующую паузу (→ подсветка/скролл прыгает на слово
+# ДО того, как чтец его начал — семья бага ложного раннего якоря 25:65→66), конец висит в
+# последующей тишине. Пост-шаг поджимает границы ВНУТРЬ к реальной речи по RMS-огибающей.
+# Порог тишины калибруем от шумового пола КОНКРЕТНОЙ записи (перцентиль) — у нас YouTube-читки
+# с разным фоном, фикс-пороги quran-align (−100/−75 dBFS) заточены под студийный мураттал.
+# Двигаем ТОЛЬКО внутрь (старт не раньше, конец не позже исходного CTC) → нельзя заехать на
+# речь соседнего слова, монотонность таймлайна сохраняется. Полностью тихое слово не трогаем.
+SAMPLE_RATE = 16000          # cfa.load_audio всегда ресемплит в 16 кГц моно
+_SNAP_FRAME_MS = 20          # кадр RMS-огибающей
+_SNAP_WINDOW_SEC = 0.30      # насколько далеко ищем речь/паузу от исходной границы
+_SNAP_MARGIN_DB = 10.0       # порог речи = шумовой пол + запас
+_SNAP_FLOOR_PCT = 15         # перцентиль кадров для оценки шумового пола
+_SNAP_MIN_RUN = 3            # столько подряд кадров речи/тишины подтверждают переход (гистерезис)
+_SNAP_MIN_SHIFT_SEC = 0.03   # меньше — не считаем подтяжкой (шум округления)
+_SNAP_MIN_WORD_SEC = 0.04    # не сжимать слово короче этого
+
+
+def _frame_db(wav, frame_len: int):
+    """Поканальный RMS в dBFS по не перекрывающимся кадрам."""
+    import numpy as np
+    n = len(wav) // frame_len
+    if n == 0:
+        return None
+    frames = np.asarray(wav[: n * frame_len], dtype=np.float32).reshape(n, frame_len)
+    rms = np.sqrt((frames ** 2).mean(axis=1) + 1e-14)
+    return 20.0 * np.log10(np.maximum(rms, 1e-7))
+
+
+def _snap_bounds(bounds: list[tuple[float, float]], wav):
+    """Поджать [(t0,t1)] к речи по RMS-огибающей. Возвращает (new_bounds, n_snapped).
+
+    Fail-safe: при любой проблеме (нет numpy / пустое аудио / вырожденный порог) возвращает
+    исходные границы без изменений — пост-шаг не должен ронять forced align."""
+    try:
+        import numpy as np
+        frame_len = max(1, int(SAMPLE_RATE * _SNAP_FRAME_MS / 1000))
+        db = _frame_db(wav, frame_len)
+        if db is None or len(db) < _SNAP_MIN_RUN:
+            return bounds, 0
+        floor = float(np.percentile(db, _SNAP_FLOOR_PCT))
+        thr = floor + _SNAP_MARGIN_DB
+        speech = db >= thr
+        if not speech.any() or speech.all():
+            return bounds, 0        # вся запись «речь» или «тишина» → порог бесполезен
+        frame_sec = frame_len / SAMPLE_RATE
+        win = max(1, int(_SNAP_WINDOW_SEC / frame_sec))
+        nf = len(speech)
+
+        def confirmed_speech(i):
+            """Речь, подтверждённая _SNAP_MIN_RUN кадрами вперёд от i."""
+            return 0 <= i < nf and speech[i] and speech[i:i + _SNAP_MIN_RUN].all()
+
+        def confirmed_speech_back(i):
+            """Речь, подтверждённая _SNAP_MIN_RUN кадрами назад от i (включительно)."""
+            return 0 <= i < nf and speech[i] and speech[max(0, i - _SNAP_MIN_RUN + 1):i + 1].all()
+
+        out, n_snapped = [], 0
+        for t0, t1 in bounds:
+            a = int(round(t0 / frame_sec))
+            b = int(round(t1 / frame_sec))
+            nt0, nt1 = t0, t1
+            # СТАРТ: если начало в тишине — сдвинуть вперёд к первому подтверждённому кадру речи
+            if not confirmed_speech(min(a, nf - 1)):
+                for j in range(max(0, a), min(nf, a + win + 1)):
+                    if confirmed_speech(j):
+                        cand = j * frame_sec
+                        if cand > t0 and cand < t1 - _SNAP_MIN_WORD_SEC:
+                            nt0 = cand
+                        break
+            # КОНЕЦ: если конец в тишине — подтянуть назад к последнему подтверждённому кадру речи
+            if not confirmed_speech_back(min(b - 1, nf - 1)):
+                for j in range(min(nf - 1, b - 1), max(-1, b - win - 1), -1):
+                    if confirmed_speech_back(j):
+                        cand = (j + 1) * frame_sec
+                        if cand < t1 and cand > nt0 + _SNAP_MIN_WORD_SEC:
+                            nt1 = cand
+                        break
+            if (nt0 - t0) >= _SNAP_MIN_SHIFT_SEC or (t1 - nt1) >= _SNAP_MIN_SHIFT_SEC:
+                n_snapped += 1
+            out.append((nt0, nt1))
+        return out, n_snapped
+    except Exception:
+        return bounds, 0
+
+
 def available() -> bool:
     """Доступны ли зависимости forced align в этом окружении (CPU-докер их не ставит).
     Лёгкая проверка импортируемости — без загрузки модели (её тянет только align())."""
@@ -103,12 +190,17 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int = 8) -
     units = [w for w in wts if w.get("text") not in ("<star>", "*", "")]
     n = min(len(units), len(ref))
 
+    # подтяжка границ слов к тишине по RMS-огибающей (опт-аут SYNC_FALIGN_SNAP=0)
+    bounds = [(float(units[i]["start"]), float(units[i]["end"])) for i in range(n)]
+    snapped = 0
+    if os.environ.get("SYNC_FALIGN_SNAP", "1") != "0":
+        bounds, snapped = _snap_bounds(bounds, wav)
+
     word_timeline, timeline, char_timeline = [], [], []
     seen_ayah = set()
     for i in range(n):
         surah, ayah, wi, arabic = ref[i]
-        u = units[i]
-        t0, t1 = float(u["start"]), float(u["end"])
+        t0, t1 = bounds[i]
         word_timeline.append({"t": round(t0, 3), "t_end": round(t1, 3),
                               "surah": surah, "ayah": ayah, "wi": wi})
         if (surah, ayah) not in seen_ayah:
@@ -148,6 +240,7 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int = 8) -
         "aligned_units": len(units),
         "coverage": round(n / len(ref), 3) if ref else 0.0,
         "stuffed_dropped": len(stuffed),
+        "snapped_to_silence": snapped,
         "wt": len(word_timeline),
         "ct": len(char_timeline),
         "providers": session.get_providers(),
