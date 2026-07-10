@@ -60,6 +60,7 @@ services:
     volumes:
       - ./service:/app/service    # код сервиса + db.sqlite3 (hot-reload + БД)
       - ./src:/app/src            # ядро конвейера (align/asr/quran/ingest)
+      - ./data:/app/data:ro       # quran.db (Tanzil + редакция Diyanet) — читаем, пишет хост-скрипт
       - ./media:/app/media        # аудио записей + сырые ответы ASR (persist)
       - ./work:/app/work          # промежуточные выгрузки (persist)
       - ./cache:/app/.cache       # кэш моделей whisper/MMS (persist, не качать на рестарт)
@@ -82,6 +83,7 @@ services:
     volumes:
       - ./service:/app/service
       - ./src:/app/src
+      - ./data:/app/data:ro       # quran.db (Tanzil + редакция Diyanet) — читаем, пишет хост-скрипт
       - ./media:/app/media
       - ./work:/app/work
       - ./cache:/app/.cache       # кэш моделей whisper/MMS (persist, не качать на рестарт)

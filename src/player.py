@@ -12,7 +12,7 @@ import json
 import sys
 from pathlib import Path
 
-from quran import Quran
+from quran import Quran, map_editions
 
 
 def _ayah_spans(timeline: list[dict]) -> dict[int, tuple[int, int]]:
@@ -44,7 +44,17 @@ def build_data(sync_map: dict, quran: Quran, audio_src: str) -> dict:
         ayat = []
         for a in range(lo, hi + 1):
             v = quran.verse(surah, a)
-            ayat.append({"ayah": a, "text": v.text, "words": v.text.split()})
+            words = v.text.split()
+            item = {"ayah": a, "text": v.text, "words": words}
+            # П9: вторая редакция (Diyanet) для переключения текста в плеере. word_timeline
+            # индексирован по словам Tanzil (wi) → отдаём карту wi→[индексы слов Diyanet],
+            # чтобы подсветка легла на слова Diyanet даже при ином дроблении. forced не трогаем.
+            if getattr(v, "text_diyanet", ""):
+                dwords = v.text_diyanet.split()
+                item["text_diyanet"] = v.text_diyanet
+                item["words_diyanet"] = dwords
+                item["dmap"] = map_editions(words, dwords)
+            ayat.append(item)
         sections.append({"surah": surah, "title": s.title, "ayat": ayat})
 
     # оглавление: точки смены суры (для навигации-«chapters»)

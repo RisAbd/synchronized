@@ -109,6 +109,16 @@ def test_map_editions_skips_empty_waqf_token():
     assert map_editions(a, b) == [[0], [], [1]]
 
 
+def test_map_editions_skips_prepended_basmala():
+    # у Tanzil к аяту 1 суры приклеена басмала (4 слова), у Diyanet её нет → эти 4 слова не мапятся,
+    # реальные слова аята ложатся 1:1 (кейс rec11 53:1)
+    a = ["بِسْمِ", "اللَّهِ", "الرَّحْمَٰنِ", "الرَّحِيمِ", "وَالنَّجْمِ", "إِذَا", "هَوَىٰ"]
+    b = ["وَالنَّجْمِ", "اِذَا", "هَوٰىۙ"]
+    m = map_editions(a, b)
+    assert m[:4] == [[], [], [], []]          # басмала не сматчена
+    assert m[4:] == [[0], [1], [2]]           # реальные слова аята — 1:1
+
+
 def test_map_editions_real_db_najm():
     # на реальных данных: каждое НЕпустое слово Tanzil получает хотя бы один индекс Diyanet
     import sqlite3, pathlib

@@ -104,7 +104,16 @@ def map_editions(a_words: list[str], b_words: list[str]) -> list[list[int]]:
                 for x in range(i, k):
                     res[x] = [j]
                 i = k; j += 1; continue
-        res[i].append(j); i += 1; j += 1   # рассинхрон — 1:1 и дальше (fail-safe, без зацикливания)
+        # рассинхрон (нет 1:1/слияния/дробления). Решаем по lookahead, что лишнее: напр. у Tanzil
+        # к 1-му аяту суры приклеена басмала (4 слова), которых нет у Diyanet → B[j] найдётся дальше
+        # в A → пропускаем A[i] (не мапим, res[i]=[]). Симметрично для лишнего слова в B.
+        LA = 6
+        if B[j] in A[i + 1:i + 1 + LA]:
+            i += 1                          # A[i] лишнее (басмала и т.п.) — оставляем res[i]=[]
+        elif A[i] in B[j + 1:j + 1 + LA]:
+            j += 1                          # B[j] лишнее
+        else:
+            res[i].append(j); i += 1; j += 1   # настоящий рассинхрон — 1:1 и дальше (без зацикливания)
     return res
 
 
@@ -115,8 +124,9 @@ def map_editions(a_words: list[str], b_words: list[str]) -> list[list[int]]:
 class Verse:
     surah: int          # номер суры (1..114)
     ayah: int           # номер аята внутри суры
-    text: str           # оригинал с харакатами
+    text: str           # оригинал с харакатами (редакция Tanzil)
     sacdah: bool = False
+    text_diyanet: str = ""   # редакция турецкого мусхафа Diyanet (П9); "" если не импортирована
 
     @cached_property
     def norm(self) -> str:
@@ -192,9 +202,12 @@ class Quran:
                 "select id, number, title, verses_count, revelation_place, "
                 "bismillah_pre from surahs order by number"
             ).fetchall()
+            # редакция Diyanet (П9) — опциональная колонка: в старых БД её нет
+            has_diyanet = any(c[1] == "text_diyanet"
+                              for c in conn.execute("PRAGMA table_info(surah_verses)"))
+            cols = "surah_id, number, text, sacdah" + (", text_diyanet" if has_diyanet else "")
             vrows = conn.execute(
-                "select surah_id, number, text, sacdah from surah_verses "
-                "order by surah_id, number"
+                f"select {cols} from surah_verses order by surah_id, number"
             ).fetchall()
 
         verses_by_surah_id: dict[int, list[Verse]] = {}
@@ -205,7 +218,8 @@ class Quran:
             sid = r["surah_id"]
             verses_by_surah_id.setdefault(sid, []).append(
                 Verse(surah=id_to_number[sid], ayah=r["number"],
-                      text=r["text"], sacdah=bool(r["sacdah"]))
+                      text=r["text"], sacdah=bool(r["sacdah"]),
+                      text_diyanet=(r["text_diyanet"] if has_diyanet else "") or "")
             )
 
         surahs = [

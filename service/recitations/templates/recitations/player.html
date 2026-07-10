@@ -317,30 +317,70 @@ async function init(){
 
   if(!useVideo){ audio.src = d.audio; }   // видео-режим не тянет отдельное аудио
 
-  textEl.innerHTML = '';
-  for(const sec of d.sections){
-    surahTitle[sec.surah] = sec.title;
-    const h=document.createElement('div'); h.className='stitle';
-    h.textContent='سورة '+sec.title; textEl.appendChild(h);
-    for(const v of sec.ayat){
-      // аят — инлайновый <span>, чтобы аяты сливались в один сплошной поток (не блоки)
-      const el=document.createElement('span'); el.className='ayah';
-      const words = v.words || v.text.split(' ');
-      words.forEach((w,wi)=>{
-        const s=document.createElement('span'); s.className='w'; s.textContent=w;
-        wordEl[sec.surah+':'+v.ayah+':'+wi]=s;
-        el.appendChild(s); el.appendChild(document.createTextNode(' '));
-      });
-      const num=document.createElement('span'); num.className='num';
-      num.textContent='﴿'+toArabic(v.ayah)+'﴾'; el.appendChild(num);
-      textEl.appendChild(el); ayahEl[sec.surah+':'+v.ayah]=el;
-      textEl.appendChild(document.createTextNode(' '));   // пробел между аятами в потоке
-    }
-  }
+  renderText();
+  initEdition();
 
   window.addEventListener('wheel', pauseScroll, {passive:true});
   window.addEventListener('touchmove', pauseScroll, {passive:true});
   if(!useVideo) startTick();   // видео-режим стартует тик по onReady плеера
+}
+
+// --- редакция текста (Tanzil / Diyanet), П9 ---
+// word_timeline индексирован по словам Tanzil (wi). В режиме Diyanet рендерим диянетовские
+// слова, но wordEl регистрируем по КАНОНИЧЕСКОМУ Tanzil-wi через карту dmap (wi→[индексы
+// слов Diyanet]) → подсветка/окно/скролл/karaoke работают без изменений. forced не трогаем.
+let EDITION = localStorage.getItem('sync.edition') === 'diyanet' ? 'diyanet' : 'tanzil';
+function renderText(){
+  if(!DATA) return;
+  textEl.innerHTML=''; wordEl={}; ayahEl={};
+  nearEls=[]; hotEls=[]; activeAyah=null; activeAyahEl=null; scrollTargetEl=null;
+  for(const sec of DATA.sections){
+    surahTitle[sec.surah]=sec.title;
+    const h=document.createElement('div'); h.className='stitle';
+    h.textContent='سورة '+sec.title; textEl.appendChild(h);
+    for(const v of sec.ayat){
+      const el=document.createElement('span'); el.className='ayah';   // инлайн → сплошной поток
+      const diy = EDITION==='diyanet' && v.words_diyanet;
+      const shown = diy ? v.words_diyanet : (v.words || v.text.split(' '));
+      const spans = shown.map(w=>{
+        const s=document.createElement('span'); s.className='w'; s.textContent=w;
+        el.appendChild(s); el.appendChild(document.createTextNode(' '));
+        return s;
+      });
+      const tw = v.words || v.text.split(' ');           // канон Tanzil (по нему идёт wi)
+      if(diy){
+        const dmap = v.dmap || [];
+        tw.forEach((_,wi)=>{ const dj=(dmap[wi]||[])[0];
+          if(dj!=null && spans[dj]) wordEl[sec.surah+':'+v.ayah+':'+wi]=spans[dj]; });
+      } else {
+        spans.forEach((s,wi)=>{ wordEl[sec.surah+':'+v.ayah+':'+wi]=s; });
+      }
+      const num=document.createElement('span'); num.className='num';
+      num.textContent='﴿'+toArabic(v.ayah)+'﴾'; el.appendChild(num);
+      textEl.appendChild(el); ayahEl[sec.surah+':'+v.ayah]=el;
+      textEl.appendChild(document.createTextNode(' '));
+    }
+  }
+}
+
+// переключатель редакции в панели «⚙ Шрифт» — только если в данных есть текст Diyanet
+let editionInited = false;
+function initEdition(){
+  if(editionInited || !DATA) return;
+  const has = (DATA.sections||[]).some(s=>(s.ayat||[]).some(v=>v.words_diyanet));
+  if(!has) return;                       // старые данные без Diyanet — переключателя нет
+  editionInited = true;
+  const head=document.createElement('div'); head.className='fhead sep'; head.textContent='Текст (редакция)';
+  const row=document.createElement('div'); row.className='sizerow';
+  const mk=(id,label)=>{ const b=document.createElement('button'); b.textContent=label;
+    b.dataset.ed=id; b.style.flex='1'; if(EDITION===id) b.style.fontWeight='700';
+    b.onclick=e=>{ e.stopPropagation(); if(EDITION===id) return; EDITION=id;
+      localStorage.setItem('sync.edition', id);
+      row.querySelectorAll('button').forEach(x=>x.style.fontWeight = x.dataset.ed===id?'700':'400');
+      renderText(); };
+    return b; };
+  row.appendChild(mk('tanzil','Tanzil')); row.appendChild(mk('diyanet','Diyanet (тур.)'));
+  fontPanel.appendChild(head); fontPanel.appendChild(row);
 }
 
 // единый цикл подсветки: тянет время из активного источника ~каждый кадр
