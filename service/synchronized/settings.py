@@ -84,6 +84,11 @@ else:
     DATABASES = {"default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
+        # ASR-прогоны записи гоняются ПАРАЛЛЕЛЬНО в потоках (google||whisper, см. tasks._run_parallel)
+        # → пишут статусы/стадии одновременно. busy_timeout: короткая запись ЖДЁТ снятия блокировки,
+        # а не падает «database is locked». WAL: веб-опрос статуса (читатель) не блокирует писателей.
+        "OPTIONS": {"timeout": 20,
+                    "init_command": "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"},
     }}
 
 AUTH_PASSWORD_VALIDATORS = []

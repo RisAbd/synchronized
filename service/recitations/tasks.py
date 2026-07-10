@@ -76,6 +76,30 @@ def _run_safe(run) -> None:
         run.save(update_fields=["status", "error", "updated_at"])
 
 
+def _run_parallel(runs) -> None:
+    """Прогнать независимые прогоны параллельно в потоках (облачный google || GPU-whisper).
+    Пустой/одиночный список — без потоков. Каждый поток закрывает свои Django-соединения
+    (SQLite thread-local), чтобы не текли между обработками."""
+    from django.db import connections
+    if not runs:
+        return
+    if len(runs) == 1:
+        _run_safe(runs[0])
+        return
+
+    def _worker(run):
+        try:
+            _run_safe(run)
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=_worker, args=(r,), daemon=True) for r in runs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
 def run_pipeline(rec_id: int) -> None:
     """Обработать запись целиком: общий ingest + все её прогоны (queued/error)."""
     from .models import Recitation, Status
@@ -102,16 +126,24 @@ def run_pipeline(rec_id: int) -> None:
         rec.runs.update(status=Status.ERROR, error=msg)
         return
 
-    # сначала распознаватели, потом выравниватели (forced align): им нужен готовый
-    # прогон-источник для диапазона аятов.
+    # ASR-распознаватели — ПАРАЛЛЕЛЬНО, выравниватели (forced) — строго ПОСЛЕ них.
+    # google = ожидание облака (сеть), whisper = GPU-инференс: они не конкурируют за ресурс,
+    # поэтому гоняем в потоках и оверлапим (раньше шли циклом — whisper висел queued, пока
+    # google молотит облако; владелец 10.07: «почему виспер в это же время не начнёт?»).
+    # forced монотонно после ASR — ему нужен готовый источник диапазона аятов, и он единственный
+    # GPU-потребитель на своём шаге (пересечения по VRAM нет). Между записями celery --concurrency 1
+    # → две записи параллельно НЕ идут (иначе 2 whisper/forced на 6ГБ GPU = OOM; масштабирование
+    # через GPU-лок — в BACKLOG).
     from . import recognizers
     todo = list(rec.runs.filter(status__in=[Status.QUEUED, Status.ERROR]))
-    todo.sort(key=lambda r: recognizers.is_aligner(r.recognizer))
-    for run in todo:
+    asr_runs = [r for r in todo if not recognizers.is_aligner(r.recognizer)]
+    aligner_runs = [r for r in todo if recognizers.is_aligner(r.recognizer)]
+    _run_parallel(asr_runs)
+    for run in aligner_runs:
         _run_safe(run)
     # авто-уточнение границ поверх готового ASR (тихо пропустится без deps);
     # если только что перемололи ASR — освежаем forced (источник диапазона мог смениться)
-    _maybe_forced(rec, refresh=any(not recognizers.is_aligner(r.recognizer) for r in todo))
+    _maybe_forced(rec, refresh=bool(asr_runs))
     _aggregate(rec)
 
 
