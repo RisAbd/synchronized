@@ -124,6 +124,54 @@ def _audio_time_coverage(word_timeline, audio_duration, bin_sec: float = 10.0) -
     return round(len(hit) / nbins, 3)
 
 
+# нормальная длительность слова, когда у точки нет t_end (таймлайны align.py — только t):
+# берём зазор до следующего слова, но не больше этого потолка (иначе пауза «засчиталась» бы речью).
+_WORD_SPAN_CAP = 0.6
+
+
+def _speech_time_coverage(word_timeline, audio_duration) -> tuple[float, float]:
+    """ТОЧНОЕ покрытие речью: объединение интервалов слов [t, t_end] / длительность аудио.
+
+    Точнее 10-секундных бинов `_audio_time_coverage`: меряем реальные секунды, где размещено
+    слово (а не «бин, куда попало хоть одно»). Отвечает на вопрос владельца «сколько % времени
+    видео со словами, сколько без» (без = 1 − доля). Знаменатель — реальная длительность аудио
+    (одна для всех прогонов → метрика сравнима между google/whisper/forced), поэтому по-прежнему
+    штрафует и «6 слов на 20 мин», и «два слова по краям» (объединение = крохи → доля ~0).
+
+    Возвращает (секунды_со_словами, доля[0..1]). У forced есть точный t_end; у google/whisper
+    точки без t_end → длительность слова приближаем зазором до следующего с потолком _WORD_SPAN_CAP.
+    """
+    if not word_timeline or not audio_duration or audio_duration <= 0:
+        return 0.0, 0.0
+    pts = sorted((w for w in word_timeline if w.get("t") is not None), key=lambda w: w["t"])
+    ivs = []
+    for i, w in enumerate(pts):
+        t0 = float(w["t"])
+        te = w.get("t_end")
+        if te is not None and float(te) > t0:
+            t1 = float(te)
+        else:  # нет t_end → зазор до следующего слова, но не больше потолка
+            nxt = pts[i + 1]["t"] if i + 1 < len(pts) else t0 + _WORD_SPAN_CAP
+            t1 = t0 + min(_WORD_SPAN_CAP, max(0.0, nxt - t0)) if nxt > t0 else t0 + _WORD_SPAN_CAP
+        t0 = max(0.0, min(t0, audio_duration))
+        t1 = max(t0, min(t1, audio_duration))
+        ivs.append((t0, t1))
+    # слияние перекрытий
+    ivs.sort()
+    covered, cs, ce = 0.0, None, None
+    for a, b in ivs:
+        if cs is None:
+            cs, ce = a, b
+        elif a <= ce:
+            ce = max(ce, b)
+        else:
+            covered += ce - cs
+            cs, ce = a, b
+    if cs is not None:
+        covered += ce - cs
+    return round(covered, 1), round(covered / audio_duration, 3)
+
+
 def _yt_title(url: str) -> str:
     """Название YouTube-ролика через публичный oEmbed (без ключа/зависимостей). '' при неудаче."""
     try:
@@ -311,10 +359,15 @@ def run_one(run, on_stage=None) -> None:
     # под ясным именем для дебага, а headline coverage считаем честно по времени аудио.
     if "coverage" in meta:
         meta["aligned_ratio"] = meta.pop("coverage")
-    time_cov = _audio_time_coverage(wt, audio_dur or tl_end)
+    dur_for_cov = audio_dur or tl_end
+    speech_sec, speech_ratio = _speech_time_coverage(wt, dur_for_cov)   # точная (объединение слов)
+    bins_cov = _audio_time_coverage(wt, dur_for_cov)                    # грубая (10с-бины) — дебаг
     run.data = data
     run.metrics = {**meta,
-                   "coverage": time_cov,
+                   "coverage": speech_ratio,           # headline: доля ВРЕМЕНИ со словами (точная)
+                   "speech_sec": speech_sec,           # секунд со словами
+                   "silence_sec": round(max(0.0, (dur_for_cov or 0) - speech_sec), 1),  # без слов
+                   "coverage_bins": bins_cov,          # старая грубая метрика (сравнение)
                    "wt": len(wt), "tl": len(tl), "duration": round(audio_dur or tl_end),
                    "elapsed_sec": round(time.monotonic() - t0, 1)}
     run.status = AsrRun.Status.READY

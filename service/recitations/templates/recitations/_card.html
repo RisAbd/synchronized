@@ -10,7 +10,7 @@
     {% if r.duration_h or r.filesize_h %}<span class="metsub">{{ r.duration_h }}{% if r.duration_h and r.filesize_h %} · {% endif %}{{ r.filesize_h }}{% if r.ext_h %} · {{ r.ext_h }}{% endif %}</span>{% endif %}
     <span class="runs">
       {% for run in r.runs.all %}
-        {% if run.status == 'ready' %}<span class="rz-chip" title="покрытие аудио: доля длительности записи, где есть размещённые слова">{{ run.label }} · {{ run.metrics.wt|default:0 }} сл{% if run.metrics.coverage %} · {% widthratio run.metrics.coverage 1 100 %}%{% endif %}</span>
+        {% if run.status == 'ready' %}<span class="rz-chip" title="слова покрывают {% widthratio run.metrics.coverage 1 100 %}% времени записи ({{ run.metrics.speech_sec }}с со словами · {{ run.metrics.silence_sec }}с паузы/вступление из {{ run.metrics.duration }}с)">{{ run.label }} · {{ run.metrics.wt|default:0 }} сл{% if run.metrics.coverage %} · {% widthratio run.metrics.coverage 1 100 %}% речь{% endif %}</span>
         {% elif run.status == 'error' %}<span class="rz-chip" title="{{ run.error }}">{{ run.label }} · ошибка</span>
         {% else %}<span class="rz-chip"><span class="spin"></span>{{ run.label }} · {{ run.get_status_display }}…</span>{% endif %}
       {% endfor %}
