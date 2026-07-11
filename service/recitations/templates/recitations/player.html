@@ -12,9 +12,12 @@
   :root { color-scheme: light dark;
     --bg:#faf7f0; --fg:#201d16; --muted:#9a917f; --dim:#b9b1a0; --line:rgba(120,110,90,.18);
     --hl-fg:#141007; --accent:#b8891a; --hot:#2e8b45; --card:#fffdf7; --chip:#f0ead9;
-    /* выбираемый арабский шрифт + размер (перекрываются из JS по localStorage) */
+    /* выбираемый арабский шрифт + размер (перекрываются из JS по localStorage).
+       --font-scale уравнивает ВИДИМЫЙ размер разных шрифтов (у них разная intrinsic-высота
+       глифа при одном font-size: Amiri Quran крупный, Lateef мелкий → без нормировки «один
+       больше, другой меньше»), задаётся из JS вместе со шрифтом (П14). */
     --arab-font:"Scheherazade New","Amiri","Noto Naskh Arabic","Times New Roman",serif;
-    --ayah-size:2.2rem; }
+    --font-scale:0.93; --ayah-size:2.2rem; }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#100f0b; --fg:#efe8d6; --muted:#7c745f; --dim:#3f3a2e; --line:rgba(200,190,160,.14);
       --hl-fg:#fff3c4; --accent:#e4bf4a; --hot:#5ed07f; --card:#191710; --chip:#211e15; } }
@@ -78,15 +81,21 @@
      пользователь); текущий аят НЕ увеличивается — только подсвечивается словное окно, поэтому
      вёрстка не «прыгает» и скролл идёт непрерывно. Большой нижний паддинг, чтобы последний аят
      мог подняться к верху под видео. */
+  /* font-size = выбранный размер * per-font масштаб (видимый размер уравнен между шрифтами).
+     line-height привязан к НОМИНАЛЬНОМУ размеру (не к масштабированному font-size), поэтому
+     межстрочный интервал ОДИНАКОВ для всех шрифтов и с запасом больше intrinsic-высоты глифа
+     (~1.9× номинала после нормировки) → фоны-подсветки соседних строк НЕ налезают (П14). */
   #text { position:relative; padding:5vh 20px 62vh; padding:5dvh 20px 62dvh;
     width:100%; max-width:860px; margin:0 auto;
-    font-family:var(--arab-font); font-size:var(--ayah-size); line-height:2.05;
+    font-family:var(--arab-font); font-size:calc(var(--ayah-size) * var(--font-scale));
+    line-height:calc(var(--ayah-size) * 2.4);
     text-align:justify; text-align-last:center; }
   .stitle { display:block; text-align:center; color:var(--accent);
     font:600 clamp(1rem,4vw,1.35rem) system-ui; letter-spacing:.02em; margin:26px 0 12px; opacity:.7; }
   /* ﷽ перед сурой (только режим Diyanet — в его тексте басмалы нет; см. renderText) */
   .bismillah { display:block; text-align:center; color:var(--fg); opacity:.85;
-    font-family:var(--arab-font); font-size:calc(var(--ayah-size) * .78); margin:0 0 18px; }
+    font-family:var(--arab-font); font-size:calc(var(--ayah-size) * var(--font-scale) * .78);
+    margin:0 0 18px; }
   /* аят — инлайновый фрагмент общего потока (не блок), чтобы аяты сливались в сплошной текст */
   .ayah { color:var(--dim); transition:color .35s; }
   .ayah .num { font:600 .62em system-ui; color:var(--muted); margin:0 .4em; opacity:.8;
@@ -94,7 +103,9 @@
   .ayah.near { color:var(--muted); }
   .ayah.active { color:var(--hl-fg); }
   .ayah.active .num { color:var(--accent); }
-  .w { border-radius:8px; padding:.02em .14em; transition:color .3s, background .3s; }
+  .w { border-radius:8px; padding:.02em .14em; transition:color .3s, background .3s; cursor:pointer; }
+  /* короткая вспышка при клике по слову (обратная навигация к таймкоду видео, П13) */
+  .w.seeked { outline:2px solid var(--accent); outline-offset:1px; }
   /* окно подсветки: интенсивность --wi (0..1) задаётся из JS по дистанции до текущего слова →
      плавный градиент от центра к краям (маскирует неточность привязки слова к таймстемпу) */
   .w.lit { color:var(--hl-fg);
@@ -193,27 +204,33 @@ badge.addEventListener('click', async () => {
 
 // --- выбор арабского шрифта (Google Fonts), сохраняется в localStorage ---
 // Naskh-начертания с хорошо читаемой харакой; Scheherazade — самый крупный/разборчивый по умолчанию.
+// scale — per-font нормировка видимого размера (замер intrinsic-высоты глифа при равном
+// font-size, нормировано к ~190px/100px: Amiri Quran крупный → 0.78, Lateef мелкий → 1.31).
+// После нормировки intrinsic-высота всех шрифтов ≈ одинакова → единый line-height не налезает.
 const FONTS = [
-  {css:"'Scheherazade New', serif", name:'Scheherazade New'},
-  {css:"'Amiri', serif",            name:'Amiri'},
-  {css:"'Amiri Quran', serif",      name:'Amiri Quran'},
-  {css:"'Noto Naskh Arabic', serif",name:'Noto Naskh Arabic'},
-  {css:"'Lateef', serif",           name:'Lateef'},
+  {css:"'Scheherazade New', serif", name:'Scheherazade New', scale:0.93},
+  {css:"'Amiri', serif",            name:'Amiri',            scale:1.09},
+  {css:"'Amiri Quran', serif",      name:'Amiri Quran',      scale:0.78},
+  {css:"'Noto Naskh Arabic', serif",name:'Noto Naskh Arabic',scale:1.12},
+  {css:"'Lateef', serif",           name:'Lateef',           scale:1.31},
 ];
 const FONT_KEY = 'sync.arabfont';
 const fontBtn = document.getElementById('fontbtn');
 const fontPanel = document.getElementById('fontpanel');
-const applyFont = css => document.documentElement.style.setProperty('--arab-font', css);
+const applyFont = f => {
+  document.documentElement.style.setProperty('--arab-font', f.css);
+  document.documentElement.style.setProperty('--font-scale', f.scale);
+};
 (function initFonts(){
-  const saved = localStorage.getItem(FONT_KEY);
-  const cur = FONTS.some(f=>f.css===saved) ? saved : FONTS[0].css;
+  const savedCss = localStorage.getItem(FONT_KEY);
+  const cur = FONTS.find(f=>f.css===savedCss) || FONTS[0];
   applyFont(cur);
   FONTS.forEach(f=>{
-    const b=document.createElement('button'); b.className='fopt'+(f.css===cur?' on':'');
+    const b=document.createElement('button'); b.className='fopt'+(f.css===cur.css?' on':'');
     b.style.fontFamily=f.css;
     b.innerHTML='<span class="fn">'+f.name+'</span>بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ';
     b.onclick=()=>{
-      localStorage.setItem(FONT_KEY, f.css); applyFont(f.css);
+      localStorage.setItem(FONT_KEY, f.css); applyFont(f);
       fontPanel.querySelectorAll('.fopt').forEach(x=>x.classList.remove('on'));
       b.classList.add('on'); fontPanel.classList.remove('open');
     };
@@ -223,7 +240,7 @@ const applyFont = css => document.documentElement.style.setProperty('--arab-font
 
 // --- выбор размера шрифта (общий для всех аятов), сохраняется в localStorage ---
 const SIZE_KEY = 'sync.arabsize';
-const SIZE_MIN = 1.4, SIZE_MAX = 4.2, SIZE_STEP = 0.15, SIZE_DEF = 2.2;
+const SIZE_MIN = 1.4, SIZE_MAX = 5.6, SIZE_STEP = 0.15, SIZE_DEF = 2.2;
 const applySize = rem => document.documentElement.style.setProperty('--ayah-size', rem.toFixed(2)+'rem');
 (function initSize(){
   let cur = parseFloat(localStorage.getItem(SIZE_KEY));
@@ -251,7 +268,7 @@ document.addEventListener('click', e => {
     fontPanel.classList.remove('open');
 });
 
-let TL = [], WT = [], ayahEl = {}, wordEl = {}, surahTitle = {};
+let TL = [], WT = [], ayahEl = {}, wordEl = {}, surahTitle = {}, firstT = new Map();
 let activeAyah = null, activeAyahEl = null, nearEls = [], hotEls = [];
 let userScrolling = false, scrollTimer = null;
 let scrollTargetEl = null;                       // элемент, который плавно держим под видео
@@ -318,11 +335,16 @@ async function init(){
   document.getElementById('sub').textContent = (d.reciter ? d.reciter+' · ' : '') + fmt(d.duration||0);
   TL = d.timeline || [];
   WT = d.word_timeline || [];
+  // карта слово→ПЕРВЫЙ таймкод (WT монотонен по t → первое вхождение = раннее чтение; при
+  // возвратах чтеца (П8) у слова несколько точек — берём самую раннюю). Для клик-навигации (П13).
+  firstT = new Map();
+  for(const e of WT){ const k=e.surah+':'+e.ayah+':'+e.wi; if(!firstT.has(k)) firstT.set(k, e.t); }
 
   if(!useVideo){ audio.src = d.audio; }   // видео-режим не тянет отдельное аудио
 
   renderText();
   initEdition();
+  initWordSeek();
 
   window.addEventListener('wheel', pauseScroll, {passive:true});
   window.addEventListener('touchmove', pauseScroll, {passive:true});
@@ -359,12 +381,15 @@ function renderText(){
         return s;
       });
       const tw = v.words || v.text.split(' ');           // канон Tanzil (по нему идёт wi)
+      // dataset.k = каноничный ключ surah:ayah:wi → клик по слову ищет его таймкод (П13)
       if(diy){
         const dmap = v.dmap || [];
-        tw.forEach((_,wi)=>{ const dj=(dmap[wi]||[])[0];
-          if(dj!=null && spans[dj]) wordEl[sec.surah+':'+v.ayah+':'+wi]=spans[dj]; });
+        tw.forEach((_,wi)=>{ const dj=(dmap[wi]||[])[0]; const k=sec.surah+':'+v.ayah+':'+wi;
+          if(dj!=null && spans[dj]){ wordEl[k]=spans[dj];
+            if(!spans[dj].dataset.k) spans[dj].dataset.k=k; } });
       } else {
-        spans.forEach((s,wi)=>{ wordEl[sec.surah+':'+v.ayah+':'+wi]=s; });
+        spans.forEach((s,wi)=>{ const k=sec.surah+':'+v.ayah+':'+wi;
+          wordEl[k]=s; s.dataset.k=k; });
       }
       const num=document.createElement('span'); num.className='num';
       num.textContent='﴿'+toArabic(v.ayah)+'﴾'; el.appendChild(num);
@@ -392,6 +417,21 @@ function initEdition(){
     return b; };
   row.appendChild(mk('tanzil','Tanzil')); row.appendChild(mk('diyanet','Diyanet (тур.)'));
   fontPanel.appendChild(head); fontPanel.appendChild(row);
+}
+
+// обратная навигация (П13): клик по слову → перемотка активного источника (видео/аудио) на его
+// таймкод. Слушатель делегирован на #text (переживает re-render), ставим ОДИН раз.
+let wordSeekInited = false, seekFlashTimer = null;
+function initWordSeek(){
+  if(wordSeekInited) return; wordSeekInited = true;
+  textEl.addEventListener('click', e => {
+    const w = e.target.closest('.w'); if(!w || !w.dataset.k) return;
+    const t = firstT.get(w.dataset.k); if(t == null) return;
+    seek(t);
+    document.querySelectorAll('.w.seeked').forEach(x=>x.classList.remove('seeked'));
+    w.classList.add('seeked'); clearTimeout(seekFlashTimer);
+    seekFlashTimer = setTimeout(()=>w.classList.remove('seeked'), 450);
+  });
 }
 
 // единый цикл подсветки: тянет время из активного источника ~каждый кадр
