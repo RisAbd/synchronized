@@ -131,13 +131,14 @@
   <div id="video"><div id="ytwrap"><div id="yt"></div></div></div>
   {% endif %}
   <audio id="audio" controls preload="metadata"{% if youtube_id %} style="display:none"{% endif %}></audio>
-  {% if runs|length > 1 %}
-  {# распознавание (ASR) и выравнивание (forced align) — разные вещи: показываем раздельно #}
+  {% if debug and runs|length > 1 %}
+  {# распознавание (ASR) и выравнивание (forced align) — разные вещи: показываем раздельно.
+     Отладочный тумблер: только по ?debug=1 — конечному читателю выбор прогонов не нужен. #}
   <div class="asrbar">
     <span class="lbl">распознавание:</span>
     {% for run in runs %}{% if not run.is_aligner %}
       {% if run.status == 'ready' %}
-        <a class="asr {% if run.recognizer == active_key %}on{% endif %}" href="?asr={{ run.recognizer }}"
+        <a class="asr {% if run.recognizer == active_key %}on{% endif %}" href="?asr={{ run.recognizer }}&debug=1"
            title="слова покрывают {% if run.metrics.coverage %}{% widthratio run.metrics.coverage 1 100 %}%{% else %}—{% endif %} времени ({{ run.metrics.speech_sec }}с речь · {{ run.metrics.silence_sec }}с паузы из {{ run.metrics.duration }}с), слов {{ run.metrics.wt|default:0 }}">
           {{ run.label }}<small>{{ run.metrics.wt|default:0 }} сл</small></a>
       {% elif run.status == 'error' %}
@@ -149,7 +150,7 @@
     {% for run in runs %}{% if run.is_aligner %}
       <span class="lbl lbl-align">· выравнивание:</span>
       {% if run.status == 'ready' %}
-        <a class="asr {% if run.recognizer == active_key %}on{% endif %}" href="?asr={{ run.recognizer }}"
+        <a class="asr {% if run.recognizer == active_key %}on{% endif %}" href="?asr={{ run.recognizer }}&debug=1"
            title="точные границы аятов (выровнен известный текст); слова покрывают {% if run.metrics.coverage %}{% widthratio run.metrics.coverage 1 100 %}%{% else %}—{% endif %} времени ({{ run.metrics.speech_sec }}с речь · {{ run.metrics.silence_sec }}с паузы)">
           {{ run.label }}<small>{{ run.metrics.wt|default:0 }} сл</small></a>
       {% elif run.status == 'error' %}

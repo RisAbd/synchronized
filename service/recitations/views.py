@@ -116,6 +116,9 @@ def player(request, pk):
         "active_key": active_key,
         "runs": rec.runs.all(),
         "youtube_id": rec.youtube_id,
+        # тумблер прогонов (распознавание/выравнивание) — отладочный: конечному
+        # читателю не нужен, показываем только по ?debug=1
+        "debug": request.GET.get("debug") == "1",
     })
 
 
