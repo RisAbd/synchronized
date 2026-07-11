@@ -377,3 +377,77 @@ def run_one(run, on_stage=None) -> None:
     if not rec.title_ar and data.get("sections"):
         rec.title_ar = data["sections"][0]["title"]
         rec.save(update_fields=["title_ar", "updated_at"])
+
+
+def build_manual_run(run, word_timeline: list[dict]) -> None:
+    """Сохранить ручную привязку (П12 v2) как готовый прогон-выравниватель «manual».
+
+    `word_timeline` — точки [{surah,ayah,wi,t,t_end}] из ручного элайнера (индексы wi — канон
+    Tanzil, как у всех прогонов). Собираем `sync_map` (аятные якоря + слова) и прогоняем через
+    ТОТ ЖЕ `build_data`, что forced/ASR → прогон получает единый формат data (sections/timeline/
+    word_timeline) и становится выбираемым в плеере наравне с остальными. Синхронно (быстро, без
+    нейросети) — зовётся прямо из вьюхи. Мутирует/сохраняет run."""
+    from .models import AsrRun
+    from player import build_data
+
+    rec = run.recitation
+    q = _quran()
+
+    # нормализуем/валидируем точки (координаты из браузера — не доверяем вслепую)
+    wt: list[dict] = []
+    for w in word_timeline or []:
+        try:
+            s, a, wi, t = int(w["surah"]), int(w["ayah"]), int(w["wi"]), float(w["t"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        item = {"surah": s, "ayah": a, "wi": wi, "t": round(t, 3)}
+        if w.get("t_end") is not None:
+            try:
+                item["t_end"] = round(float(w["t_end"]), 3)
+            except (TypeError, ValueError):
+                pass
+        wt.append(item)
+    wt.sort(key=lambda w: w["t"])
+    if not wt:
+        raise ValueError("пустой word_timeline — нечего сохранять")
+
+    # аятные якоря для build_data: одна точка на (surah,ayah) в самое раннее t, по возрастанию t
+    first_t: dict[tuple[int, int], float] = {}
+    for w in wt:
+        key = (w["surah"], w["ayah"])
+        if key not in first_t or w["t"] < first_t[key]:
+            first_t[key] = w["t"]
+    timeline = [{"t": t, "surah": s, "ayah": a}
+                for (s, a), t in sorted(first_t.items(), key=lambda kv: kv[1])]
+
+    sync_map = {"timeline": timeline, "word_timeline": wt, "meta": {"source": "manual"}}
+
+    run.status = AsrRun.Status.PROCESSING
+    run.error = ""
+    run.stage = "build"
+    run.save(update_fields=["status", "error", "stage", "updated_at"])
+
+    data = build_data(sync_map, q, rec.audio_filename)
+    audio = rec_dir(rec.id) / (rec.audio_filename or "")
+    audio_dur = (rec.meta or {}).get("duration") or (_ffprobe_duration(audio) if audio.is_file() else 0)
+    tl_end = data["timeline"][-1]["t"] if data.get("timeline") else 0
+    data["duration"] = round(audio_dur or tl_end or (wt[-1].get("t_end") or wt[-1]["t"]))
+
+    dur_for_cov = audio_dur or data["duration"]
+    speech_sec, speech_ratio = _speech_time_coverage(wt, dur_for_cov)
+    bins_cov = _audio_time_coverage(wt, dur_for_cov)
+    run.data = data
+    run.metrics = {"source": "manual",
+                   "coverage": speech_ratio,
+                   "speech_sec": speech_sec,
+                   "silence_sec": round(max(0.0, (dur_for_cov or 0) - speech_sec), 1),
+                   "coverage_bins": bins_cov,
+                   "wt": len(wt), "tl": len(timeline),
+                   "duration": data["duration"]}
+    run.status = AsrRun.Status.READY
+    run.stage = ""
+    run.save(update_fields=["data", "metrics", "status", "stage", "updated_at"])
+
+    if not rec.title_ar and data.get("sections"):
+        rec.title_ar = data["sections"][0]["title"]
+        rec.save(update_fields=["title_ar", "updated_at"])

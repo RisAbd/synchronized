@@ -74,6 +74,7 @@
     <span class="rec off" id="recState">⏸ пауза</span>
     <span id="stats">интервалов: 0 · покрыто слов: 0</span>
     <button class="btn" id="btnSeed" title="залить текущую привязку прогона как отправную точку для правки">↻ из прогона</button>
+    <button class="btn" id="btnSave" title="сохранить как прогон «manual» в бэк → появится выбираемым в плеере">💾 Сохранить в бэк</button>
     <button class="btn" id="btnCopy">Копировать JSON</button>
     <button class="btn" id="btnDl">Скачать JSON</button>
     <button class="btn warn" id="btnClear">Очистить</button>
@@ -88,8 +89,9 @@
 // перезаписываются (overwrite-merge). Экспорт — в word_timeline JSON (совместим с плеером).
 // v1: работает поверх записи, где текст/диапазон уже определены (data.json есть). При загрузке
 // заливает существующую привязку прогона (word_timeline) как отправную точку → правишь мышью,
-// а не размечаешь с нуля («↻ из прогона» перезаливает, «Очистить» даёт пустой лист). Выбор
-// диапазона аятов с нуля (без ASR) — v2.
+// а не размечаешь с нуля («↻ из прогона» перезаливает, «Очистить» даёт пустой лист). v2:
+// «💾 Сохранить в бэк» → POST /r/<id>/manual/save → прогон «manual» (выбираемый в плеере, приоритет
+// авто-выбора). Выбор диапазона аятов с нуля (без ASR) — ещё дальше.
 const QS = new URLSearchParams(location.search);
 const REC_ID = QS.get('rec');
 const ASR = QS.get('asr');
@@ -308,6 +310,25 @@ function wireButtons(){
     if(events.length && !confirm('Заменить текущие интервалы привязкой из прогона?')) return;
     const n = seedFromData();
     flash('btnSeed', n ? ('залито '+n) : 'нет привязки');
+  };
+  // П12 v2: сохранить как прогон «manual» в бэк → появится выбираемым в плеере (наравне с forced/ASR)
+  document.getElementById('btnSave').onclick = async () => {
+    const b = document.getElementById('btnSave'); const old = b.textContent;
+    const tl = buildTimeline();
+    if(!REC_ID){ flash('btnSave','нет rec'); return; }
+    if(!tl.word_timeline.length){ flash('btnSave','нечего сохранять'); return; }
+    b.disabled = true; b.textContent = 'сохраняю…';
+    try {
+      const r = await fetch(API + '/r/' + REC_ID + '/manual/save', {
+        method: 'POST',
+        body: new URLSearchParams({word_timeline: JSON.stringify(tl.word_timeline)}),
+      });
+      const j = await r.json().catch(()=>({}));
+      b.disabled = false;
+      if(r.ok && j.ok){ b.textContent = '✓ прогон manual · '+(j.wt||0)+' сл'; }
+      else { b.textContent = '✗ '+((j && j.error) || ('HTTP '+r.status)); }
+    } catch(e){ b.disabled = false; b.textContent = '✗ сеть'; }
+    setTimeout(()=>{ b.textContent = old; }, 3000);
   };
 }
 function flash(id, msg){

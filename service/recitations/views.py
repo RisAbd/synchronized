@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -122,6 +123,35 @@ def manual(request, pk):
     qs = request.GET.urlencode()
     url = f"{settings.STATIC_URL}manual.html?rec={pk}" + (f"&{qs}" if qs else "")
     return redirect(url)
+
+
+# CSRF-exempt: зовётся fetch-ом из статичного ручного элайнера (П12), потенциально с другого origin
+# (GitHub Pages). Тело — word_timeline JSON-строкой в поле формы (urlencoded) → простой CORS-запрос
+# без preflight, как add/delete. Персональный прототип на одного пользователя.
+@csrf_exempt
+@require_POST
+def manual_save(request, pk):
+    """Сохранить ручную привязку (П12 v2) как готовый прогон «manual» → появляется выбираемым в
+    плеере наравне с forced/ASR (и по приоритету активен по умолчанию — человек правит истину)."""
+    rec = get_object_or_404(Recitation, pk=pk)
+    try:
+        wt = json.loads(request.POST.get("word_timeline") or "")
+    except (ValueError, TypeError):
+        return _cors(JsonResponse({"ok": False, "error": "битый JSON"}, status=400))
+    if not isinstance(wt, list) or not wt:
+        return _cors(JsonResponse({"ok": False, "error": "пустой word_timeline"}, status=400))
+    run, _ = AsrRun.objects.get_or_create(recitation=rec, recognizer="manual")
+    try:
+        pipeline.build_manual_run(run, wt)
+    except Exception as e:  # noqa: BLE001 — любую ошибку сборки показываем пользователю в UI
+        run.status = AsrRun.Status.ERROR
+        run.error = str(e)[:500]
+        run.save(update_fields=["status", "error", "updated_at"])
+        return _cors(JsonResponse({"ok": False, "error": str(e)[:300]}, status=400))
+    m = run.metrics or {}
+    return _cors(JsonResponse({"ok": True, "id": rec.id, "recognizer": "manual",
+                               "wt": m.get("wt"),
+                               "coverage_pct": round((m.get("coverage") or 0) * 100)}))
 
 
 def _run_dict(r):
