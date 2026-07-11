@@ -330,11 +330,14 @@ def _detect_repeats(bounds, ref, wav, emissions, stride_ms):
             g0, g1 = bounds[i][1], bounds[i + 1][0]
             if g1 - g0 < _REPEAT_MIN_GAP:
                 continue
-            if speech_frac(g0, g1) < _REPEAT_MIN_SPEECH:
-                continue                              # тихий разрыв — обычная пауза, не повтор
             # якорь = начало повторного чтения (после паузы). Интервал [g0, onset] остаётся
             # слову-остановке (держим подсветку, не режем его), декод/раздача — от onset.
             onset = repeat_onset(g0, g1)
+            # речь проверяем в ПОВТОРНОЙ части [onset, g1] (после паузы), а НЕ во всей дыре: дыра
+            # часто = длинная пауза + короткая перечитка → доля речи по всей дыре низкая (rec11 01:24:
+            # 0.27), а после паузы высокая. Точнее и безопаснее глобального понижения порога.
+            if speech_frac(onset, g1) < _REPEAT_MIN_SPEECH:
+                continue                              # и после паузы тихо — обычная пауза, не повтор
             dec = _skeleton(_greedy_ctc(emissions, stride_ms, onset, g1, id2ch))
             if len(dec) < _REPEAT_MIN_DECODE:
                 continue
