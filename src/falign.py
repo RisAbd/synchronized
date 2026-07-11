@@ -205,7 +205,9 @@ def _snap_bounds(bounds: list[tuple[float, float]], wav):
 #   2. в разрыве должна быть РЕЧЬ (доля кадров выше шумового порога ≥ _REPEAT_MIN_SPEECH) —
 #      иначе это обычная пауза/вдох, не повтор;
 #   3. greedy-CTC-декод эмиссий разрыва → романизованные буквы MMS → согласный СКЕЛЕТ (greedy
-#      роняет гласные, поэтому и эталон сводим к скелету, как в align.py);
+#      роняет гласные, поэтому и эталон сводим к скелету, как в align.py); тандемный повтор в декоде
+#      (чтец без паузы прочёл фразу дважды → скелет `PP`) схлопываем в `P` (_collapse_tandem), иначе
+#      удвоенная длина тянет матч на лишний аят назад (over-reach);
 #   4. ищем «назадний» непрерывный диапазон эталона [ra..rb] (rb ≤ текущего слова, ra не дальше
 #      _REPEAT_LOOKBACK слов назад), чей скелет ближе всего к декоду разрыва; берём, если похоже
 #      (≥ _REPEAT_MIN_SIM) и явно лучше, чем «вперёд» (чтобы не спутать возврат с медленным
@@ -250,6 +252,30 @@ def _lev(a: str, b: str) -> int:
 
 def _sim(a: str, b: str) -> float:
     return 1.0 - _lev(a, b) / max(len(a), len(b), 1)
+
+
+def _collapse_tandem(s: str) -> str:
+    """Схлопнуть тандемный повтор в начале декода разрыва (чтец дважды прочёл одну фразу подряд —
+    без паузы между копиями, поэтому onset их не разделил → greedy-CTC выдал удвоенный скелет `PP…`).
+    Удвоенная длина тянет назадний матч на ЛИШНИЙ аят (длиннее эталон-диапазон = ближе по длине к
+    раздутому декоду), т.е. ложный over-reach (rec11 ~0:50: чтец перечёл 53:11 дважды, декод удвоился,
+    матч уехал на 53:10 вместо 53:11). Ищем период p, при котором ≥2 идущих подряд блока длины p
+    почти равны первому (Левенштейн ≥0.6 — CTC шумит), оставляем ОДИН блок + хвост. Только укорачивает
+    и только при явном тандеме → чистые (неудвоенные) декоды не трогает."""
+    n = len(s)
+    if n < 4:
+        return s
+    best = s
+    for p in range(2, n // 2 + 1):
+        b0 = s[:p]
+        reps = 1
+        while (reps + 1) * p <= n and _sim(b0, s[reps * p:(reps + 1) * p]) >= 0.6:
+            reps += 1
+        if reps >= 2:
+            cand = b0 + s[reps * p:]
+            if len(cand) < len(best):
+                best = cand
+    return best
 
 
 def _greedy_ctc(emissions, stride_ms: int, t0: float, t1: float, id2ch: dict) -> str:
@@ -338,7 +364,7 @@ def _detect_repeats(bounds, ref, wav, emissions, stride_ms):
             # 0.27), а после паузы высокая. Точнее и безопаснее глобального понижения порога.
             if speech_frac(onset, g1) < _REPEAT_MIN_SPEECH:
                 continue                              # и после паузы тихо — обычная пауза, не повтор
-            dec = _skeleton(_greedy_ctc(emissions, stride_ms, onset, g1, id2ch))
+            dec = _collapse_tandem(_skeleton(_greedy_ctc(emissions, stride_ms, onset, g1, id2ch)))
             if len(dec) < _REPEAT_MIN_DECODE:
                 continue
             # лучший «назадний» непрерывный диапазон эталона [ra..rb], rb ≤ i.
