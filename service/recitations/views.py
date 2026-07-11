@@ -13,7 +13,7 @@ from pathlib import Path
 from django.conf import settings
 from django.http import (FileResponse, Http404, HttpResponse, HttpResponseRedirect,
                          JsonResponse, StreamingHttpResponse)
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_POST
 
@@ -107,19 +107,32 @@ def delete(request, pk):
 
 
 def player(request, pk):
-    rec = get_object_or_404(Recitation, pk=pk)
-    prefer = request.GET.get("asr")
-    active = rec.active_run(prefer)
-    active_key = active.recognizer if active else None
-    return render(request, "recitations/player.html", {
-        "rec": rec,
-        "active_key": active_key,
-        "runs": rec.runs.all(),
-        "youtube_id": rec.youtube_id,
-        # тумблер прогонов (распознавание/выравнивание) — отладочный: конечному
-        # читателю не нужен, показываем только по ?debug=1
-        "debug": request.GET.get("debug") == "1",
-    })
+    """Плеер теперь СТАТИЧНЫЙ файл (П11): бэк HTML не отдаёт. Красивый URL /r/<id>/ ведём
+    редиректом на статику, пробрасывая ?asr/?debug (для старых ссылок/закладок). Статика
+    сама фетчит /r/<id>/data.json и рисует."""
+    get_object_or_404(Recitation, pk=pk)
+    qs = request.GET.urlencode()
+    url = f"{settings.STATIC_URL}player.html?rec={pk}" + (f"&{qs}" if qs else "")
+    return redirect(url)
+
+
+def api_recitations(request):
+    """JSON-список записей для статичной библиотеки (П11): фронт сам фетчит и рисует."""
+    items = []
+    for rec in Recitation.objects.prefetch_related("runs").order_by("-id"):
+        items.append({
+            "id": rec.id, "title": rec.title or f"Запись #{rec.id}",
+            "title_ar": rec.title_ar, "reciter": rec.reciter,
+            "source_url": rec.source_url, "status": rec.status,
+            "ready": rec.is_ready, "youtube_id": rec.youtube_id,
+            "duration": rec.duration, "meta": rec.meta or {},
+            "runs": [{"recognizer": r.recognizer, "label": r.label,
+                      "is_aligner": r.is_aligner, "status": r.status,
+                      "metrics": r.metrics or {}} for r in rec.runs.all()],
+        })
+    resp = JsonResponse({"recitations": items})
+    resp["Access-Control-Allow-Origin"] = "*"
+    return resp
 
 
 def data_json(request, pk):
@@ -130,13 +143,26 @@ def data_json(request, pk):
     if not data:
         raise Http404("нет данных")
     payload = dict(data)
+    # прогоны — для отладочного тумблера распознавания/выравнивания в СТАТИЧНОМ плеере
+    # (раньше рисовались server-side в шаблоне; теперь фронт строит их из JSON сам).
+    runs_payload = [
+        {"recognizer": r.recognizer, "label": r.label, "is_aligner": r.is_aligner,
+         "status": r.status, "stage": r.stage, "error": (r.error or "")[:300],
+         "metrics": r.metrics or {}}
+        for r in rec.runs.all()
+    ]
     payload.update({"id": rec.id, "title": rec.title or f"Запись #{rec.id}",
                     "title_ar": rec.title_ar, "reciter": rec.reciter,
                     "recognizer": run.recognizer if run else None,
                     "metrics": (run.metrics if run else None) or {},
                     "youtube_id": rec.youtube_id,
+                    "runs": runs_payload,
+                    "active_key": run.recognizer if run else None,
                     "audio": reverse("audio", args=[rec.id])})
-    return JsonResponse(payload)
+    resp = JsonResponse(payload)
+    # разрешаем фетч со статичного фронта на другом origin (будущий GitHub Pages, П11)
+    resp["Access-Control-Allow-Origin"] = "*"
+    return resp
 
 
 def card(request, pk):

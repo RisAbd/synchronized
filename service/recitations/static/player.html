@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>{{ rec.title|default:"synchronized" }} · synchronized</title>
+<title>synchronized</title>
 <link rel="icon" href="data:,"><!-- заглушка: без неё браузер дёргает /favicon.ico → 404 в консоли -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -134,52 +134,33 @@
 <body>
 <header>
   <div class="top">
-    <a class="back" href="{% url 'index' %}" title="назад">‹</a>
-    <div class="title"><b id="ttl">{{ rec.title|default:"—" }}</b><span id="sub"></span></div>
+    <a class="back" href="/" title="назад">‹</a>
+    <div class="title"><b id="ttl">—</b><span id="sub"></span></div>
     <button class="fontbtn" id="fontbtn" title="настройки шрифта">⚙&#xFE0E; Шрифт</button>
   </div>
-  {% if youtube_id %}
-  <div id="video"><div id="ytwrap"><div id="yt"></div></div></div>
-  {% endif %}
-  <audio id="audio" controls preload="metadata"{% if youtube_id %} style="display:none"{% endif %}></audio>
-  {% if debug and runs|length > 1 %}
-  {# распознавание (ASR) и выравнивание (forced align) — разные вещи: показываем раздельно.
-     Отладочный тумблер: только по ?debug=1 — конечному читателю выбор прогонов не нужен. #}
-  <div class="asrbar">
-    <span class="lbl">распознавание:</span>
-    {% for run in runs %}{% if not run.is_aligner %}
-      {% if run.status == 'ready' %}
-        <a class="asr {% if run.recognizer == active_key %}on{% endif %}" href="?asr={{ run.recognizer }}&debug=1"
-           title="слова покрывают {% if run.metrics.coverage %}{% widthratio run.metrics.coverage 1 100 %}%{% else %}—{% endif %} времени ({{ run.metrics.speech_sec }}с речь · {{ run.metrics.silence_sec }}с паузы из {{ run.metrics.duration }}с), слов {{ run.metrics.wt|default:0 }}">
-          {{ run.label }}<small>{{ run.metrics.wt|default:0 }} сл</small></a>
-      {% elif run.status == 'error' %}
-        <span class="asr err" title="{{ run.error }}">{{ run.label }} · ошибка</span>
-      {% else %}
-        <span class="asr" title="{{ run.stage }}">{{ run.label }} · {{ run.get_status_display }}…</span>
-      {% endif %}
-    {% endif %}{% endfor %}
-    {% for run in runs %}{% if run.is_aligner %}
-      <span class="lbl lbl-align">· выравнивание:</span>
-      {% if run.status == 'ready' %}
-        <a class="asr {% if run.recognizer == active_key %}on{% endif %}" href="?asr={{ run.recognizer }}&debug=1"
-           title="точные границы аятов (выровнен известный текст); слова покрывают {% if run.metrics.coverage %}{% widthratio run.metrics.coverage 1 100 %}%{% else %}—{% endif %} времени ({{ run.metrics.speech_sec }}с речь · {{ run.metrics.silence_sec }}с паузы)">
-          {{ run.label }}<small>{{ run.metrics.wt|default:0 }} сл</small></a>
-      {% elif run.status == 'error' %}
-        <span class="asr err" title="{{ run.error }}">{{ run.label }} · ошибка</span>
-      {% else %}
-        <span class="asr" title="{{ run.stage }}">{{ run.label }} · {{ run.get_status_display }}…</span>
-      {% endif %}
-    {% endif %}{% endfor %}
-  </div>
-  {% endif %}
+  <!-- окно видео скрыто, пока не узнаем из data.json, что источник — YouTube -->
+  <div id="video" style="display:none"><div id="ytwrap"><div id="yt"></div></div></div>
+  <audio id="audio" controls preload="metadata"></audio>
+  <!-- отладочный тумблер распознавание/выравнивание строится в JS из data.runs (только ?debug=1) -->
+  <div class="asrbar" id="asrbar" style="display:none"></div>
 </header>
 <div id="text"><div id="loading">загрузка…</div></div>
 <div id="badge" class="idle"><span class="ar" id="badgeSurah">—</span><span class="a" id="badgeAyah"></span></div>
 <div id="fontpanel"><div class="fhead">Арабский шрифт</div></div>
 
 <script>
-const DATA_URL = "{% url 'data_json' rec.id %}{% if active_key %}?asr={{ active_key }}{% endif %}";
-const YOUTUBE_ID = "{{ youtube_id }}";
+// СТАТИЧНЫЙ плеер (П11): id записи и опции берём из URL (?rec=&asr=&debug=1), данные — фетчим
+// с бэка одним запросом data.json (текст Корана + метки инлайн — самодостаточно, работает офлайн
+// после первой загрузки: ключевой мотив автономности в машине). Бэк HTML не отдаёт.
+const QS = new URLSearchParams(location.search);
+const REC_ID = QS.get('rec');
+const ASR = QS.get('asr');
+const DEBUG = QS.get('debug') === '1';
+// база API: тот же origin, откуда открыт плеер, ЛИБО ?api=<url> (для статики на GitHub Pages,
+// которая ходит на отдельный бэк). Без слэша на конце.
+const API = (QS.get('api') || '').replace(/\/$/, '');
+const DATA_URL = REC_ID ? (API + '/r/' + REC_ID + '/data.json' + (ASR ? '?asr='+encodeURIComponent(ASR) : '')) : null;
+let YOUTUBE_ID = '';   // узнаём из data.json (было server-side)
 const audio = document.getElementById('audio');
 const textEl = document.getElementById('text');
 const badge = document.getElementById('badge');
@@ -291,15 +272,26 @@ function seek(t){
   else { audio.currentTime = t; audio.play(); }
 }
 
-// --- YouTube IFrame API: грузим скрипт, ждём готовности ---
-if(YOUTUBE_ID){
-  useVideo = true;
-  const tag = document.createElement('script');
-  tag.src = "https://www.youtube.com/iframe_api";
-  tag.onerror = fallbackToAudio;                 // API не загрузился (сеть/блокировка)
-  document.head.appendChild(tag);
-  // страховка: видео не инициализировалось за 6с (эмбед запрещён / нет сети) → откат на аудио
-  ytFallbackTimer = setTimeout(fallbackToAudio, 6000);
+// --- выбор источника времени по data.json (после fetch): YouTube-эмбед либо <audio> ---
+// (в статичном плеере youtube_id известен только из данных, поэтому грузим YT API здесь).
+function setupSource(){
+  YOUTUBE_ID = DATA.youtube_id || '';
+  if(YOUTUBE_ID){
+    useVideo = true;
+    document.getElementById('video').style.display = '';
+    audio.style.display = 'none';
+    const tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    tag.onerror = fallbackToAudio;               // API не загрузился (сеть/блокировка)
+    document.head.appendChild(tag);
+    // страховка: видео не инициализировалось за 6с (эмбед запрещён / нет сети) → откат на аудио
+    ytFallbackTimer = setTimeout(fallbackToAudio, 6000);
+  } else {
+    useVideo = false;
+    audio.style.display = '';
+    audio.src = API + DATA.audio;
+    startTick();
+  }
 }
 window.onYouTubeIframeAPIReady = function(){
   if(!YOUTUBE_ID || !useVideo) return;
@@ -320,17 +312,19 @@ function fallbackToAudio(){
   useVideo = false;
   const v = document.getElementById('video'); if(v) v.style.display = 'none';
   audio.style.display = '';
-  if(DATA && DATA.audio) audio.src = DATA.audio;
+  if(DATA && DATA.audio) audio.src = API + DATA.audio;
   startTick();
 }
 
 init();
 async function init(){
+  if(!DATA_URL){ fail('не задана запись (?rec=…)'); return; }
   let d;
-  try { d = await (await fetch(DATA_URL)).json(); }
+  try { const r = await fetch(DATA_URL); if(!r.ok) throw 0; d = await r.json(); }
   catch(e){ fail('не удалось загрузить данные'); return; }
   DATA = d;
 
+  document.title = (d.title || 'запись') + ' · synchronized';
   document.getElementById('ttl').textContent = d.title || 'запись';
   document.getElementById('sub').textContent = (d.reciter ? d.reciter+' · ' : '') + fmt(d.duration||0);
   TL = d.timeline || [];
@@ -340,15 +334,45 @@ async function init(){
   firstT = new Map();
   for(const e of WT){ const k=e.surah+':'+e.ayah+':'+e.wi; if(!firstT.has(k)) firstT.set(k, e.t); }
 
-  if(!useVideo){ audio.src = d.audio; }   // видео-режим не тянет отдельное аудио
-
   renderText();
   initEdition();
   initWordSeek();
+  if(DEBUG) buildAsrbar(d);
 
   window.addEventListener('wheel', pauseScroll, {passive:true});
   window.addEventListener('touchmove', pauseScroll, {passive:true});
-  if(!useVideo) startTick();   // видео-режим стартует тик по onReady плеера
+  setupSource();   // решает видео/аудио и запускает тик (видео — по onReady плеера)
+}
+
+// отладочный тумблер прогонов (?debug=1): распознавание (ASR) и выравнивание (forced) — раздельно.
+// Строим из data.runs; клик переоткрывает плеер с ?asr=<key>. Конечному читателю не нужен.
+function buildAsrbar(d){
+  const runs = d.runs || [];
+  if(runs.length < 2) return;
+  const bar = document.getElementById('asrbar');
+  const pct = m => (m && m.coverage) ? Math.round(m.coverage*100)+'%' : '—';
+  const link = (run) => {
+    const q = new URLSearchParams(location.search); q.set('asr', run.recognizer); q.set('debug','1');
+    const on = run.recognizer === d.active_key ? ' on' : '';
+    if(run.status === 'ready'){
+      const a=document.createElement('a'); a.className='asr'+on; a.href='?'+q.toString();
+      a.title = (run.is_aligner ? 'точные границы аятов; ' : '') + 'слова покрывают '+pct(run.metrics)+
+        ' времени ('+(run.metrics.speech_sec||0)+'с речь · '+(run.metrics.silence_sec||0)+'с паузы)';
+      a.innerHTML = run.label + '<small>'+(run.metrics.wt||0)+' сл</small>';
+      return a;
+    }
+    const s=document.createElement('span'); s.className='asr'+(run.status==='error'?' err':'');
+    s.title = run.status==='error' ? (run.error||'') : (run.stage||'');
+    s.textContent = run.label + (run.status==='error' ? ' · ошибка' : ' · '+run.status+'…');
+    return s;
+  };
+  const lbl = (t,cls) => { const s=document.createElement('span'); s.className='lbl'+(cls||''); s.textContent=t; return s; };
+  bar.appendChild(lbl('распознавание:'));
+  runs.filter(r=>!r.is_aligner).forEach(r=>bar.appendChild(link(r)));
+  const aligners = runs.filter(r=>r.is_aligner);
+  if(aligners.length){ bar.appendChild(lbl('· выравнивание:',' lbl-align'));
+    aligners.forEach(r=>bar.appendChild(link(r))); }
+  bar.style.display = '';
 }
 
 // --- редакция текста (Tanzil / Diyanet), П9 ---
