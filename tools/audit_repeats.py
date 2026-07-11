@@ -46,6 +46,9 @@ def audit_one(rec_id: str, path: Path) -> int:
     sm = json.loads(path.read_text())
     wt = sorted(sm.get("word_timeline", []), key=lambda w: w["t"])
     meta = sm.get("meta", {})
+    # диагностика по каждому возврату (sim/decode/gap) — есть только у прогонов после 11.07;
+    # в порядке срабатывания = порядок событий ниже (оба монотонны по времени)
+    details = meta.get("repeats_detail", [])
     reps = [i for i, w in enumerate(wt) if w.get("rep")]
     hdr = (f"=== rec{rec_id} === repeats_inserted(meta)={meta.get('repeats_inserted', '?')} "
            f"respaced={meta.get('stuffed_respaced', '?')} точек_wt={len(wt)}")
@@ -63,8 +66,12 @@ def audit_one(rec_id: str, path: Path) -> int:
             events.append(cur); cur = [b]
     events.append(cur)
 
+    # детали и события генерятся в одном порядке (по времени) → сопоставляем по индексу,
+    # но только если их поровну (иначе безопаснее не показывать — не переврать привязку)
+    det_by_ev = details if len(details) == len(events) else [None] * len(events)
+
     warns = 0
-    for ev in events:
+    for ev, det in zip(events, det_by_ev):
         first = wt[ev[0]]
         # слово-остановка = последняя НЕ-rep точка перед событием
         stop = next((wt[j] for j in range(ev[0] - 1, -1, -1) if not wt[j].get("rep")), None)
@@ -77,6 +84,9 @@ def audit_one(rec_id: str, path: Path) -> int:
         print(f"      назад: {traj}")
         if nxt:
             print(f"      вперёд: {ref(nxt)} @{mmss(nxt['t'])}")
+        if det:
+            print(f"      детект: sim={det.get('sim')} gap={det.get('gap')}с "
+                  f"match={det.get('back')}  decode={det.get('decode')!r}")
 
         # эвристика «дикости»: насколько далеко назад от слова-остановки
         if stop:

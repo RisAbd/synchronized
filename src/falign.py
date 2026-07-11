@@ -302,13 +302,15 @@ def _detect_repeats(bounds, ref, wav, emissions, stride_ms):
     """Найти возвраты чтеца → список word_timeline-точек для вклейки (их wi идёт «назад»).
 
     bounds[i]=(t0,t1) — границы эталонного слова ref[i]=(surah,ayah,wi,arabic), n монотонных слов.
-    Возвращает [] при любой проблеме (fail-safe) или если повторов не найдено."""
+    Возвращает (inserts, details): inserts — точки word_timeline (wi «назад»); details — по одному
+    диагно-словарю на КАЖДЫЙ сработавший возврат (onset/gap/decode/sim/from/back) для аудита без звука
+    и без повторного прогона GPU (кладётся в meta.repeats_detail). При любой проблеме → ([], [])."""
     try:
         import numpy as np
         import ctc_forced_aligner as cfa
         n = len(bounds)
         if n < 2 or emissions is None:
-            return []
+            return [], []
         id2ch = {v: k for k, v in cfa.VOCAB_DICT.items()}
         skel = [_skeleton(_uroman_word(ref[i][3])) for i in range(n)]
 
@@ -351,7 +353,7 @@ def _detect_repeats(bounds, ref, wav, emissions, stride_ms):
                 return t0
             return best_end * frame_sec
 
-        inserts = []
+        inserts, details = [], []
         for i in range(n - 1):
             g0, g1 = bounds[i][1], bounds[i + 1][0]
             if g1 - g0 < _REPEAT_MIN_GAP:
@@ -395,7 +397,14 @@ def _detect_repeats(bounds, ref, wav, emissions, stride_ms):
                 fwd += skel[k]
             if fwd and _sim(dec, fwd) >= best[0] - _REPEAT_FWD_MARGIN:
                 continue
-            _, ra, rb = best
+            sim, ra, rb = best
+            # диагностика возврата — для tools/audit_repeats.py (объективно, без звука/GPU-прогона)
+            details.append({
+                "onset": round(onset, 2), "gap": round(g1 - onset, 2),
+                "decode": dec, "sim": round(sim, 3),
+                "from": f"{ref[i][0]}:{ref[i][1]}:{ref[i][2]}",
+                "back": f"{ref[ra][0]}:{ref[ra][1]}:{ref[ra][2]}"
+                        f"..{ref[rb][0]}:{ref[rb][1]}:{ref[rb][2]}"})
             # раздать время ПОВТОРА (от onset, не от g0) словам [ra..rb] пропорц. длине их скелета
             lens = [max(1, len(skel[k])) for k in range(ra, rb + 1)]
             total = sum(lens)
@@ -407,9 +416,9 @@ def _detect_repeats(bounds, ref, wav, emissions, stride_ms):
                 su, ay, wi, _ = ref[k]
                 inserts.append({"t": round(wt0, 3), "t_end": round(acc, 3),
                                 "surah": su, "ayah": ay, "wi": wi, "rep": True})
-        return inserts
+        return inserts, details
     except Exception:
-        return []
+        return [], []
 
 
 def available() -> bool:
@@ -527,9 +536,9 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int | None
 
     # детект возвратов чтеца (П8): вклеить «назадние» точки в дыры-повторы (опт-аут SYNC_FALIGN_REPEATS=0).
     # Кормим СЫРЫМИ границами (до растяжки скомканных) — стянутые дыры не должны влиять на П8.
-    repeats = []
+    repeats, repeats_detail = [], []
     if os.environ.get("SYNC_FALIGN_REPEATS", "1") != "0":
-        repeats = _detect_repeats(raw_bounds, ref, wav, emissions, stride)
+        repeats, repeats_detail = _detect_repeats(raw_bounds, ref, wav, emissions, stride)
         if repeats:
             word_timeline.extend(repeats)
             word_timeline.sort(key=lambda w: (w["t"], w["surah"], w["ayah"], w["wi"]))
@@ -543,6 +552,7 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int | None
         "stuffed_respaced": respaced,
         "snapped_to_silence": snapped,
         "repeats_inserted": len(repeats),
+        "repeats_detail": repeats_detail,
         "wt": len(word_timeline),
         "ct": len(char_timeline),
         "providers": session.get_providers(),
