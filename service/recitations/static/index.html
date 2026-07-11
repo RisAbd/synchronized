@@ -124,6 +124,12 @@ const qEl = document.getElementById('q');
 const DONE = s => s === 'ready' || s === 'error';
 const trunc = (s, n) => (s && s.length > n) ? s.slice(0, n) + '…' : (s || '');
 
+// Арабская нормализация поиска — порт бэкового _ar_norm (models.py): убрать харакат
+// (combining marks), унифицировать алифы/я/та-марбуту, нижний регистр. Чтобы «الأنعام»
+// находило хранимое «ٱلْأَنْعَام». \p{M} = все Unicode-combining после NFKD.
+const arNorm = s => (s || '').normalize('NFKD').replace(/\p{M}/gu, '')
+  .replace(/[آأإٱٲٳ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه').toLowerCase();
+
 // «форма» состояния записи — по ней решаем, нужна ли перерисовка карточки (без мигания)
 const shapeOf = r => r.status + '|' + (r.runs || []).map(x => x.recognizer + ':' + x.status).join(',');
 const cards = new Map();   // id -> {shape, wrap}
@@ -157,7 +163,7 @@ function buildCard(r, oldImg) {
   const wrap = document.createElement('div');
   wrap.className = 'card-wrap';
   wrap.dataset.id = r.id;
-  wrap.dataset.search = [r.title, r.reciter, r.source_url, r.surahs_label].join(' ').toLowerCase();
+  wrap.dataset.search = arNorm([r.title, r.reciter, r.source_url, r.surahs_label].join(' '));
 
   const thumb = () => {
     if (!r.thumbnail) return null;
@@ -214,7 +220,7 @@ async function removeRec(id) {
 }
 
 function applySearch() {
-  const q = qEl.value.trim().toLowerCase();
+  const q = arNorm(qEl.value.trim());
   let shown = 0;
   for (const { wrap } of cards.values()) {
     const hit = !q || wrap.dataset.search.includes(q);
