@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ручной элайнер · synchronized</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Scheherazade+New:wght@400;700&family=Amiri:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root { color-scheme: light dark;
+    --bg:#faf7f0; --fg:#201d16; --muted:#9a917f; --dim:#b9b1a0; --line:rgba(120,110,90,.18);
+    --accent:#b8891a; --hot:#2e8b45; --done:#3f7fb0; --card:#fffdf7; --chip:#f0ead9;
+    --arab-font:"Scheherazade New","Amiri","Times New Roman",serif; --ayah-size:2.1rem; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#100f0b; --fg:#efe8d6; --muted:#7c745f; --dim:#3f3a2e; --line:rgba(200,190,160,.14);
+      --accent:#e4bf4a; --hot:#5ed07f; --done:#5aa0d0; --card:#191710; --chip:#211e15; } }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; background:var(--bg); color:var(--fg); font-family:var(--arab-font); }
+  body { overscroll-behavior-y:contain; overflow-x:hidden; }
+  header { position:sticky; top:0; z-index:20; background:var(--card);
+    border-bottom:1px solid var(--line); box-shadow:0 3px 14px rgba(0,0,0,.14); }
+  .top { display:flex; align-items:center; gap:10px; padding:6px 12px; direction:ltr; }
+  .back { text-decoration:none; color:var(--muted); font:600 24px system-ui; padding:0 6px; border-radius:8px; }
+  .back:active { background:var(--chip); }
+  .title { flex:1; min-width:0; }
+  .title b { display:block; font:600 14px system-ui; color:var(--fg);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .title span { font:11px system-ui; color:var(--muted); }
+  .tag { flex:none; background:var(--accent); color:#fff; font:600 11px system-ui;
+    padding:4px 9px; border-radius:8px; }
+  audio { display:block; width:100%; height:36px; padding:0 8px 6px; }
+  /* панель клавиш + статус записи */
+  .bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; direction:ltr;
+    padding:6px 12px 8px; font:12px system-ui; color:var(--muted); }
+  .bar kbd { font:600 11px system-ui; background:var(--chip); color:var(--fg);
+    border:1px solid var(--line); border-radius:5px; padding:1px 6px; }
+  .bar .rec { font-weight:700; }
+  .bar .rec.on { color:var(--hot); }        /* пишем */
+  .bar .rec.frozen { color:var(--accent); } /* заморозка после перемотки */
+  .bar .rec.off { color:var(--muted); }     /* пауза / мышь вне текста */
+  .bar .btn { cursor:pointer; background:var(--chip); border:1px solid var(--line);
+    color:var(--fg); font:600 11px system-ui; padding:4px 10px; border-radius:8px; }
+  .bar .btn:active { opacity:.7; }
+  .bar .btn.warn { color:#c0492f; }
+  /* текст аятов — сплошной поток, слова кликом НЕ перематывают (мышь = ввод) */
+  #text { position:relative; padding:4vh 20px 60vh; width:100%; max-width:860px; margin:0 auto;
+    font-family:var(--arab-font); font-size:var(--ayah-size); line-height:calc(var(--ayah-size) * 2.3);
+    text-align:justify; text-align-last:center; -webkit-user-select:none; user-select:none; }
+  .stitle { display:block; text-align:center; color:var(--accent);
+    font:600 clamp(1rem,4vw,1.3rem) system-ui; margin:24px 0 12px; opacity:.7; }
+  .ayah { color:var(--fg); }
+  .ayah .num { font:600 .6em system-ui; color:var(--muted); margin:0 .4em; opacity:.8; white-space:nowrap; }
+  .w { border-radius:8px; padding:.02em .14em; transition:background .12s, color .12s; }
+  .w.done { background:color-mix(in srgb, var(--done) 26%, transparent); }  /* уже записано */
+  .w.rec  { color:#fff; background:var(--hot); box-shadow:0 1px 10px rgba(46,139,69,.42); } /* пишется сейчас */
+  #loading,#err { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    text-align:center; color:var(--muted); font:15px system-ui; padding:20px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <a class="back" href="/" title="назад">‹</a>
+    <div class="title"><b id="ttl">—</b><span id="sub"></span></div>
+    <span class="tag">ручной элайнер</span>
+  </div>
+  <audio id="audio" controls preload="metadata"></audio>
+  <div class="bar">
+    <span><kbd>Space</kbd> пауза</span>
+    <span><kbd>←</kbd><kbd>→</kbd> ±5с · <kbd>Shift</kbd>+ ±10с</span>
+    <span>мышь по словам = запись</span>
+    <span class="rec off" id="recState">⏸ пауза</span>
+    <span id="stats">интервалов: 0 · покрыто слов: 0</span>
+    <button class="btn" id="btnCopy">Копировать JSON</button>
+    <button class="btn" id="btnDl">Скачать JSON</button>
+    <button class="btn warn" id="btnClear">Очистить</button>
+  </div>
+</header>
+<div id="text"><div id="loading">загрузка…</div></div>
+
+<script>
+// РУЧНОЙ ЭЛАЙНЕР (П12) — дебаг-тул/фича: водишь мышкой по словам во время воспроизведения →
+// пишутся интервалы (слово ↔ [t_start, t_end]) против аудио-времени. Клавиатура рулит аудио
+// (мышь занята вводом). Перемотал назад и переиграл кусок → интервалы этого участка
+// перезаписываются (overwrite-merge). Экспорт — в word_timeline JSON (совместим с плеером).
+// v1: работает поверх записи, где текст/диапазон уже определены (data.json есть). Выбор
+// диапазона аятов с нуля (без ASR) — v2.
+const QS = new URLSearchParams(location.search);
+const REC_ID = QS.get('rec');
+const ASR = QS.get('asr');
+const API = (QS.get('api') || '').replace(/\/$/, '');
+const DATA_URL = REC_ID ? (API + '/r/' + REC_ID + '/data.json' + (ASR ? '?asr='+encodeURIComponent(ASR) : '')) : null;
+
+const audio = document.getElementById('audio');
+const textEl = document.getElementById('text');
+const recState = document.getElementById('recState');
+const statsEl = document.getElementById('stats');
+
+let DATA = null;
+let wordEl = {};                 // "surah:ayah:wi" -> span (канон Tanzil)
+let events = [];                 // [{k, a, b}] отсортировано по a — записанные интервалы
+let pending = null;              // открытый интервал {k, a}
+let hoveredKey = null;           // ключ слова под курсором (обновляют mouseover/out)
+let freezeUntil = 0;             // performance.now(): до этого момента мышь игнорится (после перемотки)
+const FREEZE_MS = 1000;
+const MIN_LEN = 0.05;            // короче — дребезг, не пишем
+
+const fmt = t => { t=Math.max(0,t|0); return (t/60|0)+':'+String(t%60).padStart(2,'0'); };
+const toArabic = n => String(n).replace(/[0-9]/g, d => '٠١٢٣٤٥٦٧٨٩'[d]);
+
+init();
+async function init(){
+  if(!DATA_URL){ fail('не задана запись (?rec=…)'); return; }
+  let d;
+  try { const r = await fetch(DATA_URL); if(!r.ok) throw 0; d = await r.json(); }
+  catch(e){ fail('не удалось загрузить данные (нужен готовый прогон у записи)'); return; }
+  DATA = d;
+  document.title = (d.title || 'запись') + ' · ручной элайнер';
+  document.getElementById('ttl').textContent = d.title || 'запись';
+  document.getElementById('sub').textContent = (d.reciter ? d.reciter+' · ' : '') + fmt(d.duration||0);
+  audio.src = API + DATA.audio;
+  renderText();
+  wireKeyboard();
+  wireMouse();
+  wireButtons();
+  requestAnimationFrame(tick);
+}
+
+// рендер слов (только Tanzil-редакция — по ней канон wi). Клика по слову НЕ вешаем: мышь = ввод.
+function renderText(){
+  textEl.innerHTML=''; wordEl={};
+  for(const sec of DATA.sections){
+    const h=document.createElement('div'); h.className='stitle';
+    h.textContent='سورة '+sec.title; textEl.appendChild(h);
+    for(const v of sec.ayat){
+      const el=document.createElement('span'); el.className='ayah';
+      const words = v.words || v.text.split(' ');
+      words.forEach((w,wi)=>{
+        const s=document.createElement('span'); s.className='w'; s.textContent=w;
+        const k=sec.surah+':'+v.ayah+':'+wi; s.dataset.k=k; wordEl[k]=s;
+        el.appendChild(s); el.appendChild(document.createTextNode(' '));
+      });
+      const num=document.createElement('span'); num.className='num';
+      num.textContent='﴿'+toArabic(v.ayah)+'﴾'; el.appendChild(num);
+      textEl.appendChild(el); textEl.appendChild(document.createTextNode(' '));
+    }
+  }
+  paintDone();
+}
+
+// --- клавиатура: аудио под управлением клавиш (мышь занята вводом слов) ---
+function wireKeyboard(){
+  document.addEventListener('keydown', e => {
+    if(e.code === 'Space'){ e.preventDefault(); audio.paused ? audio.play() : audio.pause(); return; }
+    let dt = 0;
+    if(e.code === 'ArrowLeft')  dt = e.shiftKey ? -10 : -5;
+    if(e.code === 'ArrowRight') dt = e.shiftKey ?  10 :  5;
+    if(dt){ e.preventDefault(); doSeek((audio.currentTime||0) + dt); }
+  });
+  // перемотка нативным контролом аудио — тоже заморозка (пользователь мог тащить ползунок)
+  audio.addEventListener('seeking', () => { closePending(audio.currentTime||0); freeze(); });
+}
+function doSeek(t){
+  t = Math.max(0, Math.min(audio.duration||1e9, t));
+  closePending(audio.currentTime||0);   // закрыть текущий интервал ДО перемотки
+  audio.currentTime = t;
+  freeze();
+}
+function freeze(){ freezeUntil = performance.now() + FREEZE_MS; }
+
+// --- мышь: какое слово под курсором (запись привязывается к аудио-времени в tick) ---
+function wireMouse(){
+  textEl.addEventListener('mouseover', e => {
+    const w = e.target.closest('.w'); hoveredKey = (w && w.dataset.k) || null;
+  });
+  textEl.addEventListener('mouseleave', () => { hoveredKey = null; });
+}
+
+// главный цикл: сопоставляет слово-под-курсором аудио-времени, ведёт открытый интервал
+function tick(){
+  const t = audio.currentTime || 0;
+  const frozen = performance.now() < freezeUntil;
+  const active = !audio.paused && !frozen && hoveredKey;
+  if(active){
+    if(!pending){ openPending(hoveredKey, t); }
+    else if(pending.k !== hoveredKey){ closePending(t); openPending(hoveredKey, t); }
+  } else {
+    // пауза / заморозка / курсор вне слова → закрыть открытый интервал
+    if(pending) closePending(t);
+  }
+  // индикатор состояния
+  if(frozen){ setRec('frozen', '❄ заморозка'); }
+  else if(active){ setRec('on', '● запись'); }
+  else if(audio.paused){ setRec('off', '⏸ пауза'); }
+  else { setRec('off', '○ веди мышью по слову'); }
+  requestAnimationFrame(tick);
+}
+
+let lastRec = '';
+function setRec(cls, txt){
+  if(recState.dataset.k === cls+txt) return;
+  recState.dataset.k = cls+txt;
+  recState.className = 'rec ' + cls; recState.textContent = txt;
+}
+
+function openPending(k, a){
+  pending = {k, a};
+  const el = wordEl[k]; if(el) el.classList.add('rec');
+}
+function closePending(b){
+  if(!pending) return;
+  const el = wordEl[pending.k]; if(el) el.classList.remove('rec');
+  if(b - pending.a >= MIN_LEN) commit({k: pending.k, a: pending.a, b});
+  pending = null;
+}
+
+// overwrite-merge: новый интервал [a,b] перекрывает существующие в этом окне → перезапись
+// участка (переиграл кусок → только он переписан, остальное цело). Затем вставка с сортировкой.
+function commit(iv){
+  const out = [];
+  for(const e of events){
+    if(e.b <= iv.a || e.a >= iv.b){ out.push(e); continue; }   // не пересекается
+    if(e.a < iv.a && e.b > iv.b){ // старый охватывает новый → расколоть на две части
+      out.push({k:e.k, a:e.a, b:iv.a}); out.push({k:e.k, a:iv.b, b:e.b}); continue;
+    }
+    if(e.a < iv.a){ out.push({k:e.k, a:e.a, b:iv.a}); continue; }  // обрезать хвост слева
+    if(e.b > iv.b){ out.push({k:e.k, a:iv.b, b:e.b}); continue; }  // обрезать начало справа
+    // иначе старый целиком внутри нового → выкинуть
+  }
+  out.push(iv);
+  out.sort((x,y)=>x.a - y.a);
+  events = out.filter(e => e.b - e.a >= MIN_LEN);
+  paintDone(); updateStats();
+}
+
+// подсветка слов, у которых есть записанный интервал
+function paintDone(){
+  const has = new Set(events.map(e=>e.k));
+  for(const k in wordEl) wordEl[k].classList.toggle('done', has.has(k));
+}
+function updateStats(){
+  const covered = new Set(events.map(e=>e.k)).size;
+  statsEl.textContent = 'интервалов: ' + events.length + ' · покрыто слов: ' + covered;
+}
+
+// --- экспорт: интервалы → word_timeline (совместим с плеером/build_data) ---
+function buildTimeline(){
+  const wt = events.slice().sort((x,y)=>x.a-y.a).map(e=>{
+    const [surah,ayah,wi] = e.k.split(':').map(Number);
+    return {surah, ayah, wi, t: +e.a.toFixed(3), t_end: +e.b.toFixed(3)};
+  });
+  return {source:'manual', rec_id: REC_ID ? +REC_ID : null,
+          word_timeline: wt, count: wt.length};
+}
+function wireButtons(){
+  document.getElementById('btnDl').onclick = () => {
+    const blob = new Blob([JSON.stringify(buildTimeline(), null, 2)], {type:'application/json'});
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = 'manual-rec'+(REC_ID||'')+'.json'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+  };
+  document.getElementById('btnCopy').onclick = async () => {
+    const txt = JSON.stringify(buildTimeline());
+    try { await navigator.clipboard.writeText(txt); flash('btnCopy','скопировано'); }
+    catch(e){ flash('btnCopy','не вышло'); }
+  };
+  document.getElementById('btnClear').onclick = () => {
+    if(!events.length || confirm('Стереть все записанные интервалы?')){
+      events = []; pending = null; paintDone(); updateStats();
+    }
+  };
+}
+function flash(id, msg){
+  const b=document.getElementById(id); const old=b.textContent; b.textContent=msg;
+  setTimeout(()=>{ b.textContent=old; }, 1000);
+}
+function fail(m){ textEl.innerHTML='<div id="err">'+m+'</div>'; }
+</script>
+</body>
+</html>

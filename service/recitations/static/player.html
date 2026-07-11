@@ -372,6 +372,11 @@ function buildAsrbar(d){
   const aligners = runs.filter(r=>r.is_aligner);
   if(aligners.length){ bar.appendChild(lbl('· выравнивание:',' lbl-align'));
     aligners.forEach(r=>bar.appendChild(link(r))); }
+  // ссылка на ручной элайнер (П12) — дебаг-тул: правка привязки мышью по словам
+  const man=document.createElement('a'); man.className='asr'; man.textContent='✍ ручной';
+  man.title='ручной элайнер: правка привязки слов мышью';
+  man.href=(API||'')+'/r/'+REC_ID+'/manual'+(ASR?'?asr='+encodeURIComponent(ASR):'');
+  bar.appendChild(man);
   bar.style.display = '';
 }
 

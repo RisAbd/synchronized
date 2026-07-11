@@ -115,6 +115,15 @@ def player(request, pk):
     return redirect(url)
 
 
+def manual(request, pk):
+    """Ручной элайнер (П12) — тоже статичный файл. Красивый URL /r/<id>/manual ведём
+    редиректом на статику (пробрасываем ?asr/?api). Страница фетчит /r/<id>/data.json."""
+    get_object_or_404(Recitation, pk=pk)
+    qs = request.GET.urlencode()
+    url = f"{settings.STATIC_URL}manual.html?rec={pk}" + (f"&{qs}" if qs else "")
+    return redirect(url)
+
+
 def _run_dict(r):
     m = r.metrics or {}
     cov = m.get("coverage")
