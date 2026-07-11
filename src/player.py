@@ -55,7 +55,12 @@ def build_data(sync_map: dict, quran: Quran, audio_src: str) -> dict:
                 item["words_diyanet"] = dwords
                 item["dmap"] = map_editions(words, dwords)
             ayat.append(item)
-        sections.append({"surah": surah, "title": s.title, "ayat": ayat})
+        # ﷽ перед сурой в режиме Diyanet: его текст басмалу НЕ содержит (в отличие от Tanzil),
+        # поэтому дорисовываем заголовком по флагу — но только если показан аят 1 (lo==1),
+        # т.к. басмала стоит перед первым аятом. Tanzil-режим ﷽ не рисует (уже в тексте).
+        sections.append({"surah": surah, "title": s.title, "ayat": ayat,
+                         "bismillah_diyanet": bool(getattr(s, "bismillah_pre_diyanet", False))
+                                              and lo == 1})
 
     # оглавление: точки смены суры (для навигации-«chapters»)
     chapters = []

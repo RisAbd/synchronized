@@ -84,6 +84,9 @@
     text-align:justify; text-align-last:center; }
   .stitle { display:block; text-align:center; color:var(--accent);
     font:600 clamp(1rem,4vw,1.35rem) system-ui; letter-spacing:.02em; margin:26px 0 12px; opacity:.7; }
+  /* ﷽ перед сурой (только режим Diyanet — в его тексте басмалы нет; см. renderText) */
+  .bismillah { display:block; text-align:center; color:var(--fg); opacity:.85;
+    font-family:var(--arab-font); font-size:calc(var(--ayah-size) * .78); margin:0 0 18px; }
   /* аят — инлайновый фрагмент общего потока (не блок), чтобы аяты сливались в сплошной текст */
   .ayah { color:var(--dim); transition:color .35s; }
   .ayah .num { font:600 .62em system-ui; color:var(--muted); margin:0 .4em; opacity:.8;
@@ -338,6 +341,13 @@ function renderText(){
     surahTitle[sec.surah]=sec.title;
     const h=document.createElement('div'); h.className='stitle';
     h.textContent='سورة '+sec.title; textEl.appendChild(h);
+    // ﷽ перед сурой ТОЛЬКО в режиме Diyanet: его текст басмалу не содержит (в Tanzil она вшита
+    // в текст аята 1 → там заголовок не нужен). Флаг bismillah_diyanet ставит build_data по
+    // bismillah_pre_diyanet, и только если показан аят 1 (см. player.build_data).
+    if(EDITION==='diyanet' && sec.bismillah_diyanet){
+      const b=document.createElement('div'); b.className='bismillah';
+      b.textContent='بِسْمِ اللّٰهِ الرَّحْمٰنِ الرَّح۪يمِ'; textEl.appendChild(b);
+    }
     for(const v of sec.ayat){
       const el=document.createElement('span'); el.className='ayah';   // инлайн → сплошной поток
       const diy = EDITION==='diyanet' && v.words_diyanet;

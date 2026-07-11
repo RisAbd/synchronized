@@ -147,7 +147,11 @@ class Surah:
     title: str
     verses_count: int
     revelation_place: str
-    bismillah_pre: bool
+    # «нужна ли ОТДЕЛЬНАЯ (дорисованная) басмала ﷽ перед сурой» — per-edition (см.
+    # tools/set_basmala_flags.py). Текст редакций не трогаем; басмала у Tanzil ВШИТА в текст
+    # (→ доп. не нужна нигде, bismillah_pre=False везде), у Diyanet — НЕТ (→ True у 112, кроме [1,9]).
+    bismillah_pre: bool              # для `text` (Tanzil): везде False
+    bismillah_pre_diyanet: bool = False  # для `text_diyanet` (Diyanet): True у 112, False у [1,9]
     verses: list[Verse] = field(default_factory=list)
 
 
@@ -198,9 +202,13 @@ class Quran:
             )
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
+            # bismillah_pre_diyanet (П9) — опциональная колонка: в старых БД её нет
+            has_bpd = any(c[1] == "bismillah_pre_diyanet"
+                          for c in conn.execute("PRAGMA table_info(surahs)"))
+            scols = ("id, number, title, verses_count, revelation_place, bismillah_pre"
+                     + (", bismillah_pre_diyanet" if has_bpd else ""))
             srows = conn.execute(
-                "select id, number, title, verses_count, revelation_place, "
-                "bismillah_pre from surahs order by number"
+                f"select {scols} from surahs order by number"
             ).fetchall()
             # редакция Diyanet (П9) — опциональная колонка: в старых БД её нет
             has_diyanet = any(c[1] == "text_diyanet"
@@ -227,6 +235,7 @@ class Quran:
                   verses_count=r["verses_count"],
                   revelation_place=r["revelation_place"],
                   bismillah_pre=bool(r["bismillah_pre"]),
+                  bismillah_pre_diyanet=(bool(r["bismillah_pre_diyanet"]) if has_bpd else False),
                   verses=verses_by_surah_id.get(r["id"], []))
             for r in srows
         ]

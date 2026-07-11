@@ -36,11 +36,21 @@ def test_load_completeness():
     assert len(q.surah(2).verses) == 286
 
 
-def test_bismillah_flag():
+def test_bismillah_flags_per_edition():
+    """Флаги «нужна ли ОТДЕЛЬНАЯ ﷽» — per-edition (текст редакций не трогаем).
+    Tanzil (`text`): басмала вшита в текст → доп. не нужна нигде (везде False).
+    Diyanet (`text_diyanet`): басмалы в тексте нет → True у 112, кроме Фатихи(1) и Тавбы(9)."""
     q = Quran.load()
-    # только Фатиха (1) и Тауба (9) без пре-басмалы
-    no_bismillah = [s.number for s in q.surahs if not s.bismillah_pre]
-    assert sorted(no_bismillah) == [1, 9]
+    # Tanzil: доп. басмала не нужна ни у одной суры
+    assert all(not s.bismillah_pre for s in q.surahs)
+    # Diyanet: доп. басмала нужна везде, кроме [1, 9]
+    no_diy = sorted(s.number for s in q.surahs if not s.bismillah_pre_diyanet)
+    assert no_diy == [1, 9]
+    yes_diy = [s.number for s in q.surahs if s.bismillah_pre_diyanet]
+    assert len(yes_diy) == 112
+    # Тавба (9) — НИКОГДА не True (басмалы у неё нет вовсе)
+    s9 = q.surah(9)
+    assert not s9.bismillah_pre and not s9.bismillah_pre_diyanet
 
 
 def test_token_corpus_and_locate():
