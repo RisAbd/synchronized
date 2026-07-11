@@ -73,6 +73,7 @@
     <span>мышь по словам = запись</span>
     <span class="rec off" id="recState">⏸ пауза</span>
     <span id="stats">интервалов: 0 · покрыто слов: 0</span>
+    <button class="btn" id="btnSeed" title="залить текущую привязку прогона как отправную точку для правки">↻ из прогона</button>
     <button class="btn" id="btnCopy">Копировать JSON</button>
     <button class="btn" id="btnDl">Скачать JSON</button>
     <button class="btn warn" id="btnClear">Очистить</button>
@@ -85,7 +86,9 @@
 // пишутся интервалы (слово ↔ [t_start, t_end]) против аудио-времени. Клавиатура рулит аудио
 // (мышь занята вводом). Перемотал назад и переиграл кусок → интервалы этого участка
 // перезаписываются (overwrite-merge). Экспорт — в word_timeline JSON (совместим с плеером).
-// v1: работает поверх записи, где текст/диапазон уже определены (data.json есть). Выбор
+// v1: работает поверх записи, где текст/диапазон уже определены (data.json есть). При загрузке
+// заливает существующую привязку прогона (word_timeline) как отправную точку → правишь мышью,
+// а не размечаешь с нуля («↻ из прогона» перезаливает, «Очистить» даёт пустой лист). Выбор
 // диапазона аятов с нуля (без ASR) — v2.
 const QS = new URLSearchParams(location.search);
 const REC_ID = QS.get('rec');
@@ -122,10 +125,40 @@ async function init(){
   document.getElementById('sub').textContent = (d.reciter ? d.reciter+' · ' : '') + fmt(d.duration||0);
   audio.src = API + DATA.audio;
   renderText();
+  seedFromData();            // отправная точка = существующая привязка прогона (правим, не с нуля)
   wireKeyboard();
   wireMouse();
   wireButtons();
   requestAnimationFrame(tick);
+}
+
+// Предзагрузка: word_timeline прогона (forced/asr) → готовые интервалы, которые можно ПРАВИТЬ
+// мышью (overwrite-merge). Это корректирующий сценарий v1: инструмент чинит уже выровненную
+// запись, а не заставляет размечать с нуля. t_end у ASR-прогонов часто нет → приближаем зазором
+// до следующего слова (потолок _SPAN_CAP, как на беке), чтобы интервал был осмысленной длины.
+const _SPAN_CAP = 0.6;
+function seedFromData(){
+  const wt = (DATA && DATA.word_timeline) || [];
+  if(!wt.length){ return 0; }
+  const src = wt.slice().sort((x,y)=>x.t - y.t);
+  const seeded = [];
+  for(let i=0; i<src.length; i++){
+    const e = src[i];
+    const k = e.surah+':'+e.ayah+':'+e.wi;
+    if(!(k in wordEl)) continue;                       // слова нет в тексте (иная редакция) → пропуск
+    const a = +e.t || 0;
+    let b = (typeof e.t_end === 'number') ? e.t_end : null;
+    if(b === null){                                    // нет конца → зазор до следующей точки, но не больше _SPAN_CAP
+      const nx = src[i+1];
+      b = nx ? Math.min(nx.t, a + _SPAN_CAP) : a + _SPAN_CAP;
+    }
+    if(b - a >= MIN_LEN) seeded.push({k, a, b});
+  }
+  seeded.sort((x,y)=>x.a - y.a);
+  events = seeded;
+  pending = null;
+  paintDone(); updateStats();
+  return seeded.length;
 }
 
 // рендер слов (только Tanzil-редакция — по ней канон wi). Клика по слову НЕ вешаем: мышь = ввод.
@@ -270,6 +303,11 @@ function wireButtons(){
     if(!events.length || confirm('Стереть все записанные интервалы?')){
       events = []; pending = null; paintDone(); updateStats();
     }
+  };
+  document.getElementById('btnSeed').onclick = () => {
+    if(events.length && !confirm('Заменить текущие интервалы привязкой из прогона?')) return;
+    const n = seedFromData();
+    flash('btnSeed', n ? ('залито '+n) : 'нет привязки');
   };
 }
 function flash(id, msg){
