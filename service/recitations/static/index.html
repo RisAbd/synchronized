@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>synchronized</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { color-scheme: light dark;
+    --bg:#faf7f0; --fg:#201d16; --muted:#8f8674; --line:rgba(120,110,90,.18);
+    --accent:#b8891a; --card:#fffdf7; --chip:#f0ead9;
+    --ok:#3f9142; --warn:#c8891a; --err:#c0492f; --proc:#2f77c0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#100f0b; --fg:#e9e3d3; --muted:#7a7360; --line:rgba(200,190,160,.14);
+      --accent:#e4bf4a; --card:#191710; --chip:#211e15; } }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--fg);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .wrap { max-width:680px; margin:0 auto; padding:40px 20px 80px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; letter-spacing:-.02em; }
+  .dot { color:var(--accent); }
+  .lead { color:var(--muted); margin:0 0 28px; line-height:1.5; }
+  form.add { display:flex; flex-direction:column; gap:10px; background:var(--card);
+    border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:0; }
+  form.add input { background:transparent; border:1px solid var(--line); color:var(--fg);
+    border-radius:10px; padding:11px 13px; font-size:1rem; }
+  form.add input:focus { outline:none; border-color:var(--accent); }
+  .row { display:flex; gap:10px; } .row input { flex:1; min-width:0; }
+  button { background:var(--accent); color:#fff; border:none; border-radius:10px;
+    padding:12px 16px; font-size:1rem; font-weight:600; cursor:pointer; }
+  button:active { transform:translateY(1px); }
+  .card { display:flex; align-items:center; gap:12px; text-decoration:none; color:inherit;
+    background:var(--card); border:1px solid var(--line); border-radius:14px;
+    padding:14px 16px; margin-bottom:12px; }
+  .card .ar { font-family:"Amiri","Scheherazade New",serif; font-size:1.5rem; direction:rtl; flex:none; }
+  .card .thumb { width:54px; height:54px; border-radius:10px; object-fit:cover; flex:none;
+    background:var(--chip); }
+  .card .metsub { color:var(--dim,var(--muted)); font-size:.78rem; margin-top:2px;
+    display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card .body { flex:1; min-width:0; }
+  .card .ct { display:block; font-weight:600; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card .meta { display:block; color:var(--muted); font-size:.86rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .badge { font-size:.76rem; font-weight:700; padding:3px 9px; border-radius:999px; white-space:nowrap; }
+  .b-ready { background:color-mix(in srgb,var(--ok) 20%,transparent); color:var(--ok); }
+  .b-processing,.b-queued { background:color-mix(in srgb,var(--proc) 20%,transparent); color:var(--proc); }
+  .b-error { background:color-mix(in srgb,var(--err) 20%,transparent); color:var(--err); }
+  .del { color:var(--muted); text-decoration:none; font-size:1.2rem; padding:2px 6px;
+    background:none; }
+  fieldset.rec-pick { border:1px solid var(--line); border-radius:10px; margin:0; padding:8px 12px 10px; }
+  fieldset.rec-pick legend { color:var(--muted); font-size:.8rem; padding:0 6px; }
+  label.rz { display:flex; align-items:baseline; gap:8px; padding:4px 0; cursor:pointer; font-size:.92rem; }
+  label.rz small { color:var(--muted); font-size:.78rem; }
+  .runs { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+  .rz-chip { font-size:.72rem; font-weight:600; padding:2px 8px; border-radius:999px;
+    background:var(--chip); color:var(--muted); white-space:nowrap; }
+  .empty { color:var(--muted); text-align:center; padding:34px; }
+  footer { color:var(--muted); font-size:.8rem; text-align:center; margin-top:36px; }
+  .spin { display:inline-block; width:12px; height:12px; margin-right:7px; vertical-align:-1px;
+    border:2px solid var(--line); border-top-color:var(--proc); border-radius:50%;
+    animation:spin .7s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .actions { display:flex; gap:10px; align-items:center; margin-bottom:16px; }
+  .search { flex:1; min-width:0; }
+  .search input { width:100%; background:var(--card); border:1px solid var(--line); color:var(--fg);
+    border-radius:10px; padding:11px 13px; font-size:.95rem; }
+  .search input:focus { outline:none; border-color:var(--accent); }
+  .add-btn { display:inline-flex; align-items:center; gap:8px; white-space:nowrap; flex:none; }
+  .modal { position:fixed; inset:0; z-index:50; display:none; align-items:flex-start;
+    justify-content:center; background:rgba(0,0,0,.45); padding:24px 16px; overflow-y:auto; }
+  .modal.open { display:flex; }
+  .modal .sheet { background:var(--card); border:1px solid var(--line); border-radius:16px;
+    padding:18px; width:100%; max-width:520px; margin-top:4vh; }
+  .modal .mhead { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+  .modal .mhead h2 { font-size:1.15rem; margin:0; }
+  .modal .mclose { background:none; color:var(--muted); font-size:1.5rem; line-height:1;
+    padding:2px 8px; border-radius:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>synchronized<span class="dot">.</span></h1>
+  <p class="lead">Оригинальный текст Корана синхронно со звучащим чтением. Вставь ссылку —
+    сервис обработает и даст плеер с авто-прокруткой.</p>
+
+  <div class="actions">
+    <form class="search" onsubmit="return false">
+      <input id="q" placeholder="Поиск: название, чтец, ссылка, сура…" autocomplete="off">
+    </form>
+    <button type="button" class="add-btn" id="openAdd">＋ Добавить</button>
+  </div>
+
+  <div id="list"><div class="empty">загрузка…</div></div>
+
+  <footer>прототип · обработка идёт в фоне, страница сама обновит статусы</footer>
+</div>
+
+<div class="modal" id="modal">
+  <div class="sheet">
+    <div class="mhead">
+      <h2>Новая запись</h2>
+      <button type="button" class="mclose" id="closeAdd" title="закрыть">✕</button>
+    </div>
+    <form class="add" id="addForm">
+      <input name="source_url" placeholder="Ссылка на YouTube или путь к аудиофайлу" required>
+      <div class="row">
+        <input name="title" placeholder="Название (необязательно)">
+        <input name="reciter" placeholder="Чтец (необязательно)">
+      </div>
+      <fieldset class="rec-pick" id="recPick">
+        <legend>Распознаватели (можно несколько — сравнить точность)</legend>
+      </fieldset>
+      <button type="submit">Добавить</button>
+    </form>
+  </div>
+</div>
+
+<script>
+// СТАТИЧНАЯ библиотека (П11): фетчит /api/recitations и рисует список сама; бэк HTML не отдаёт.
+// ?api=<url> — обращаться к бэку на другом origin (будущая статика на GitHub Pages).
+const QS = new URLSearchParams(location.search);
+const API = (QS.get('api') || '').replace(/\/$/, '');
+const listEl = document.getElementById('list');
+const qEl = document.getElementById('q');
+const DONE = s => s === 'ready' || s === 'error';
+const trunc = (s, n) => (s && s.length > n) ? s.slice(0, n) + '…' : (s || '');
+
+// «форма» состояния записи — по ней решаем, нужна ли перерисовка карточки (без мигания)
+const shapeOf = r => r.status + '|' + (r.runs || []).map(x => x.recognizer + ':' + x.status).join(',');
+const cards = new Map();   // id -> {shape, wrap}
+let recognizersCfg = null;
+
+function playerHref(id) {
+  return 'player.html?rec=' + id + (API ? '&api=' + encodeURIComponent(API) : '');
+}
+
+function runChip(run) {
+  const c = document.createElement('span');
+  c.className = 'rz-chip';
+  if (run.status === 'ready') {
+    c.title = 'слова покрывают ' + (run.coverage_pct != null ? run.coverage_pct + '%' : '—') +
+      ' времени записи (' + (run.speech_sec || 0) + 'с со словами · ' +
+      (run.silence_sec || 0) + 'с паузы/вступление из ' + (run.duration_sec || 0) + 'с)';
+    c.textContent = run.label + ' · ' + (run.wt || 0) + ' сл' +
+      (run.coverage_pct != null ? ' · ' + run.coverage_pct + '% речь' : '');
+  } else if (run.status === 'error') {
+    c.title = run.error || '';
+    c.textContent = run.label + ' · ошибка';
+  } else {
+    const sp = document.createElement('span'); sp.className = 'spin'; c.appendChild(sp);
+    c.appendChild(document.createTextNode(run.label + ' · ' + (run.status_display || run.status) + '…'));
+  }
+  return c;
+}
+
+// строит .card-wrap для записи; oldImg (если есть и src совпал) переносим — без перекачки превью
+function buildCard(r, oldImg) {
+  const wrap = document.createElement('div');
+  wrap.className = 'card-wrap';
+  wrap.dataset.id = r.id;
+  wrap.dataset.search = [r.title, r.reciter, r.source_url, r.surahs_label].join(' ').toLowerCase();
+
+  const thumb = () => {
+    if (!r.thumbnail) return null;
+    let img = document.createElement('img');
+    if (oldImg && oldImg.src === (new URL(r.thumbnail, location.href)).href) img = oldImg;
+    else { img.className = 'thumb'; img.loading = 'lazy'; img.src = r.thumbnail; img.alt = '';
+           img.onerror = function () { this.style.display = 'none'; }; }
+    return img;
+  };
+  const body = document.createElement('span'); body.className = 'body';
+  const ct = document.createElement('span'); ct.className = 'ct';
+  ct.textContent = trunc(r.title || r.source_url, 56); body.appendChild(ct);
+  const meta = document.createElement('span'); meta.className = 'meta';
+
+  if (r.ready) {
+    const a = document.createElement('a'); a.className = 'card'; a.href = playerHref(r.id);
+    const t = thumb();
+    if (t) a.appendChild(t);
+    else if (r.title_ar) { const s = document.createElement('span'); s.className = 'ar'; s.textContent = r.title_ar; a.appendChild(s); }
+    meta.textContent = (r.reciter || '') + (r.reciter && r.surahs_label ? ' · ' : '') + (r.surahs_label || '');
+    body.appendChild(meta);
+    if (r.duration_h || r.filesize_h) {
+      const ms = document.createElement('span'); ms.className = 'metsub';
+      ms.textContent = [r.duration_h, r.filesize_h, r.ext_h].filter(Boolean).join(' · ');
+      body.appendChild(ms);
+    }
+    const runs = document.createElement('span'); runs.className = 'runs';
+    (r.runs || []).forEach(run => runs.appendChild(runChip(run)));
+    body.appendChild(runs);
+    a.appendChild(body);
+    const b = document.createElement('span'); b.className = 'badge b-ready'; b.textContent = 'готово'; a.appendChild(b);
+    wrap.appendChild(a);
+  } else {
+    const card = document.createElement('div'); card.className = 'card';
+    const t = thumb(); if (t) card.appendChild(t);
+    if (r.status !== 'error') { const sp = document.createElement('span'); sp.className = 'spin'; meta.appendChild(sp); }
+    const line = document.createElement('span'); line.className = 'status-line';
+    line.textContent = r.status === 'error' ? trunc(r.error, 80)
+      : (r.stage ? 'шаг: ' + r.stage + '…' : (r.status_display || r.status) + '…');
+    meta.appendChild(line); body.appendChild(meta); card.appendChild(body);
+    const b = document.createElement('span'); b.className = 'badge b-' + r.status; b.textContent = r.status_display || r.status; card.appendChild(b);
+    const del = document.createElement('button'); del.className = 'del'; del.title = 'удалить'; del.textContent = '✕';
+    del.style.padding = '0'; del.onclick = () => removeRec(r.id);
+    card.appendChild(del);
+    wrap.appendChild(card);
+  }
+  return wrap;
+}
+
+async function removeRec(id) {
+  if (!confirm('Удалить?')) return;
+  try { await fetch(API + '/r/' + id + '/delete', { method: 'POST' }); } catch (e) {}
+  const c = cards.get(id); if (c) { c.wrap.remove(); cards.delete(id); }
+}
+
+function applySearch() {
+  const q = qEl.value.trim().toLowerCase();
+  let shown = 0;
+  for (const { wrap } of cards.values()) {
+    const hit = !q || wrap.dataset.search.includes(q);
+    wrap.style.display = hit ? '' : 'none';
+    if (hit) shown++;
+  }
+  const empty = listEl.querySelector('.empty');
+  if (empty) empty.remove();
+  if (!shown) {
+    const e = document.createElement('div'); e.className = 'empty';
+    e.textContent = cards.size ? ('По запросу «' + qEl.value.trim() + '» ничего не найдено.')
+                               : 'Пока пусто. Нажми «＋ Добавить».';
+    listEl.appendChild(e);
+  }
+}
+qEl.oninput = applySearch;
+
+// синхронизация списка: добавляем новые, перерисовываем изменившиеся (с переносом img), удаляем ушедшие
+function sync(recs) {
+  const seen = new Set();
+  for (const r of recs) {
+    seen.add(r.id);
+    const shape = shapeOf(r);
+    const prev = cards.get(r.id);
+    if (!prev) {
+      const wrap = buildCard(r, null);
+      cards.set(r.id, { shape, wrap });
+      listEl.appendChild(wrap);
+    } else if (prev.shape !== shape) {
+      const oldImg = prev.wrap.querySelector('img.thumb');
+      const wrap = buildCard(r, oldImg);
+      prev.wrap.replaceWith(wrap);
+      cards.set(r.id, { shape, wrap });
+    }
+  }
+  for (const [id, c] of cards) if (!seen.has(id)) { c.wrap.remove(); cards.delete(id); }
+  applySearch();
+}
+
+function buildRecPick(cfg) {
+  const fs = document.getElementById('recPick');
+  (cfg.recognizers || []).forEach(rz => {
+    const lab = document.createElement('label'); lab.className = 'rz';
+    const inp = document.createElement('input'); inp.type = 'checkbox'; inp.name = 'recognizers';
+    inp.value = rz.key; if ((cfg.default_recognizers || []).includes(rz.key)) inp.checked = true;
+    const sp = document.createElement('span'); sp.textContent = rz.label;
+    const sm = document.createElement('small'); sm.textContent = rz.note || '';
+    lab.appendChild(inp); lab.appendChild(sp); lab.appendChild(sm); fs.appendChild(lab);
+  });
+}
+
+let polling = false;
+async function load() {
+  let d;
+  try { d = await (await fetch(API + '/api/recitations')).json(); }
+  catch (e) { if (!cards.size) listEl.innerHTML = '<div class="empty">не удалось загрузить список</div>'; scheduleMaybe(true); return; }
+  if (!recognizersCfg) { recognizersCfg = d; buildRecPick(d); }
+  if (cards.size === 0) listEl.innerHTML = '';   // убрать «загрузка…»
+  sync(d.recitations || []);
+  scheduleMaybe((d.recitations || []).some(r => r.has_active_runs || !DONE(r.status)));
+}
+function scheduleMaybe(busy) {
+  if (busy && !polling) { polling = true; setTimeout(() => { polling = false; load(); }, 2500); }
+}
+
+// добавление записи через fetch (без перезагрузки)
+document.getElementById('addForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  let r;
+  try { r = await (await fetch(API + '/add', { method: 'POST', body: fd })).json(); }
+  catch (err) { alert('не удалось добавить'); return; }
+  if (!r.ok) { alert(r.error || 'ошибка'); return; }
+  if (r.dup) { location.href = playerHref(r.id); return; }
+  modal.classList.remove('open'); e.target.reset();
+  buildRecPickDefaults();
+  load();
+});
+// вернуть чекбоксы в дефолт после сброса формы
+function buildRecPickDefaults() {
+  if (!recognizersCfg) return;
+  document.querySelectorAll('#recPick input[name=recognizers]').forEach(i =>
+    i.checked = (recognizersCfg.default_recognizers || []).includes(i.value));
+}
+
+// модалка
+const modal = document.getElementById('modal');
+document.getElementById('openAdd').onclick = () => { modal.classList.add('open'); modal.querySelector('input[name=source_url]').focus(); };
+document.getElementById('closeAdd').onclick = () => modal.classList.remove('open');
+modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('open'); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') modal.classList.remove('open'); });
+
+// начальный поиск из ?q= (совместимость со старой ссылкой)
+if (QS.get('q')) qEl.value = QS.get('q');
+load();
+</script>
+</body>
+</html>

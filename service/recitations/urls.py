@@ -12,5 +12,4 @@ urlpatterns = [
     path("api/recitations", views.api_recitations, name="api_recitations"),
     path("r/<int:pk>/audio", views.audio, name="audio"),
     path("r/<int:pk>/status", views.status, name="status"),
-    path("r/<int:pk>/card", views.card, name="card"),
 ]

@@ -15,6 +15,7 @@ from django.http import (FileResponse, Http404, HttpResponse, HttpResponseRedire
                          JsonResponse, StreamingHttpResponse)
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from . import pipeline, recognizers
@@ -23,17 +24,10 @@ from .tasks import dispatch, dispatch_run
 
 
 def index(request):
-    recs = Recitation.objects.prefetch_related("runs").all()
-    q = (request.GET.get("q") or "").strip()
-    if q:
-        # поиск по названию/чтецу/ссылке/названиям сур; surahs_label — вычисляемое, фильтруем в Python
-        recs = [r for r in recs if r.matches_query(q)]
-    return render(request, "recitations/index.html", {
-        "recs": recs,
-        "q": q,
-        "recognizers": recognizers.selectable_recognizers(),
-        "default_recognizers": settings.DEFAULT_RECOGNIZERS,
-    })
+    """Библиотека теперь тоже СТАТИЧНАЯ (П11): бэк HTML не отдаёт. Корень / ведём редиректом на
+    статику, которая фетчит /api/recitations и рисует список сама (поиск — на клиенте)."""
+    qs = request.GET.urlencode()
+    return redirect(f"{settings.STATIC_URL}index.html" + (f"?{qs}" if qs else ""))
 
 
 def _chosen_recognizers(request) -> list[str]:
@@ -47,15 +41,19 @@ def _chosen_recognizers(request) -> list[str]:
     return chosen or ["whisper"]
 
 
+# CSRF-exempt: add/delete зовутся fetch-ом из СТАТИЧНОГО фронта (П11), в т.ч. потенциально с
+# другого origin (GitHub Pages) — CSRF-cookie туда не доедет. Это персональный прототип на одного
+# пользователя; при мультиюзере вернуть токен/аутентификацию.
+@csrf_exempt
 @require_POST
 def add(request):
     url = (request.POST.get("source_url") or "").strip()
     if not url:
-        return HttpResponseRedirect(reverse("index"))
+        return _cors(JsonResponse({"ok": False, "error": "пустая ссылка"}, status=400))
     # П7: уже парсили эту ссылку → не создаём дубль, ведём на существующую запись
     dup = Recitation.find_by_source(url)
     if dup:
-        return HttpResponseRedirect(reverse("player", args=[dup.id]))
+        return _cors(JsonResponse({"ok": True, "id": dup.id, "dup": True}))
     is_yt = bool(re.search(r"(youtube\.com|youtu\.be)", url))
     rec = Recitation.objects.create(
         source_url=url,
@@ -68,7 +66,7 @@ def add(request):
     for rkey in _chosen_recognizers(request):
         AsrRun.objects.create(recitation=rec, recognizer=rkey, status=AsrRun.Status.QUEUED)
     dispatch(rec.id)
-    return HttpResponseRedirect(reverse("index"))
+    return _cors(JsonResponse({"ok": True, "id": rec.id}))
 
 
 @require_POST
@@ -87,6 +85,7 @@ def run(request, pk):
     return HttpResponseRedirect(reverse("player", args=[pk]) + f"?asr={rkey}")
 
 
+@csrf_exempt
 @require_POST
 def delete(request, pk):
     rec = get_object_or_404(Recitation, pk=pk)
@@ -103,7 +102,7 @@ def delete(request, pk):
             except OSError:
                 pass
     rec.delete()
-    return HttpResponseRedirect(reverse("index"))
+    return _cors(JsonResponse({"ok": True}))
 
 
 def player(request, pk):
@@ -116,23 +115,49 @@ def player(request, pk):
     return redirect(url)
 
 
-def api_recitations(request):
-    """JSON-список записей для статичной библиотеки (П11): фронт сам фетчит и рисует."""
-    items = []
-    for rec in Recitation.objects.prefetch_related("runs").order_by("-id"):
-        items.append({
-            "id": rec.id, "title": rec.title or f"Запись #{rec.id}",
-            "title_ar": rec.title_ar, "reciter": rec.reciter,
-            "source_url": rec.source_url, "status": rec.status,
-            "ready": rec.is_ready, "youtube_id": rec.youtube_id,
-            "duration": rec.duration, "meta": rec.meta or {},
-            "runs": [{"recognizer": r.recognizer, "label": r.label,
-                      "is_aligner": r.is_aligner, "status": r.status,
-                      "metrics": r.metrics or {}} for r in rec.runs.all()],
-        })
-    resp = JsonResponse({"recitations": items})
+def _run_dict(r):
+    m = r.metrics or {}
+    cov = m.get("coverage")
+    return {"recognizer": r.recognizer, "label": r.label, "is_aligner": r.is_aligner,
+            "status": r.status, "status_display": r.get_status_display(),
+            "stage": r.stage, "error": (r.error or "")[:300],
+            "wt": m.get("wt") or 0, "coverage_pct": round(cov * 100) if cov else None,
+            "speech_sec": m.get("speech_sec"), "silence_sec": m.get("silence_sec"),
+            "duration_sec": m.get("duration")}
+
+
+def _rec_dict(rec):
+    """Готовые к показу поля записи для статичной библиотеки (вычисляемые свойства — на беке,
+    чтобы фронт не тянул quran.db и не считал длительности/названия сур)."""
+    return {
+        "id": rec.id, "title": rec.title or f"Запись #{rec.id}",
+        "title_ar": rec.title_ar, "reciter": rec.reciter,
+        "source_url": rec.source_url, "status": rec.status,
+        "status_display": rec.get_status_display(),
+        "ready": rec.is_ready, "stage": rec.stage, "error": (rec.error or "")[:300],
+        "youtube_id": rec.youtube_id, "duration": rec.duration,
+        "thumbnail": rec.thumbnail, "surahs_label": rec.surahs_label,
+        "duration_h": rec.duration_h, "filesize_h": rec.filesize_h, "ext_h": rec.ext_h,
+        "has_active_runs": rec.has_active_runs,
+        "runs": [_run_dict(r) for r in rec.runs.all()],
+    }
+
+
+def _cors(resp):
     resp["Access-Control-Allow-Origin"] = "*"
     return resp
+
+
+def api_recitations(request):
+    """JSON-список записей для статичной библиотеки (П11): фронт сам фетчит и рисует."""
+    items = [_rec_dict(rec) for rec in
+             Recitation.objects.prefetch_related("runs").order_by("-id")]
+    return _cors(JsonResponse({
+        "recitations": items,
+        "recognizers": [{"key": r.key, "label": r.label, "note": r.note}
+                        for r in recognizers.selectable_recognizers()],
+        "default_recognizers": list(settings.DEFAULT_RECOGNIZERS),
+    }))
 
 
 def data_json(request, pk):
@@ -163,13 +188,6 @@ def data_json(request, pk):
     # разрешаем фетч со статичного фронта на другом origin (будущий GitHub Pages, П11)
     resp["Access-Control-Allow-Origin"] = "*"
     return resp
-
-
-def card(request, pk):
-    """HTML одной карточки списка — для точечной перерисовки на фронте (index.html опрашивает
-    /status и при смене статуса заменяет ТОЛЬКО эту карточку, без перезагрузки страницы)."""
-    rec = get_object_or_404(Recitation.objects.prefetch_related("runs"), pk=pk)
-    return render(request, "recitations/_card.html", {"r": rec})
 
 
 def status(request, pk):
