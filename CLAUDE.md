@@ -11,6 +11,17 @@
 
 > Коротко: текущий фокус и свежие договорённости. Детали статусов — в `docs/BACKLOG.md`.
 
+- **⏭️ СЛЕДУЮЩЕЕ ПОСЛЕ КОМПАКТА (сессия 12, недоделанный ИСХОДНЫЙ таск github.io):** выложить плеер
+  на GitHub Pages. План владельца: (1) собрать статичную JSON-only выгрузку — `python tools/build_ghio.py
+  <out>` (только YouTube-реки, `audio=""`, + пропатченная статика с относит. путями `./`); (2) создать
+  в ЭТОМ репо orphan-ветку `github.io` с содержимым выгрузки (пусто от кода, только `index.html`,
+  `player.html`, `recitations.json`, `r/<id>/data.json`) — **ВЕТКУ ДЕЛАТЬ В ОТДЕЛЬНОМ WORKTREE НА НОВОЙ
+  ВЕТКЕ: `git worktree add -b github.io <path>` (НЕ на занятой main — из-за этого была авария!)**;
+  (3) в `../risabd.github.io` добавить сабмодуль `syncronized` → этот репо, ветка `github.io`; запушить
+  risabd.github.io; (4) проверить, что `risabd.github.io/syncronized/` открывает плеер. Статика уже
+  пропатчена и в main (relative-пути: `?api` / `/static/` / иначе `./`), проверена playwright (6 карточек,
+  YouTube-iframe). Плеер тянет `./r/<id>/data.json` относительно документа. remote-control поллер после
+  компакта ПЕРЕЗАПУСТИТЬ (он завязан на сессию).
 - **🔴 12.07 (сессия 12): АВАРИЯ + полное восстановление.** При попытке создать ветку `github.io`
   через git-worktree команда `git worktree add … main` упала (main занят основным worktree), `cd`
   не сработал → последующий `find . -maxdepth 1 -exec rm -rf` снёс ОСНОВНОЕ рабочее дерево.
