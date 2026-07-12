@@ -30,7 +30,9 @@ REGISTRY: dict[str, Recognizer] = {
 # forced берёт диапазон из готового прогона-источника (google/whisper); manual правит человек в
 # ручном элайнере (П12) поверх готовой записи. Оба исключены из selectable_recognizers и из
 # выбора источника forced (_forced_source).
-ALIGNERS = {"forced", "manual"}
+FORCED = "forced"   # авто-пост-шаг выравнивания (см. tasks._maybe_forced) — фиксированный ключ
+MANUAL = "manual"   # ручная привязка (П12), создаётся ТОЛЬКО из manual_save, не авто
+ALIGNERS = {FORCED, MANUAL}
 
 # Приоритет авто-выбора активного прогона (по убыванию предпочтения).
 PRIORITY = list(REGISTRY.keys())

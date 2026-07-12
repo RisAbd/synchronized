@@ -42,7 +42,8 @@ def _maybe_forced(rec, refresh: bool = False) -> None:
     from .models import AsrRun, Status
     from . import pipeline, recognizers as rz
 
-    key = next(iter(rz.ALIGNERS))  # 'forced'
+    key = rz.FORCED  # авто-пост-шаг — ВСЕГДА 'forced' (не iter(ALIGNERS): порядок set'а
+                     # зависит от хеш-сида процесса → мог отдать 'manual' и мислейблить прогон)
     if pipeline._forced_source(rec) is None:
         return  # нет готового ASR-источника с диапазоном аятов — нечего выравнивать
     try:
