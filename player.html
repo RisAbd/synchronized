@@ -327,7 +327,8 @@ init();
 async function init(){
   if(!DATA_URL){ fail('не задана запись (?rec=…)'); return; }
   let d;
-  try { const r = await fetch(DATA_URL); if(!r.ok) throw 0; d = await r.json(); }
+  // ?t=… обходит агрессивный кеш GitHub Pages/браузера
+  try { const r = await fetch(DATA_URL + (DATA_URL.includes('?') ? '&' : '?') + 't=' + Date.now(), { cache: 'no-store' }); if(!r.ok) throw 0; d = await r.json(); }
   catch(e){ fail('не удалось загрузить данные'); return; }
   DATA = d;
 
