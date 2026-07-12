@@ -13,8 +13,10 @@
 
 - **✅ ЗАКРЫТО 13.07 (сессия 12): ИСХОДНЫЙ таск github.io — плеер выложен на GitHub Pages.**
   Живёт на `https://risabd.github.io/syncronized/` (сабмодуль `syncronized` → этот репо, ветка
-  `github.io`; репо публичный → Pages клонирует по https). Проверено: все точки 200, playwright на
-  ЖИВОМ url — библиотека 6 карточек, плеер rec7 YouTube-iframe + слова, 0 ошибок консоли. **Владелец
+  `github.io`; репо публичный → Pages клонирует по https). **Актуальная выгрузка (13.07, сессия 13):
+  8 записей** (5,6,7,9,10,11 + новые 12,13 — суры Ваки́а/Мансур ас-Салими); коммит github.io `a0aa526`,
+  сабмодуль в risabd.github.io `5772232`; все точки на живом url 200 (recitations.json=8 recs,
+  r/12,r/13/data.json, player/index.html). **Владелец
   (13.07) поправил подход: НЕ автоматизировать выгрузку** («на каждый чих не надо, вручную запускать
   только») → `tools/build_ghio.py` теперь гоняется ВНУТРИ docker-воркера (`docker compose exec -T worker
   python manage.py shell < tools/build_ghio.py`, RequestFactory=паритет с бэком, веб на 8000 НЕ нужен —
