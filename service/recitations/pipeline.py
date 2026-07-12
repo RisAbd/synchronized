@@ -252,10 +252,13 @@ def _recognize(audio_path: Path, recognizer: str, rec, out: Path):
             src = raw_path
         words = align_mod.load_transcript(src)
     elif recognizer == "whisper":
-        _ensure_cudnn_path()
-        import asr
-        raw = asr.transcribe(str(audio_path), language="ar")
-        raw_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2))
+        # уже распознавали (raw.json со словами есть) — переиспользуем, НЕ жжём GPU заново
+        # (симметрично google выше; сырой ответ на то и сохраняем). Иначе — живой whisper.
+        if not (raw_path.is_file() and json.loads(raw_path.read_text() or "{}").get("words")):
+            _ensure_cudnn_path()
+            import asr
+            raw = asr.transcribe(str(audio_path), language="ar")
+            raw_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2))
         words = align_mod.load_transcript(raw_path)
     else:
         raise ValueError(f"неизвестный распознаватель: {recognizer!r}")
