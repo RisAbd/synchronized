@@ -11,17 +11,17 @@
 
 > Коротко: текущий фокус и свежие договорённости. Детали статусов — в `docs/BACKLOG.md`.
 
-- **⏭️ СЛЕДУЮЩЕЕ ПОСЛЕ КОМПАКТА (сессия 12, недоделанный ИСХОДНЫЙ таск github.io):** выложить плеер
-  на GitHub Pages. План владельца: (1) собрать статичную JSON-only выгрузку — `python tools/build_ghio.py
-  <out>` (только YouTube-реки, `audio=""`, + пропатченная статика с относит. путями `./`); (2) создать
-  в ЭТОМ репо orphan-ветку `github.io` с содержимым выгрузки (пусто от кода, только `index.html`,
-  `player.html`, `recitations.json`, `r/<id>/data.json`) — **ВЕТКУ ДЕЛАТЬ В ОТДЕЛЬНОМ WORKTREE НА НОВОЙ
-  ВЕТКЕ: `git worktree add -b github.io <path>` (НЕ на занятой main — из-за этого была авария!)**;
-  (3) в `../risabd.github.io` добавить сабмодуль `syncronized` → этот репо, ветка `github.io`; запушить
-  risabd.github.io; (4) проверить, что `risabd.github.io/syncronized/` открывает плеер. Статика уже
-  пропатчена и в main (relative-пути: `?api` / `/static/` / иначе `./`), проверена playwright (6 карточек,
-  YouTube-iframe). Плеер тянет `./r/<id>/data.json` относительно документа. remote-control поллер после
-  компакта ПЕРЕЗАПУСТИТЬ (он завязан на сессию).
+- **✅ ЗАКРЫТО 13.07 (сессия 12): ИСХОДНЫЙ таск github.io — плеер выложен на GitHub Pages.**
+  Живёт на `https://risabd.github.io/syncronized/` (сабмодуль `syncronized` → этот репо, ветка
+  `github.io`; репо публичный → Pages клонирует по https). Проверено: все точки 200, playwright на
+  ЖИВОМ url — библиотека 6 карточек, плеер rec7 YouTube-iframe + слова, 0 ошибок консоли. **Владелец
+  (13.07) поправил подход: НЕ автоматизировать выгрузку** («на каждый чих не надо, вручную запускать
+  только») → `tools/build_ghio.py` теперь гоняется ВНУТРИ docker-воркера (`docker compose exec -T worker
+  python manage.py shell < tools/build_ghio.py`, RequestFactory=паритет с бэком, веб на 8000 НЕ нужен —
+  порт занят чужим), пишет `./work/ghio-export` (forced по умолчанию, manual-прогоны выкинуты, `audio=""`).
+  Дальше руками: worktree ветки github.io → rsync выгрузки → commit/push; в `../risabd.github.io`
+  `git submodule update --remote syncronized` → commit/push. **Полный рецепт — `docs/DEPLOY.md §6`.**
+  remote-control поллер (pid при спавне) — ПЕРЕЗАПУСКАТЬ после компакта (single-poller guard не даст дубль).
 - **🔴 12.07 (сессия 12): АВАРИЯ + полное восстановление.** При попытке создать ветку `github.io`
   через git-worktree команда `git worktree add … main` упала (main занят основным worktree), `cd`
   не сработал → последующий `find . -maxdepth 1 -exec rm -rf` снёс ОСНОВНОЕ рабочее дерево.
@@ -220,7 +220,7 @@
   реестр/модель НЕ тронуты (не путать с v2-сохранением в бэк, оно ждёт фидбек владельца). Проверено
   playwright 12/12 (4 новые: 4 интервала, wi0 [0,0.8], wi2 без t_end→потолок 2.2, .done на словах),
   node --check ок. Коммит+пуш.
-- Обновлено: 2026-07-12 (сессия 12 — авария+восстановление БД/моделей/кредов, docs/DEPLOY.md, ре-импорт 6 рек, ремап id).
+- Обновлено: 2026-07-13 (сессия 12 — ИСХОДНЫЙ таск github.io ЗАКРЫТ: плеер на risabd.github.io/syncronized/, выгрузка через docker-воркер вручную; DEPLOY.md §6).
 
 ## Глоссарий (термины владельца)
 
