@@ -159,7 +159,14 @@ const DEBUG = QS.get('debug') === '1';
 // база API: тот же origin, откуда открыт плеер, ЛИБО ?api=<url> (для статики на GitHub Pages,
 // которая ходит на отдельный бэк). Без слэша на конце.
 const API = (QS.get('api') || '').replace(/\/$/, '');
-const DATA_URL = REC_ID ? (API + '/r/' + REC_ID + '/data.json' + (ASR ? '?asr='+encodeURIComponent(ASR) : '')) : null;
+// Куда ходить за данными (data.json + audio):
+//  • ?api=<url>          → отдельный бэк (кросс-ориджин статика на GitHub Pages с боевым API);
+//  • страница из /static/ → плеер отдан Django, данные лежат в КОРНЕ (/r/<id>/…);
+//  • иначе               → чистая статика в подпапке (GitHub Pages /syncronized/) → грузим
+//                          ОТНОСИТЕЛЬНО документа через ./ (не подразумеваем корень сайта).
+const DATA_BASE = API ? (API + '/')
+                      : (location.pathname.includes('/static/') ? '/' : './');
+const DATA_URL = REC_ID ? (DATA_BASE + 'r/' + REC_ID + '/data.json' + (ASR ? '?asr='+encodeURIComponent(ASR) : '')) : null;
 let YOUTUBE_ID = '';   // узнаём из data.json (было server-side)
 const audio = document.getElementById('audio');
 const textEl = document.getElementById('text');

@@ -119,6 +119,10 @@
 // ?api=<url> — обращаться к бэку на другом origin (будущая статика на GitHub Pages).
 const QS = new URLSearchParams(location.search);
 const API = (QS.get('api') || '').replace(/\/$/, '');
+// Список чтений: ?api=<url> → бэк; страница из /static/ → корневой /api/recitations;
+// чистая статика в подпапке (GitHub Pages) → ОТНОСИТЕЛЬНЫЙ ./recitations.json.
+const LIST_URL = API ? (API + '/api/recitations')
+                     : (location.pathname.includes('/static/') ? '/api/recitations' : './recitations.json');
 const listEl = document.getElementById('list');
 const qEl = document.getElementById('q');
 const DONE = s => s === 'ready' || s === 'error';
@@ -275,7 +279,7 @@ function buildRecPick(cfg) {
 let polling = false;
 async function load() {
   let d;
-  try { d = await (await fetch(API + '/api/recitations')).json(); }
+  try { d = await (await fetch(LIST_URL)).json(); }
   catch (e) { if (!cards.size) listEl.innerHTML = '<div class="empty">не удалось загрузить список</div>'; scheduleMaybe(true); return; }
   if (!recognizersCfg) { recognizersCfg = d; buildRecPick(d); }
   if (cards.size === 0) listEl.innerHTML = '';   // убрать «загрузка…»
