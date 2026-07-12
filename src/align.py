@@ -237,28 +237,35 @@ def _segment(points: list[dict], quran: Quran):
     # дыры. Идём по корпусу слово-за-словом и раздаём времена линейно между соседними
     # якорями, чтобы подсветка ехала плавно, а не залипала на последнем выровненном
     # слове и не прыгала. Остаточную неточность границ смазывает окно 2-3 слов в плеере.
+    # У ЯКОРЕЙ несём реальный конец слова (t_end от распознавателя) → плеер замораживает
+    # заливку на паузе, а не «протягивает» её до следующего слова через тишину; и метрика
+    # coverage считает настоящую длительность речи, а не CAP-догадку. Интерполированным
+    # словам t_end не даём — реального конца у них нет, плеер сам растянет их до соседа.
     out = []
     timeline = []
     word_timeline = []
 
-    def push_word(t, tok_corpus):
+    def push_word(t, tok_corpus, t_end=None):
         tok = quran.tokens[tok_corpus]
         if word_timeline and word_timeline[-1]["corpus"] == tok_corpus:
             return
         if word_timeline and t <= word_timeline[-1]["t"]:
             t = round(word_timeline[-1]["t"] + 0.001, 3)  # держим строгий рост времени
-        word_timeline.append({"t": t, "surah": tok.surah, "ayah": tok.ayah,
-                              "wi": tok.word_index, "corpus": tok_corpus})
+        entry = {"t": t, "surah": tok.surah, "ayah": tok.ayah,
+                 "wi": tok.word_index, "corpus": tok_corpus}
+        if t_end is not None and t_end > t:            # реальный конец слова (только якоря)
+            entry["t_end"] = round(t_end, 3)
+        word_timeline.append(entry)
 
     anchors = [p for seg in keep for p in seg["points"]]
     for idx, p in enumerate(anchors):
-        push_word(p["t"], p["corpus"])
+        push_word(p["t"], p["corpus"], p.get("t_end"))
         if idx + 1 < len(anchors):
             q = anchors[idx + 1]
             c0, c1, t0, t1 = p["corpus"], q["corpus"], p["t"], q["t"]
             if 2 <= (c1 - c0) <= INTERP_MAX_GAP and t1 > t0:
                 span = c1 - c0
-                for c in range(c0 + 1, c1):        # добиваем пропущенные слова корпуса
+                for c in range(c0 + 1, c1):        # добиваем пропущенные слова корпуса (без t_end)
                     push_word(round(t0 + (c - c0) / span * (t1 - t0), 3), c)
 
     for seg in keep:
