@@ -279,7 +279,8 @@ function buildRecPick(cfg) {
 let polling = false;
 async function load() {
   let d;
-  try { d = await (await fetch(LIST_URL)).json(); }
+  // ?t=… обходит агрессивный кеш GitHub Pages/браузера (F5 подгружал старый список)
+  try { d = await (await fetch(LIST_URL + (LIST_URL.includes('?') ? '&' : '?') + 't=' + Date.now(), { cache: 'no-store' })).json(); }
   catch (e) { if (!cards.size) listEl.innerHTML = '<div class="empty">не удалось загрузить список</div>'; scheduleMaybe(true); return; }
   if (!recognizersCfg) { recognizersCfg = d; buildRecPick(d); }
   if (cards.size === 0) listEl.innerHTML = '';   // убрать «загрузка…»
