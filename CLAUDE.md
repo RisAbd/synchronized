@@ -11,6 +11,21 @@
 
 > Коротко: текущий фокус и свежие договорённости. Детали статусов — в `docs/BACKLOG.md`.
 
+- **Сделано 18.07 (сессия 14): w2v в docker на GPU (WD закрыт) + GPU-изоляция подпроцессом.**
+  wav2vec2/whisperx теперь в docker-воркере (образ), w2v — авто-пост-шаг (`tasks._maybe_w2v`, зеркало
+  `_maybe_forced`) и ДЕФОЛТ в плеере. **CUDA-стек унифицирован на cu124:** torch==2.5.1+cu124 приносит
+  cuBLAS 12.4.5.8 + cuDNN 9.1.0.70 (как раньше) + прочее 12.4.127 — один набор на torch(w2v) +
+  onnxruntime-gpu 1.20.1 (MMS forced, CUDA EP активен) + ct2 (whisper); ручные nvidia-* пины (частью
+  12.9) убраны из requirements (конфликтовали). whisperx ставим `--no-deps` + torch/torchaudio/
+  transformers==4.46.3/pandas/nltk (хвост faster-whisper/pyannote/onnxruntime-CPU не нужен, конфликтует
+  с onnxruntime-gpu). `PYTHONNOUSERSITE=1` (в HOME=/app/.cache mount валялся user-site transformers 5.x,
+  ломал whisperx). **ГЛАВНОЕ — каждый GPU-выравниватель отдельным процессом** (`recitations/gpu_align.py`
+  ← `pipeline._run_aligner_subprocess`): onnxruntime держит ЛИПКУЮ CUDA-арену → forced+w2v в одном
+  процессе = OOM на 6ГБ; подпроцесс вышел → VRAM свободна. e2e rec5: forced cov=0.478 + w2v cov=0.823
+  (156/156 t_end) оба ready, дефолт=w2v. Коммит `477ed06` в main. memory [[w2v-docker-subprocess]].
+  **СЛЕДУЮЩЕЕ — WR (возвраты П8 на w2v):** MMS-эмиссии для `_detect_repeats` — тоже onnxruntime,
+  гнать отдельным процессом (иначе OOR с w2v). Владелец (17.07) разрешил при нужде вовсе отказаться
+  от текущего forced в пользу w2v. **После фиксов владелец хотел САМ посмотреть, потом выгрузка github.io.**
 - **Сделано 13.07 (сессия 13): align теперь протаскивает реальный t_end распознавателя + whisper
   переиспользует кеш raw.json.** Владелец давно указывал «align херовый — оперирует только началами
   слов». Оказалось: whisper/google STT дают конец слова (`a[i].end`), якорные `points` несли `t_end`,
@@ -240,7 +255,7 @@
   реестр/модель НЕ тронуты (не путать с v2-сохранением в бэк, оно ждёт фидбек владельца). Проверено
   playwright 12/12 (4 новые: 4 интервала, wi0 [0,0.8], wi2 без t_end→потолок 2.2, .done на словах),
   node --check ок. Коммит+пуш.
-- Обновлено: 2026-07-13 (сессия 12 — ИСХОДНЫЙ таск github.io ЗАКРЫТ: плеер на risabd.github.io/syncronized/, выгрузка через docker-воркер вручную; DEPLOY.md §6).
+- Обновлено: 2026-07-18 (сессия 14 — WD закрыт: w2v в docker на GPU, авто-пост-шаг+дефолт, CUDA-стек cu124, изоляция подпроцессом; далее WR — возвраты на w2v).
 
 ## Глоссарий (термины владельца)
 
