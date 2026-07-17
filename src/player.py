@@ -12,7 +12,7 @@ import json
 import sys
 from pathlib import Path
 
-from quran import Quran, map_editions
+from quran import Quran, map_editions, word_tokens
 
 
 def _ayah_spans(timeline: list[dict]) -> dict[int, tuple[int, int]]:
@@ -44,13 +44,15 @@ def build_data(sync_map: dict, quran: Quran, audio_src: str) -> dict:
         ayat = []
         for a in range(lo, hi + 1):
             v = quran.verse(surah, a)
-            words = v.text.split()
+            # word_tokens роняет токены-вакфы/паузы (отдельные знаки-неслова в тексте Tanzil):
+            # их не выравниваем и не подсвечиваем. Индексация wi совпадает с align.py/aligner.
+            words = word_tokens(v.text)
             item = {"ayah": a, "text": v.text, "words": words}
             # П9: вторая редакция (Diyanet) для переключения текста в плеере. word_timeline
             # индексирован по словам Tanzil (wi) → отдаём карту wi→[индексы слов Diyanet],
             # чтобы подсветка легла на слова Diyanet даже при ином дроблении. forced не трогаем.
             if getattr(v, "text_diyanet", ""):
-                dwords = v.text_diyanet.split()
+                dwords = word_tokens(v.text_diyanet)
                 item["text_diyanet"] = v.text_diyanet
                 item["words_diyanet"] = dwords
                 item["dmap"] = map_editions(words, dwords)

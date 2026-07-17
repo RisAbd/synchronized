@@ -459,12 +459,15 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int | None
         batch_size = int(os.environ.get("SYNC_FALIGN_BATCH", "1"))
     session, tokenizer, cfa = _session_and_tokenizer()
 
-    # эталон: плоский список слов с привязкой к аяту; индекс слова = word_index в аяте
+    # эталон: плоский список слов с привязкой к аяту; индекс слова = word_index в аяте.
+    # word_tokens роняет токены-вакфы/паузы (отдельные знаки-неслова) — их не выравниваем,
+    # wi совпадает с align.py/build_data (единая безвакфовая индексация).
+    import quran as _q
     ref = []  # (surah, ayah, wi, arabic_word)
     for surah, ayah, txt in verses:
-        for wi, w in enumerate(txt.split()):
+        for wi, w in enumerate(_q.word_tokens(txt)):
             ref.append((surah, ayah, wi, w))
-    text = " ".join(txt for _, _, txt in verses)
+    text = " ".join(" ".join(_q.word_tokens(txt)) for _, _, txt in verses)
 
     wav = cfa.load_audio(str(audio_path))
     emissions, stride = cfa.generate_emissions(session, wav, batch_size=batch_size)

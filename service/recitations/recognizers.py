@@ -21,8 +21,8 @@ class Recognizer:
 # арабском).
 REGISTRY: dict[str, Recognizer] = {
     "manual": Recognizer("manual", "Ручной", "ручная привязка слов мышью (элайнер П12); человек правит поверх forced/ASR — истина, приоритет авто-выбора"),
+    "w2v": Recognizer("w2v", "Forced align (wav2vec2)", "выравнивание wav2vec2 (whisperx): держит слово сквозь мадд (тянущуюся гласную) → честный coverage; активен по умолчанию; нужен готовый прогон для диапазона"),
     "forced": Recognizer("forced", "Forced align (MMS)", "точные границы: выравнивает текст аятов к аудио (MMS CTC); нужен готовый прогон для диапазона"),
-    "w2v": Recognizer("w2v", "Forced align (wav2vec2)", "выравнивание wav2vec2 (whisperx): держит слово сквозь мадд (тянущуюся гласную) → честный coverage; нужен готовый прогон для диапазона"),
     "google": Recognizer("google", "Google STT", "точнее на арабском; из кэша ответов"),
     "whisper": Recognizer("whisper", "Whisper (Tarteel)", "локально на GPU; модель tarteel-ai/whisper-base-ar-quran — дообучена под коранический арабский"),
 }

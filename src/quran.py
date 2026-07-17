@@ -67,6 +67,15 @@ def skeleton(word: str) -> str:
     return base.translate(_FOLD_TABLE)
 
 
+def word_tokens(text: str) -> list[str]:
+    """Слова текста БЕЗ токенов-неслов: вакф/пауза-знаки (U+06D6–06DC), саджда и прочие одиночные
+    комбинирующие марки в тексте Tanzil стоят ОТДЕЛЬНЫМИ токенами (через пробел) — это НЕ слова
+    для чтения/выравнивания, их надо игнорировать (и в аллайнере, и на фронте). Признак «не-слово»
+    = пустой согласный скелет (`skeleton`==""). Индексация результата совпадает с `Verse.words`
+    (normalize тоже роняет эти знаки) и с `align.py` (quran.tokens) → ЕДИНЫЙ wi во всей системе."""
+    return [w for w in text.split() if skeleton(w)]
+
+
 def map_editions(a_words: list[str], b_words: list[str]) -> list[list[int]]:
     """Сопоставить слова двух редакций одного аята по согласному скелету.
 

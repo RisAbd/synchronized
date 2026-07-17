@@ -127,6 +127,10 @@ def align(audio_path, verses, windows=None, snap: bool | None = None) -> dict:
     if device != "cuda":
         raise RuntimeError("w2v_align требует GPU (torch.cuda недоступна) — CPU не гоняем")
 
+    # выкинуть токены-вакфы/паузы (знаки-неслова) из текста аятов — единая безвакфовая индексация
+    # wi (как align.py/build_data); дальше весь пайплайн (ref/сегменты/счётчики) на очищенном тексте.
+    verses = [(s, a, " ".join(quranmod.word_tokens(t))) for s, a, t in verses]
+
     # ref: плоский список слов + диапазоны индексов на аят
     ref = []
     vranges = []
