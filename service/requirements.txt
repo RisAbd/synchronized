@@ -17,25 +17,23 @@ faster-whisper        # ASR (ctranslate2); в docker-воркере теперь
 google-cloud-speech
 google-cloud-storage
 
-# forced align (ctc-forced-aligner, MMS-CTC через onnxruntime) — теперь ставим и в docker:
-# воркер получил GPU, весь конвейер (whisper→forced) крутится в сервисе, без хостовых костылей.
-# torch ставится отдельно CPU-колесом в Dockerfile (форсед гоняет onnxruntime, CUDA-торч не нужен).
+# forced align (ctc-forced-aligner, MMS-CTC через onnxruntime) — ставим в docker:
+# воркер получил GPU, весь конвейер (whisper→forced→w2v) крутится в сервисе, без хостовых костылей.
 ctc-forced-aligner
 # onnxruntime-GPU: forced align на CUDA (RTX в воркере). ORT 1.20.x — сборка под CUDA 12 +
-# cuDNN 9 (тот же стек, что у ct2/whisper). ORT ≥1.27 требует CUDA 13 → НЕ брать (конфликт с
-# cuDNN9/cuBLAS12 ниже). Провайдер подхватывается автоматически (falign._session_and_tokenizer).
+# cuDNN 9 (тот же стек, что у ct2/whisper/torch). ORT ≥1.27 требует CUDA 13 → НЕ брать.
+# Провайдер подхватывается автоматически (falign._session_and_tokenizer).
 onnxruntime-gpu==1.20.1
 Unidecode             # романизация (uroman-fallback) в ctc-forced-aligner
 
-# GPU для faster-whisper в контейнере: ctranslate2 4.x ищет cuDNN 9 / cuBLAS 12 в этих pip-колёсах
-# (LD_LIBRARY_PATH на них — в Dockerfile). Сам драйвер CUDA прокидывает nvidia-container-toolkit
-# с хоста (см. docker-compose.yml, deploy.devices у worker). Версии — как на хосте (проверено).
-nvidia-cudnn-cu12==9.1.0.70
-nvidia-cublas-cu12==12.4.5.8
-# Остальные CUDA-runtime либы для onnxruntime-gpu CUDA EP (cuBLAS/cuDNN выше уже покрыты).
-# Без них CUDAExecutionProvider тихо падает в CPU (libcudart/libcufft/libcurand/libnvrtc not found).
-nvidia-cuda-runtime-cu12==12.9.79
-nvidia-cufft-cu12==11.4.1.4
-nvidia-curand-cu12==10.3.10.19
-nvidia-cuda-nvrtc-cu12==12.9.86
-nvidia-nvjitlink-cu12==12.9.86
+# ⚠️ CUDA-стек (cuDNN/cuBLAS/cuda-runtime/cufft/curand/nvrtc/nvjitlink) БОЛЬШЕ НЕ пиним здесь —
+# его целиком приносит `torch==2.5.1+cu124` (ставится в Dockerfile ПЕРЕД этим файлом): cuBLAS
+# 12.4.5.8 + cuDNN 9.1.0.70 (ровно как раньше) + runtime/cufft/curand/nvrtc/nvjitlink 12.4.127
+# — единый непротиворечивый набор CUDA 12.4, который обслуживает СРАЗУ torch(wav2vec2/whisperx),
+# onnxruntime-gpu 1.20.1 (SONAME .12/.11/.10 совпадают) и ctranslate2 (faster-whisper). Раньше
+# nvidia-* пинились тут вручную (часть на 12.9) — при добавлении torch-cu124 это давало конфликт
+# резолвера, поэтому пины убраны, стек унифицирован на cu124. LD_LIBRARY_PATH (Dockerfile)
+# указывает на те же pip-каталоги nvidia/* — теперь их наполняет torch.
+# whisperx (wav2vec2-выравниватель, src/w2v_align.py) ставится в Dockerfile через --no-deps +
+# transformers/pandas/nltk (весь его транскрипционный/VAD-хвост с onnxruntime-CPU не нужен и
+# конфликтовал бы с onnxruntime-gpu — align() тянет только torch/torchaudio/transformers).

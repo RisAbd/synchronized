@@ -65,6 +65,38 @@ def _maybe_forced(rec, refresh: bool = False) -> None:
     _run_safe(run)
 
 
+def _maybe_w2v(rec, refresh: bool = False) -> None:
+    """Авто-пост-шаг: wav2vec2-выравнивание (whisperx) поверх готового ASR-прогона — аналог
+    `_maybe_forced`, но держит мадд → честный coverage, и это ДЕФОЛТНЫЙ выравниватель в плеере
+    (порядок REGISTRY: w2v выше forced). torch(cu124)+whisperx теперь в docker-воркере, поэтому
+    w2v-прогон заводится автоматически на каждую запись (раньше требовал ручного host-прогона).
+    В окружении без whisperx/torch (голый CPU-образ) — ТИХО пропускаем, запись живёт по forced/ASR.
+    refresh=True — пересчитать даже готовый (диапазон-источник мог смениться после пересчёта ASR)."""
+    from .models import AsrRun, Status
+    from . import pipeline, recognizers as rz
+
+    key = rz.W2V
+    if pipeline._forced_source(rec) is None:
+        return  # нет готового ASR-источника с диапазоном аятов — нечего выравнивать
+    try:
+        import w2v_align
+        if not w2v_align.available():
+            return  # нет whisperx/torch — тихо пропускаем
+    except Exception:
+        return
+
+    run = rec.runs.filter(recognizer=key).first()
+    if run and run.status == Status.READY and not refresh:
+        return  # уже посчитан
+    if run is None:
+        run = AsrRun.objects.create(recitation=rec, recognizer=key, status=Status.QUEUED)
+    else:
+        run.status = Status.QUEUED
+        run.error = ""
+        run.save(update_fields=["status", "error", "updated_at"])
+    _run_safe(run)
+
+
 def _run_safe(run) -> None:
     """Прогнать один AsrRun, аккуратно ведя его статус/ошибку."""
     from .models import Status
@@ -143,8 +175,10 @@ def run_pipeline(rec_id: int) -> None:
     for run in aligner_runs:
         _run_safe(run)
     # авто-уточнение границ поверх готового ASR (тихо пропустится без deps);
-    # если только что перемололи ASR — освежаем forced (источник диапазона мог смениться)
+    # если только что перемололи ASR — освежаем выравниватели (источник диапазона мог смениться).
+    # forced (MMS) нужен и сам по себе, и как движок детекции возвратов П8; w2v — дефолт в плеере.
     _maybe_forced(rec, refresh=bool(asr_runs))
+    _maybe_w2v(rec, refresh=bool(asr_runs))
     _aggregate(rec)
 
 
@@ -158,7 +192,9 @@ def run_single(run_id: int) -> None:
     _run_safe(run)
     from . import recognizers as rz
     if not rz.is_aligner(run.recognizer):
-        _maybe_forced(run.recitation, refresh=True)  # пересчитали ASR → обновим forced поверх него
+        # пересчитали ASR → обновим выравниватели поверх него (диапазон-источник мог смениться)
+        _maybe_forced(run.recitation, refresh=True)
+        _maybe_w2v(run.recitation, refresh=True)
     _aggregate(run.recitation)
 
 

@@ -25,7 +25,13 @@ WORK_DIR = REPO_ROOT / "work"            # временные выгрузки (
 MEDIA_ROOT = Path(os.environ.get("SYNC_MEDIA_ROOT", str(REPO_ROOT / "media")))
 REC_DATA_DIR = MEDIA_ROOT / "rec"
 for _d in (AUDIO_DIR, WORK_DIR, REC_DATA_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
+    try:
+        _d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # AUDIO_DIR — легаси-фолбэк в слое образа (/app/web/audio), root-owned; контейнер под
+        # non-root (uid 1000) его не создаст → EACCES. Не критично: рабочие пути (work/media)
+        # примонтированы с хоста и пишутся, а legacy-web/audio пуст и не используется плеером.
+        pass
 
 # --- базовое ---
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-insecure-key-change-me")

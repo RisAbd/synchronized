@@ -284,6 +284,21 @@ def _forced_source(rec):
                                      -prio.get(r.recognizer, 9)), default=None)
 
 
+def _run_aligner_subprocess(rec_id: int, recognizer: str, out: Path) -> None:
+    """Запустить выравниватель (forced/w2v) отдельным процессом `python -m recitations.gpu_align`.
+
+    GPU-изоляция на 6ГБ-карте (см. gpu_align): подпроцесс освобождает VRAM целиком на выходе.
+    Бросает RuntimeError с хвостом stderr при ненулевом коде возврата или отсутствии sync-map.json.
+    Окружение (PYTHONNOUSERSITE/HOME/HF_HOME/NLTK_DATA/LD_LIBRARY_PATH/SYNC_*) наследуется."""
+    cmd = [sys.executable, "-m", "recitations.gpu_align", str(rec_id), recognizer, str(out)]
+    proc = subprocess.run(cmd, cwd=str(settings.BASE_DIR), capture_output=True, text=True)
+    if proc.returncode != 0 or not (out / "sync-map.json").exists():
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-8:]
+        raise RuntimeError(
+            f"выравнивание ({recognizer}) в подпроцессе упало (код {proc.returncode}): "
+            + " / ".join(tail))
+
+
 def run_one(run, on_stage=None) -> None:
     """Прогнать конвейер одним распознавателем/выравнивателем для прогона AsrRun.
     Мутирует/сохраняет run. Аудио должно быть уже получено (ensure_audio). Бросает исключение
@@ -324,30 +339,11 @@ def run_one(run, on_stage=None) -> None:
             raise RuntimeError(f"в прогоне-источнике '{src.recognizer}' нет разделов/аятов")
         stage("align")
         out.mkdir(parents=True, exist_ok=True)
-        if run.recognizer == rz.W2V:
-            # wav2vec2 (whisperx) — держит мадд; torch/whisperx есть только в host-venv, в docker-
-            # воркере их нет → тут падаем с понятной подсказкой (материализуется отдельным путём).
-            try:
-                import w2v_align
-            except ImportError as e:
-                raise RuntimeError(
-                    "wav2vec2-выравнивание недоступно в этом окружении (нет whisperx/torch). "
-                    f"Запускай в host-venv: см. docs (tools/w2v_validate.py) — {e}") from e
-            # окна аятов из timeline ASR-источника (для нарезки длинного аудио)
-            tl = (src.data.get("timeline") or [])
-            tmap = {(t["surah"], t["ayah"]): t["t"] for t in tl}
-            windows = [[tmap.get((s, a)), None] for s, a, _ in verses]
-            sync_map = w2v_align.align(audio, verses, windows=windows)
-        else:
-            try:
-                sync_map = falign.align(audio, verses)
-            except ImportError as e:
-                # docker-воркер на CPU-slim образе без ctc-forced-aligner/onnxruntime/unidecode
-                raise RuntimeError(
-                    "forced align недоступен в этом окружении (нет ctc-forced-aligner/onnxruntime): "
-                    f"{e}. Пока запускай на хосте: cd service && python manage.py forced_align "
-                    f"{rec.id}") from e
-        (out / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
+        # Выравнивание (forced MMS / w2v) — в ОТДЕЛЬНОМ процессе (GPU-изоляция, см. gpu_align):
+        # onnxruntime-forced держит липкую CUDA-арену, torch-w2v в том же процессе → OOM на 6ГБ.
+        # Подпроцесс грузит фреймворк, пишет sync-map.json, выходит → VRAM освобождается целиком.
+        _run_aligner_subprocess(rec.id, run.recognizer, out)
+        sync_map = json.loads((out / "sync-map.json").read_text())
     else:
         import align as align_mod
         stage("asr")
