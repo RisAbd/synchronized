@@ -299,6 +299,65 @@ def _run_aligner_subprocess(rec_id: int, recognizer: str, out: Path) -> None:
             + " / ".join(tail))
 
 
+_REPEAT_ZONE_MARGIN = 1.0   # с: расхождение forced↔w2v во времени слова, выдающее зону возврата
+
+
+def _inherit_repeats(rec, sync_map: dict) -> int:
+    """Перенести возвраты чтеца (П8) из forced-прогона на дорожку w2v.
+
+    Возвраты детектит ОДИН детектор — `falign._detect_repeats` по MMS-эмиссиям; он уже отработал
+    в forced-прогоне (эмиссии посчитаны, точки `rep=True` лежат в его sync-map.json), так что
+    второй GPU-проход MMS не нужен. Но простой ПЕРЕНОС rep-точек даёт зигзаг: монотонный w2v на
+    записи с возвратом ломает раскладку ВСЕЙ зоны повтора (затолкал следующие слова в окно
+    перечитки, растянул одно на всю зону), а forced через детект выразил её чисто (дыра → перечитка
+    → продолжение). Поэтому замещаем всю ЗОНУ ВОЗВРАТА forced-точками (там forced корректен),
+    остальное аята оставляем w2v (честный coverage/мадд).
+
+    Зона (в пределах затронутого аята) = непрерывный диапазон wi, где forced и w2v расходятся по
+    времени > _REPEAT_ZONE_MARGIN (монотонный w2v сдвинул слова из-за повтора), объединённый со
+    словами самого возврата (rep). Источник — forced/sync-map.json (поле `rep` роняется build_data).
+    Файла/возвратов нет → 0 (w2v без возвратов; forced-прогон с ними в плеере доступен).
+    Возвращает число перенесённых rep-точек."""
+    from . import recognizers as rz
+    fpath = run_dir(rec.id, rz.FORCED) / "sync-map.json"
+    if not fpath.exists():
+        return 0
+    try:
+        forced_wt = (json.loads(fpath.read_text()).get("word_timeline")) or []
+    except (json.JSONDecodeError, OSError):
+        return 0
+    reps = [w for w in forced_wt if w.get("rep")]
+    if not reps:
+        return 0
+    w2v_wt = sync_map.get("word_timeline") or []
+
+    def by_ayah(wt):
+        d = {}
+        for w in wt:
+            d.setdefault((w["surah"], w["ayah"]), []).append(w)
+        return d
+    f_ay, v_ay = by_ayah(forced_wt), by_ayah(w2v_wt)
+
+    ayahs = {(w["surah"], w["ayah"]) for w in reps}
+    for key in ayahs:
+        rep_wis = [w["wi"] for w in reps if (w["surah"], w["ayah"]) == key]
+        f_t = {w["wi"]: w["t"] for w in f_ay.get(key, []) if not w.get("rep")}
+        v_t = {w["wi"]: w["t"] for w in v_ay.get(key, [])}
+        # wi, где forced и w2v заметно расходятся по времени → зона, сдвинутая повтором
+        diverge = [wi for wi in f_t if wi in v_t and abs(f_t[wi] - v_t[wi]) > _REPEAT_ZONE_MARGIN]
+        lo = min(rep_wis + diverge)
+        hi = max(rep_wis + diverge)
+        # заместить w2v-точки [lo..hi] этого аята на forced-точки того же диапазона (обычные + rep)
+        w2v_wt = [w for w in w2v_wt
+                  if not ((w["surah"], w["ayah"]) == key and lo <= w["wi"] <= hi)]
+        w2v_wt += [w for w in f_ay.get(key, []) if lo <= w["wi"] <= hi]
+
+    w2v_wt.sort(key=lambda w: (w["t"], w.get("surah", 0), w.get("ayah", 0), w.get("wi", 0)))
+    sync_map["word_timeline"] = w2v_wt
+    sync_map.setdefault("meta", {})["repeats_inherited"] = len(reps)
+    return len(reps)
+
+
 def run_one(run, on_stage=None) -> None:
     """Прогнать конвейер одним распознавателем/выравнивателем для прогона AsrRun.
     Мутирует/сохраняет run. Аудио должно быть уже получено (ensure_audio). Бросает исключение
@@ -344,6 +403,11 @@ def run_one(run, on_stage=None) -> None:
         # Подпроцесс грузит фреймворк, пишет sync-map.json, выходит → VRAM освобождается целиком.
         _run_aligner_subprocess(rec.id, run.recognizer, out)
         sync_map = json.loads((out / "sync-map.json").read_text())
+        # w2v монотонен и возвраты чтеца (П8) не выражает — переносим готовые rep-точки из
+        # forced-прогона (тот же детектор по MMS-эмиссиям, тот же файл). До build_data, чтобы
+        # rep-точки прошли ту же сборку word_timeline, что и у forced.
+        if run.recognizer == rz.W2V:
+            _inherit_repeats(rec, sync_map)
     else:
         import align as align_mod
         stage("asr")
