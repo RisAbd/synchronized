@@ -311,27 +311,42 @@ def run_one(run, on_stage=None) -> None:
     out = run_dir(rec.id, run.recognizer)
 
     if rz.is_aligner(run.recognizer):
-        # forced align: НЕ распознаём, а выравниваем известный текст аятов к аудио.
+        # выравнивание: НЕ распознаём, а выравниваем известный текст аятов к аудио.
         # диапазон читаемого берём из готового ASR-прогона (align.py уже определил, что читается).
         import falign
         src = _forced_source(rec)
         if src is None:
             raise RuntimeError(
                 "нет готового прогона (google/whisper) для диапазона аятов — сначала распознайте "
-                "запись каким-нибудь ASR, затем добавьте forced align")
+                "запись каким-нибудь ASR, затем добавьте выравнивание")
         verses = falign.verses_from_data(src.data)
         if not verses:
             raise RuntimeError(f"в прогоне-источнике '{src.recognizer}' нет разделов/аятов")
         stage("align")
         out.mkdir(parents=True, exist_ok=True)
-        try:
-            sync_map = falign.align(audio, verses)
-        except ImportError as e:
-            # docker-воркер на CPU-slim образе без ctc-forced-aligner/onnxruntime/unidecode
-            raise RuntimeError(
-                "forced align недоступен в этом окружении (нет ctc-forced-aligner/onnxruntime): "
-                f"{e}. Пока запускай на хосте: cd service && python manage.py forced_align "
-                f"{rec.id}") from e
+        if run.recognizer == rz.W2V:
+            # wav2vec2 (whisperx) — держит мадд; torch/whisperx есть только в host-venv, в docker-
+            # воркере их нет → тут падаем с понятной подсказкой (материализуется отдельным путём).
+            try:
+                import w2v_align
+            except ImportError as e:
+                raise RuntimeError(
+                    "wav2vec2-выравнивание недоступно в этом окружении (нет whisperx/torch). "
+                    f"Запускай в host-venv: см. docs (tools/w2v_validate.py) — {e}") from e
+            # окна аятов из timeline ASR-источника (для нарезки длинного аудио)
+            tl = (src.data.get("timeline") or [])
+            tmap = {(t["surah"], t["ayah"]): t["t"] for t in tl}
+            windows = [[tmap.get((s, a)), None] for s, a, _ in verses]
+            sync_map = w2v_align.align(audio, verses, windows=windows)
+        else:
+            try:
+                sync_map = falign.align(audio, verses)
+            except ImportError as e:
+                # docker-воркер на CPU-slim образе без ctc-forced-aligner/onnxruntime/unidecode
+                raise RuntimeError(
+                    "forced align недоступен в этом окружении (нет ctc-forced-aligner/onnxruntime): "
+                    f"{e}. Пока запускай на хосте: cd service && python manage.py forced_align "
+                    f"{rec.id}") from e
         (out / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
     else:
         import align as align_mod

@@ -21,7 +21,8 @@ class Recognizer:
 # арабском).
 REGISTRY: dict[str, Recognizer] = {
     "manual": Recognizer("manual", "Ручной", "ручная привязка слов мышью (элайнер П12); человек правит поверх forced/ASR — истина, приоритет авто-выбора"),
-    "forced": Recognizer("forced", "Forced align", "точные границы: выравнивает текст аятов к аудио (без ошибок ASR); нужен готовый прогон для диапазона"),
+    "forced": Recognizer("forced", "Forced align (MMS)", "точные границы: выравнивает текст аятов к аудио (MMS CTC); нужен готовый прогон для диапазона"),
+    "w2v": Recognizer("w2v", "Forced align (wav2vec2)", "выравнивание wav2vec2 (whisperx): держит слово сквозь мадд (тянущуюся гласную) → честный coverage; нужен готовый прогон для диапазона"),
     "google": Recognizer("google", "Google STT", "точнее на арабском; из кэша ответов"),
     "whisper": Recognizer("whisper", "Whisper (Tarteel)", "локально на GPU; модель tarteel-ai/whisper-base-ar-quran — дообучена под коранический арабский"),
 }
@@ -32,7 +33,9 @@ REGISTRY: dict[str, Recognizer] = {
 # выбора источника forced (_forced_source).
 FORCED = "forced"   # авто-пост-шаг выравнивания (см. tasks._maybe_forced) — фиксированный ключ
 MANUAL = "manual"   # ручная привязка (П12), создаётся ТОЛЬКО из manual_save, не авто
-ALIGNERS = {FORCED, MANUAL}
+W2V = "w2v"         # wav2vec2-выравнивание (whisperx, GPU/host-venv); НЕ авто-пост-шаг (нужен torch,
+                    # которого нет в docker-воркере) — запускается отдельно, см. pipeline.run_one
+ALIGNERS = {FORCED, MANUAL, W2V}
 
 # Приоритет авто-выбора активного прогона (по убыванию предпочтения).
 PRIORITY = list(REGISTRY.keys())
