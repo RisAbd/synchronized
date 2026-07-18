@@ -53,6 +53,8 @@
   .runs { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
   .rz-chip { font-size:.72rem; font-weight:600; padding:2px 8px; border-radius:999px;
     background:var(--chip); color:var(--muted); white-space:nowrap; }
+  .rz-chip.rz-link { cursor:pointer; border:1px solid transparent; }
+  .rz-chip.rz-link:hover { border-color:var(--accent); color:var(--fg); }
   .empty { color:var(--muted); text-align:center; padding:34px; }
   footer { color:var(--muted); font-size:.8rem; text-align:center; margin-top:36px; }
   .spin { display:inline-block; width:12px; height:12px; margin-right:7px; vertical-align:-1px;
@@ -143,15 +145,24 @@ function playerHref(id) {
   return 'player.html?rec=' + id + (API ? '&api=' + encodeURIComponent(API) : '');
 }
 
-function runChip(run) {
+function runChip(run, recId) {
   const c = document.createElement('span');
   c.className = 'rz-chip';
   if (run.status === 'ready') {
-    c.title = 'слова покрывают ' + (run.coverage_pct != null ? run.coverage_pct + '%' : '—') +
+    c.title = 'открыть с этим прогоном · слова покрывают ' + (run.coverage_pct != null ? run.coverage_pct + '%' : '—') +
       ' времени записи (' + (run.speech_sec || 0) + 'с со словами · ' +
       (run.silence_sec || 0) + 'с паузы/вступление из ' + (run.duration_sec || 0) + 'с)';
     c.textContent = run.label + ' · ' + (run.wt || 0) + ' сл' +
       (run.coverage_pct != null ? ' · ' + run.coverage_pct + '% речь' : '');
+    // клик по чипу → открыть реку именно с этим прогоном (владелец: выбирать выравнивание с листа).
+    // Карточка обёрнута в <a> — гасим её переход, идём на плеер с ?asr=<recognizer>.
+    if (recId != null) {
+      c.classList.add('rz-link');
+      c.addEventListener('click', e => {
+        e.preventDefault(); e.stopPropagation();
+        location.href = playerHref(recId) + '&asr=' + encodeURIComponent(run.recognizer);
+      });
+    }
   } else if (run.status === 'error') {
     c.title = run.error || '';
     c.textContent = run.label + ' · ошибка';
@@ -195,7 +206,7 @@ function buildCard(r, oldImg) {
       body.appendChild(ms);
     }
     const runs = document.createElement('span'); runs.className = 'runs';
-    (r.runs || []).forEach(run => runs.appendChild(runChip(run)));
+    (r.runs || []).forEach(run => runs.appendChild(runChip(run, r.id)));
     body.appendChild(runs);
     a.appendChild(body);
     const b = document.createElement('span'); b.className = 'badge b-ready'; b.textContent = 'готово'; a.appendChild(b);

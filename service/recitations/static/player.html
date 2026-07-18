@@ -345,22 +345,23 @@ async function init(){
   renderText();
   initEdition();
   initWordSeek();
-  if(DEBUG) buildAsrbar(d);
+  buildAsrbar(d);
 
   window.addEventListener('wheel', pauseScroll, {passive:true});
   window.addEventListener('touchmove', pauseScroll, {passive:true});
   setupSource();   // решает видео/аудио и запускает тик (видео — по onReady плеера)
 }
 
-// отладочный тумблер прогонов (?debug=1): распознавание (ASR) и выравнивание (forced) — раздельно.
-// Строим из data.runs; клик переоткрывает плеер с ?asr=<key>. Конечному читателю не нужен.
+// тумблер прогонов: распознавание (ASR) и выравнивание (forced/w2v) — раздельно. Строим из
+// data.runs; клик переоткрывает плеер с ?asr=<key>. Видим всегда (владелец хочет сам выбирать/
+// сравнивать выравнивание, w2v визуально бывает хуже forced). ?debug=1 доступ к ручному элайнеру.
 function buildAsrbar(d){
   const runs = d.runs || [];
   if(runs.length < 2) return;
   const bar = document.getElementById('asrbar');
   const pct = m => (m && m.coverage) ? Math.round(m.coverage*100)+'%' : '—';
   const link = (run) => {
-    const q = new URLSearchParams(location.search); q.set('asr', run.recognizer); q.set('debug','1');
+    const q = new URLSearchParams(location.search); q.set('asr', run.recognizer);
     const on = run.recognizer === d.active_key ? ' on' : '';
     if(run.status === 'ready'){
       const a=document.createElement('a'); a.className='asr'+on; a.href='?'+q.toString();
@@ -380,11 +381,13 @@ function buildAsrbar(d){
   const aligners = runs.filter(r=>r.is_aligner);
   if(aligners.length){ bar.appendChild(lbl('· выравнивание:',' lbl-align'));
     aligners.forEach(r=>bar.appendChild(link(r))); }
-  // ссылка на ручной элайнер (П12) — дебаг-тул: правка привязки мышью по словам
-  const man=document.createElement('a'); man.className='asr'; man.textContent='✍ ручной';
-  man.title='ручной элайнер: правка привязки слов мышью';
-  man.href=(API||'')+'/r/'+REC_ID+'/manual'+(ASR?'?asr='+encodeURIComponent(ASR):'');
-  bar.appendChild(man);
+  // ссылка на ручной элайнер (П12) — дебаг-тул: правка привязки мышью по словам (только ?debug=1)
+  if(DEBUG){
+    const man=document.createElement('a'); man.className='asr'; man.textContent='✍ ручной';
+    man.title='ручной элайнер: правка привязки слов мышью';
+    man.href=(API||'')+'/r/'+REC_ID+'/manual'+(ASR?'?asr='+encodeURIComponent(ASR):'');
+    bar.appendChild(man);
+  }
   bar.style.display = '';
 }
 
