@@ -223,6 +223,12 @@ def align(audio_path, verses, windows=None, snap: bool | None = None) -> dict:
     for i in range(1, len(word_timeline)):
         if word_timeline[i]["t"] <= word_timeline[i - 1]["t"]:
             word_timeline[i]["t"] = round(word_timeline[i - 1]["t"] + 0.001, 3)
+        # форс монотонности сдвинул старт вперёд — исходный t_end мог стать < t (частый случай на
+        # повторяющихся рефренах, напр. Ар-Рахман: w2v матчит рефрен не с тем вхождением → слово
+        # выровнено назад по времени, монотонность схлопывает его). Невалидному t_end не верим.
+        te = word_timeline[i].get("t_end")
+        if te is not None and te <= word_timeline[i]["t"]:
+            del word_timeline[i]["t_end"]
 
     meta = {
         "aligner": "wav2vec2-whisperx",
