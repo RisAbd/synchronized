@@ -403,43 +403,6 @@ def alignment_invariants(data: dict) -> dict:
 
 
 _INV_MIN_DT = 0.02   # с: короче — слово «схлопнуто» (мелькает), кандидат в источник прыжка
-_MAX_FILL_JUMP = 14  # пропуск больше стольких слов = не возврат чтеца, а мусор ASR (не заполняем)
-
-
-def fill_forward_jumps(data: dict) -> int:
-    """Пост-гард инварианта: устранить прыжки подсветки ВПЕРЁД, вставив пропущенные слова.
-
-    Финальный слой поверх готового word_timeline (не конфликтует с snap/respace/repeats — идёт
-    последним). Правило владельца: подсветка движется вперёд ТОЛЬКО по одному слову. Если соседние
-    по времени точки прыгают через слова (плоский индекс +2..+_MAX_FILL_JUMP — обычно недобранная
-    перечитка после возврата чтеца), вставляем пропущенные слова равномерно по времени между ними
-    → подсветка быстро, но плавно пробегает их вместо скачка. Большие прыжки (>_MAX_FILL_JUMP,
-    межсурные) не трогаем — это не возврат, а ASR распознал не тот диапазон. Возвращает число вставок."""
-    gpos = _flat_index(data)
-    inv_pos = {v: k for k, v in gpos.items()}
-    wt = sorted(data.get("word_timeline") or [], key=lambda w: w["t"])
-    out, filled = [], 0
-    for i, e in enumerate(wt):
-        out.append(e)
-        if i + 1 >= len(wt):
-            continue
-        g0 = gpos.get((e["surah"], e["ayah"], e["wi"]))
-        nxt = wt[i + 1]
-        g1 = gpos.get((nxt["surah"], nxt["ayah"], nxt["wi"]))
-        if g0 is None or g1 is None:
-            continue
-        step = g1 - g0
-        if 2 <= step <= _MAX_FILL_JUMP:
-            t0, t1 = e["t"], nxt["t"]
-            for j in range(1, step):
-                s, a, wi = inv_pos[g0 + j]
-                out.append({"t": round(t0 + (t1 - t0) * j / step, 3),
-                            "surah": s, "ayah": a, "wi": wi, "filled": True})
-                filled += 1
-    if filled:
-        out.sort(key=lambda w: (w["t"], w.get("surah", 0), w.get("ayah", 0), w.get("wi", 0)))
-        data["word_timeline"] = out
-    return filled
 
 
 def run_one(run, on_stage=None) -> None:
@@ -526,18 +489,15 @@ def run_one(run, on_stage=None) -> None:
     dur_for_cov = audio_dur or tl_end
     speech_sec, speech_ratio = _speech_time_coverage(wt, dur_for_cov)   # точная (объединение слов)
     bins_cov = _audio_time_coverage(wt, dur_for_cov)                    # грубая (10с-бины) — дебаг
-    jump_filled = fill_forward_jumps(data)   # устранить прыжки вперёд (вставить пропущенную перечитку)
-    wt = data.get("word_timeline") or []     # мог дополниться вставками — перечитать
-    inv = alignment_invariants(data)   # инвариант чтеца ПОСЛЕ заполнения (forced/w2v прыжки → 0)
+    inv = alignment_invariants(data)   # инвариант чтеца: прыжки вперёд / схлопнутые (часть пайплайна)
     run.data = data
     run.metrics = {**meta,
                    "coverage": speech_ratio,           # headline: доля ВРЕМЕНИ со словами (точная)
                    "speech_sec": speech_sec,           # секунд со словами
                    "silence_sec": round(max(0.0, (dur_for_cov or 0) - speech_sec), 1),  # без слов
                    "coverage_bins": bins_cov,          # старая грубая метрика (сравнение)
-                   "forward_jumps": inv["forward_jumps"],          # прыжки подсветки вперёд (после гарда → 0)
+                   "forward_jumps": inv["forward_jumps"],          # прыжки подсветки вперёд (баг: >0)
                    "collapsed_words": inv["collapsed_words"],      # схлопнутые (мелькают) слова
-                   "jump_filled": jump_filled,         # вставлено слов для устранения прыжков вперёд
                    "invariants": inv,                  # детали нарушений (для листа/аудита/отладки)
                    "wt": len(wt), "tl": len(tl), "duration": round(audio_dur or tl_end),
                    "elapsed_sec": round(time.monotonic() - t0, 1)}
