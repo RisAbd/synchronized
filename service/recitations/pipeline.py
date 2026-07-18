@@ -358,6 +358,53 @@ def _inherit_repeats(rec, sync_map: dict) -> int:
     return len(reps)
 
 
+def _flat_index(data: dict) -> dict:
+    """Плоский индекс слова по каноническому тексту записи: (surah,ayah,wi) → позиция в чтении.
+    Порядок = как слова идут в тексте (sections → ayat → words). Нужен для инвариант-проверки."""
+    gpos, p = {}, 0
+    for sec in data.get("sections", []):
+        s = sec["surah"]
+        for ay in sec.get("ayat", []):
+            n = len(ay.get("words") or ay["text"].split())
+            for wi in range(n):
+                gpos[(s, ay["ayah"], wi)] = p
+                p += 1
+    return gpos
+
+
+def alignment_invariants(data: dict) -> dict:
+    """Проверка инварианта чтеца в финальном word_timeline (ровно то, что видит плеер).
+
+    Правило владельца: чтец идёт вперёд ПО ОДНОМУ слову либо возвращается НАЗАД (перечитка);
+    резкого прыжка ВПЕРЁД через слова физически не бывает. В терминах word_timeline по времени:
+    у соседних точек плоский индекс слова = +1 (вперёд по одному) или ≤0 (возврат/держание), но
+    НЕ ≥+2 (пропуск слов = запрещённый прыжок вперёд). Отдельно ловим «схлопнутые» точки —
+    расстояние по времени до следующей < _INV_MIN_DT (слово мелькает за доли секунды).
+
+    Не ручной прогон, а часть пайплайна: результат кладётся в run.metrics на КАЖДОМ прогоне,
+    так что нарушения видны объективно и сразу. Возвращает счётчики + детали (обрезаны до 50)."""
+    gpos = _flat_index(data)
+    wt = data.get("word_timeline") or []
+    fwd, collapsed = [], []
+    prev = None
+    for i, e in enumerate(wt):
+        key = (e["surah"], e["ayah"], e["wi"])
+        g = gpos.get(key)
+        wlabel = f'{e["surah"]}:{e["ayah"]}:{e["wi"]}'
+        if i + 1 < len(wt) and (wt[i + 1]["t"] - e["t"]) < _INV_MIN_DT:
+            collapsed.append({"t": round(e["t"], 2), "w": wlabel})
+        if prev is not None and g is not None and prev[0] is not None:
+            delta = g - prev[0]
+            if delta >= 2:
+                fwd.append({"t": round(e["t"], 2), "from": prev[1], "to": wlabel, "skip": delta - 1})
+        prev = (g, wlabel)
+    return {"forward_jumps": len(fwd), "collapsed_words": len(collapsed),
+            "forward_jumps_detail": fwd[:50], "collapsed_words_detail": collapsed[:50]}
+
+
+_INV_MIN_DT = 0.02   # с: короче — слово «схлопнуто» (мелькает), кандидат в источник прыжка
+
+
 def run_one(run, on_stage=None) -> None:
     """Прогнать конвейер одним распознавателем/выравнивателем для прогона AsrRun.
     Мутирует/сохраняет run. Аудио должно быть уже получено (ensure_audio). Бросает исключение
@@ -442,12 +489,16 @@ def run_one(run, on_stage=None) -> None:
     dur_for_cov = audio_dur or tl_end
     speech_sec, speech_ratio = _speech_time_coverage(wt, dur_for_cov)   # точная (объединение слов)
     bins_cov = _audio_time_coverage(wt, dur_for_cov)                    # грубая (10с-бины) — дебаг
+    inv = alignment_invariants(data)   # инвариант чтеца: прыжки вперёд / схлопнутые (часть пайплайна)
     run.data = data
     run.metrics = {**meta,
                    "coverage": speech_ratio,           # headline: доля ВРЕМЕНИ со словами (точная)
                    "speech_sec": speech_sec,           # секунд со словами
                    "silence_sec": round(max(0.0, (dur_for_cov or 0) - speech_sec), 1),  # без слов
                    "coverage_bins": bins_cov,          # старая грубая метрика (сравнение)
+                   "forward_jumps": inv["forward_jumps"],          # прыжки подсветки вперёд (баг: >0)
+                   "collapsed_words": inv["collapsed_words"],      # схлопнутые (мелькают) слова
+                   "invariants": inv,                  # детали нарушений (для листа/аудита/отладки)
                    "wt": len(wt), "tl": len(tl), "duration": round(audio_dur or tl_end),
                    "elapsed_sec": round(time.monotonic() - t0, 1)}
     run.status = AsrRun.Status.READY
