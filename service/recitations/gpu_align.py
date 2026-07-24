@@ -40,8 +40,9 @@ def main() -> int:
     audio = pipeline.ensure_audio(rec)
 
     if recognizer == rz.W2V:
-        # ПОЛНАЯ независимость (директива владельца 24.07): w2v НЕ берёт диапазон/окна у ASR.
-        # Своя акустика: эмиссии → find_range (какие аяты) → force-align этого диапазона → sync_map.
+        # ПОЛНАЯ независимость (директива владельца 24.07): w2v НЕ берёт диапазон/окна у ASR и НЕ
+        # использует whisperx. Своя акустика: эмиссии (transformers) → find_range (какие аяты) →
+        # СВОЙ CTC-Viterbi force-align этого диапазона по тем же эмиссиям → sync_map. Один GPU-проход.
         import w2v_align
         import w2v_range
         from quran import Quran
@@ -53,11 +54,8 @@ def main() -> int:
             print("w2v: не удалось определить диапазон из акустики", file=sys.stderr)
             return 3
         verses = [(s, a, q.surah(s).verses[a - 1].text) for s, a in rng]
-        # грубые старты аятов для нарезки длинного аудио — из СВОЕЙ акустики (k-грамм-попадания
-        # decode-время→аят), НЕ из ASR-таймлайна. _fill_starts добьёт пропуски интерполяцией.
-        starts = w2v_range.ayah_start_hints(E, verses, index, idx2ch, ch2idx, stride)
-        windows = [[st, None] for st in starts]
-        sync_map = w2v_align.align(str(audio), verses, windows=windows)
+        # свой монотонный CTC-Viterbi по УЖЕ посчитанным эмиссиям (окна не нужны — путь глобален)
+        sync_map = w2v_align.forced_align(E, stride, verses, idx2ch, ch2idx, str(audio))
         # возвраты/перечитки чтеца (П8) из СВОЕЙ акустики w2v (не наследуем у forced) — вклейка
         # rep-точек в word_timeline, как в falign.align. Эмиссии переиспользуем (посчитаны выше).
         import w2v_repeats

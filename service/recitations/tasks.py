@@ -66,12 +66,13 @@ def _maybe_forced(rec, refresh: bool = False) -> None:
 
 
 def _maybe_w2v(rec, refresh: bool = False) -> None:
-    """wav2vec2-источник (whisperx) — ПОЛНОСТЬЮ независим (директива владельца): audio → своя
-    акустика → сам находит диапазон (w2v_range) → выравнивание → свои возвраты. НЕ поверх ASR, ASR
-    ему не нужен (в отличие от forced/`_maybe_forced`, который берёт диапазон у ASR). Держит мадд →
-    честный coverage; дефолтный выравниватель в плеере (REGISTRY: w2v выше forced). torch(cu124)+
-    whisperx в docker-воркере → заводится автоматически на каждую запись. Без whisperx/torch (голый
-    CPU-образ) — ТИХО пропускаем. refresh=True — пересчитать даже готовый."""
+    """wav2vec2-источник (transformers + СВОЙ CTC-Viterbi, без whisperx) — ПОЛНОСТЬЮ независим
+    (директива владельца): audio → своя акустика (эмиссии) → сам находит диапазон (w2v_range) →
+    свой forced-align → свои возвраты. НЕ поверх ASR, ASR ему не нужен (в отличие от forced/
+    `_maybe_forced`, который берёт диапазон у ASR). Держит мадд → честный coverage; дефолтный
+    выравниватель в плеере (REGISTRY: w2v выше forced). torch(cu124)+transformers в docker-воркере →
+    заводится автоматически на каждую запись. Без transformers/torch — ТИХО пропускаем.
+    refresh=True — пересчитать даже готовый."""
     from .models import AsrRun, Status
     from . import recognizers as rz
 

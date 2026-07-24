@@ -1,26 +1,27 @@
-"""wav2vec2 forced alignment (через whisperx) — альтернатива MMS-forced (`falign.py`).
+"""wav2vec2 forced alignment — СВОЙ CTC-Viterbi поверх сырых эмиссий, БЕЗ whisperx.
 
-Зачем: MMS ctc-forced-aligner романизует арабский и СХЛОПЫВАЕТ огласовки → тянущейся гласной
-(мадд) не даёт токена, конец слова садится на согласный спайк, а протяжка падает в «дыру».
-На мелодичном таджвиде это (а) роняет подсветку слова раньше времени, (б) занижает coverage
-(«речь» ~0.5, хотя запись почти сплошь звучит). wav2vec2 (CTC поверх сырых фонем, без романизации)
-держит слово сквозь мадд → границы честнее, coverage считается по настоящим t_end.
+Зачем НЕ whisperx (директива владельца 24.07: «Wave2Vec — отдельный, зачем ему WhisperX?»):
+whisperx — лишь обёртка, что грузит ту же HF-модель wav2vec2 + свою align-рутину; её рутина на
+мелодичном таджвиде СВАЛИВАЕТ серию слов в один момент (rec7: 6:102:10..103:7 все в 210.16с,
+collapsed_words=14 → подсветка проскакивает). Здесь модель грузим напрямую через `transformers`,
+эмиссии считаем сами (log-softmax логитов), выравниваем СВОИМ монотонным CTC-Viterbi — путь по
+построению не «схлопывается» (каждой метке ≥1 кадр, времена строго растут), а мелодичную протяжку
+(мадд) честно отдаём слову-держателю: слово владеет временем до онсета СЛЕДУЮЩЕГО слова.
+
+Зачем вообще wav2vec2, а не MMS-forced (`falign.py`): MMS романизует арабский и СХЛОПЫВАЕТ огласовки
+→ тянущейся гласной токена нет, конец слова садится на согласный спайк, протяжка падает в «дыру».
+wav2vec2 (CTC поверх сырых арабских символов) держит слово сквозь мадд → границы честнее, coverage
+считается по настоящим t_end.
 
 Выдаёт sync_map ТОЙ ЖЕ формы, что `falign.align`: {meta, timeline, word_timeline, char_timeline},
-совместимой с `player.build_data`. Вход тот же: verses=[(surah, ayah, text), ...].
+совместимой с `player.build_data`. Вход: verses=[(surah, ayah, text), ...] (диапазон уже нашёл
+`w2v_range` из СВОЕЙ акустики — БЕЗ ASR).
 
-Длинное аудио бьём на короткие сегменты (память wav2vec2 линейна по длине окна; один кусок на всё
-падает OOM на 6ГБ уже с ~250с). Границы окон — грубые тайминги аятов из ASR-источника. Чтобы
-слово у СТЫКА окон не прижималось к обрезанному краю, каждый сегмент выравниваем с КОНТЕКСТОМ ±1 аят
-и берём тайминг слова из того окна, где оно ДАЛЬШЕ от края (interior-pick) — так граничные слова
-всегда выровнены с опорой с обеих сторон.
-
-Запуск ТОЛЬКО на GPU (правило проекта). Живёт в отдельном venv (~/.venvs/whisperx, torch cu128),
-whisperx импортируется лениво — модуль можно импортировать где угодно (available() проверит deps).
+Модель + эмиссии — ТОЛЬКО GPU (правило проекта). Viterbi/снап — CPU (numpy). transformers/torch/
+soundfile импортируются лениво (модуль импортируется где угодно; available() проверит deps).
 """
 from __future__ import annotations
 
-import difflib
 import os
 
 import falign          # только за хелперами (_snap_bounds, _HARAKAT); тяжёлые импорты у него ленивы
@@ -29,53 +30,74 @@ import quran as quranmod
 _HARAKAT = falign._HARAKAT
 SAMPLE_RATE = 16000
 
-_WINDOW_PAD = 2.0        # запас аудио с каждого края окна (с) — контекст, не лишний текст
-_MAX_WINDOW_SEC = 25.0   # макс длительность CORE окна → пиковая память wav2vec2 ограничена
-_CTX_AYAT = 1            # сколько аятов контекста добавлять с каждой стороны (overlap)
-
-_ALIGN_MODEL = os.environ.get("SYNC_W2V_MODEL", "")   # пусто → дефолтная арабская whisperx
-_align_model = None
-_align_meta = None
+_MODEL_NAME = os.environ.get("SYNC_W2V_MODEL", "") or "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
+_model = None
+_processor = None
+_vocab = None
 
 
 def available() -> bool:
-    """Есть ли whisperx+torch в текущем окружении (без загрузки моделей)."""
+    """Есть ли transformers+torch+soundfile (без загрузки моделей)."""
     import importlib.util
-    return all(importlib.util.find_spec(m) is not None for m in ("whisperx", "torch"))
+    return all(importlib.util.find_spec(m) is not None
+               for m in ("transformers", "torch", "soundfile"))
 
 
 def _norm(w: str) -> str:
     return quranmod.normalize(w)
 
 
+def _load_model(device: str):
+    """Загрузить HF-модель wav2vec2 напрямую (без whisperx). Кэшируется в процессе."""
+    global _model, _processor, _vocab
+    if _model is None:
+        from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+        _processor = Wav2Vec2Processor.from_pretrained(_MODEL_NAME)
+        _model = Wav2Vec2ForCTC.from_pretrained(_MODEL_NAME).to(device).eval()
+        _vocab = _processor.tokenizer.get_vocab()   # {символ: id}
+    return _model, _processor, _vocab
+
+
+def _load_wav(path):
+    """Аудио → float32 моно 16кГц (soundfile + librosa-ресемпл при нужде). Без whisperx/ffmpeg-CLI."""
+    import numpy as np
+    import soundfile as sf
+    wav, sr = sf.read(str(path), dtype="float32", always_2d=False)
+    if wav.ndim > 1:
+        wav = wav.mean(axis=1)
+    if sr != SAMPLE_RATE:
+        import librosa
+        wav = librosa.resample(wav, orig_sr=sr, target_sr=SAMPLE_RATE)
+    return np.ascontiguousarray(wav, dtype="float32")
+
+
 def emissions(audio_path, window_sec: float = 20.0):
     """wav2vec2 CTC log-softmax эмиссии по ВСЕЙ записи (окнами, чтобы влезть в 6ГБ) — GPU.
 
     Возвращает (E, stride_ms, idx2ch, ch2idx): E[кадр, класс] float32 (log-prob), шаг кадра в мс,
-    словарь класс↔символ модели. Это сырьё для независимого определения диапазона (`w2v_range`,
-    CTC-скоринг) и для детекта возвратов из СВОЕЙ акустики — БЕЗ данных других распознавателей."""
+    словарь класс↔символ модели. Сырьё для независимого определения диапазона (`w2v_range`) и для
+    детекта возвратов из СВОЕЙ акустики — БЕЗ данных других распознавателей. Вход нормализуется
+    feature-экстрактором процессора (zero-mean/unit-var — как ждёт модель)."""
     import numpy as np
     import torch
-    import whisperx
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device != "cuda":
         raise RuntimeError("w2v emissions требует GPU")
-    model_a, meta_a = _load_model(device)
-    dictionary = meta_a["dictionary"]
-    idx2ch = {int(v): k for k, v in dictionary.items()}
-    ch2idx = {k: int(v) for k, v in dictionary.items()}
+    model, proc, vocab = _load_model(device)
+    idx2ch = {int(v): k for k, v in vocab.items()}
+    ch2idx = {k: int(v) for k, v in vocab.items()}
 
-    audio = whisperx.load_audio(str(audio_path))
+    audio = _load_wav(audio_path)
     dur = len(audio) / SAMPLE_RATE
     chunks, strides = [], []
     t = 0.0
     while t < dur:
         e = min(dur, t + window_sec)
         seg = audio[int(t * SAMPLE_RATE):int(e * SAMPLE_RATE)]
-        wav = torch.from_numpy(seg).to(device).unsqueeze(0)
+        iv = proc(seg, sampling_rate=SAMPLE_RATE, return_tensors="pt").input_values.to(device)
         with torch.inference_mode():
-            emis = torch.log_softmax(model_a(wav).logits, dim=-1)[0].cpu().numpy().astype("float32")
+            emis = torch.log_softmax(model(iv).logits, dim=-1)[0].cpu().numpy().astype("float32")
         chunks.append(emis)
         strides.append((e - t) / len(emis))
         t = e
@@ -85,146 +107,131 @@ def emissions(audio_path, window_sec: float = 20.0):
     return E, stride_ms, idx2ch, ch2idx
 
 
-def _load_model(device: str):
-    global _align_model, _align_meta
-    if _align_model is None:
-        import whisperx
-        if _ALIGN_MODEL:
-            _align_model, _align_meta = whisperx.load_align_model(
-                language_code="ar", device=device, model_name=_ALIGN_MODEL)
-        else:
-            _align_model, _align_meta = whisperx.load_align_model(language_code="ar", device=device)
-    return _align_model, _align_meta
+def _ctc_viterbi(E, labels, blank: int):
+    """Монотонный CTC-Viterbi: лучший путь, выравнивающий `labels` к кадрам E.
 
+    Стандартный CTC: расширенная последовательность [blank, l0, blank, l1, ..., blank] (S=2L+1),
+    переходы stay / +1 / +2 (скип blank между РАЗНЫМИ метками). Viterbi (max) с backpointer'ами,
+    backtrack → path[t] = позиция в расширенной посл-ти на кадре t. Возвращает (path, ext).
 
-def _fill_starts(windows, verses, dur):
-    """Недостающие старты аятов — линейной интерполяцией по накопленному числу слов между якорями."""
-    n = len(verses)
-    nwords = [len(v[2].split()) for v in verses]
-    cum = [0]
-    for k in nwords:
-        cum.append(cum[-1] + k)
-    starts = [w[0] if w and w[0] is not None else None for w in windows]
-    known = [i for i, s in enumerate(starts) if s is not None]
-    if not known:
-        total = cum[-1] or 1
-        return [dur * cum[i] / total for i in range(n)]
-    out = [None] * n
-    for i in range(n):
-        if starts[i] is not None:
-            out[i] = float(starts[i]); continue
-        left = max([k for k in known if k < i], default=None)
-        right = min([k for k in known if k > i], default=None)
-        if left is not None and right is not None:
-            f = (cum[i] - cum[left]) / max(1, cum[right] - cum[left])
-            out[i] = starts[left] + (starts[right] - starts[left]) * f
-        elif left is not None:
-            f = (cum[i] - cum[left]) / max(1, cum[-1] - cum[left])
-            out[i] = starts[left] + (dur - starts[left]) * f
-        else:
-            out[i] = starts[right] * (cum[i] / max(1, cum[right]))
-    return out
-
-
-def _build_segments(verses, starts, dur, vranges):
-    """Сегменты ≤ _MAX_WINDOW_SEC с контекстом ±_CTX_AYAT аята (overlap).
-
-    vranges — [(rstart, rend), ...] диапазон ref-индексов слов на каждый аят.
-    Возвращает [(win_start, win_end, text, ref_indices)]: ref_indices — плоские индексы ref-слов
-    в порядке текста, ВКЛЮЧАЯ контекст (по ним потом маплем обратно и выбираем interior).
+    Ключевое: скип на blank-цель запрещён (ext[s]==ext[s-2]==blank) → путь ОБЯЗАН постоять на
+    каждой метке ≥1 кадр → ни одно слово не «схлопывается» в ноль (в отличие от whisperx-рутины).
     """
-    n = len(verses)
-    segs = []
-    i = 0
-    while i < n:
-        j = i
-        while j + 1 < n and (starts[j + 1] - starts[i]) < _MAX_WINDOW_SEC:
-            j += 1
-        ci = max(0, i - _CTX_AYAT)
-        cj = min(n - 1, j + _CTX_AYAT)
-        win_start = max(0.0, starts[ci] - _WINDOW_PAD)
-        win_end = min(dur, (starts[cj + 1] if cj + 1 < n else dur) + _WINDOW_PAD)
-        text = " ".join(verses[k][2] for k in range(ci, cj + 1))
-        ref_idx = list(range(vranges[ci][0], vranges[cj][1]))
-        segs.append((win_start, win_end, text, ref_idx))
-        i = j + 1
-    return segs
+    import numpy as np
+    T = E.shape[0]
+    L = len(labels)
+    S = 2 * L + 1
+    ext = np.empty(S, dtype=np.int64)
+    ext[0] = blank
+    ext[1::2] = labels
+    ext[2::2] = blank
+    skip = np.zeros(S, dtype=bool)
+    skip[2:] = (ext[2:] != blank) & (ext[2:] != ext[:-2])
+
+    NEG = -1e30
+    alpha = np.full(S, NEG, dtype=np.float64)
+    alpha[0] = float(E[0, ext[0]])
+    if S > 1:
+        alpha[1] = float(E[0, ext[1]])
+    bp = np.zeros((T, S), dtype=np.int8)     # 0=stay(s), 1=из s-1, 2=из s-2
+    idxS = np.arange(S)
+    for t in range(1, T):
+        e_t = E[t, ext]                      # [S] gather (без материализации [T,S])
+        frm1 = np.empty(S); frm1[0] = NEG; frm1[1:] = alpha[:-1]
+        frm2 = np.full(S, NEG); frm2[2:] = np.where(skip[2:], alpha[:-2], NEG)
+        cand = np.stack([alpha, frm1, frm2])  # [3,S]: stay / +1 / +2
+        c = cand.argmax(axis=0)
+        alpha = cand[c, idxS] + e_t
+        bp[t] = c.astype(np.int8)
+
+    end_s = S - 1 if (S == 1 or alpha[S - 1] >= alpha[S - 2]) else S - 2
+    path = np.empty(T, dtype=np.int64)
+    s = end_s
+    for t in range(T - 1, -1, -1):
+        path[t] = s
+        cc = int(bp[t, s])
+        if cc == 1:
+            s -= 1
+        elif cc == 2:
+            s -= 2
+    return path, ext
 
 
-def align(audio_path, verses, windows=None, snap: bool | None = None) -> dict:
-    """wav2vec2 forced alignment диапазона аятов к аудио. GPU обязателен.
+def forced_align(E, stride_ms: float, verses, idx2ch: dict, ch2idx: dict,
+                 audio_path, snap: bool | None = None) -> dict:
+    """СВОЙ CTC-forced-align диапазона аятов к аудио по готовым эмиссиям E (Viterbi). GPU не нужен
+    (эмиссии уже посчитаны в `emissions()`), считаем на CPU.
 
-    verses — [(surah, ayah, text), ...]. windows — [[start,end], ...] по verses (грубые тайминги
-    аятов из ASR для нарезки; None → один сегмент, только для коротких записей).
+    verses — [(surah, ayah, text), ...] (диапазон нашёл w2v_range из своей акустики). Онсет каждого
+    слова = время первого кадра его первой метки; слово ВЛАДЕЕТ временем до онсета следующего слова
+    (мадд/хвост честно висит на слове-держателе), затем снап к тишине поджимает реальные паузы.
     """
-    import whisperx
-    import torch
+    import numpy as np
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device != "cuda":
-        raise RuntimeError("w2v_align требует GPU (torch.cuda недоступна) — CPU не гоняем")
-
-    # выкинуть токены-вакфы/паузы (знаки-неслова) из текста аятов — единая безвакфовая индексация
-    # wi (как align.py/build_data); дальше весь пайплайн (ref/сегменты/счётчики) на очищенном тексте.
+    # выкинуть токены-вакфы/паузы из текста аятов — единая безвакфовая индексация wi (как build_data)
     verses = [(s, a, " ".join(quranmod.word_tokens(t))) for s, a, t in verses]
 
-    # ref: плоский список слов + диапазоны индексов на аят
-    ref = []
-    vranges = []
+    # плоский ref: слова диапазона по порядку
+    ref = []                     # (surah, ayah, wi, arabic_word)
     for surah, ayah, txt in verses:
-        r0 = len(ref)
         for wi, w in enumerate(txt.split()):
             ref.append((surah, ayah, wi, w))
-        vranges.append((r0, len(ref)))
-    ref_words = [r[3] for r in ref]
 
-    audio = whisperx.load_audio(str(audio_path))
-    dur = len(audio) / SAMPLE_RATE
-    model_a, meta_a = _load_model(device)
+    blank = ch2idx.get("<pad>", 0)
+    labels, lab_word = [], []    # id-метки vocab + индекс слова (в ref) для каждой метки
+    for gi, (_s, _a, _wi, w) in enumerate(ref):
+        for ch in w:
+            j = ch2idx.get(ch)
+            if j is None or j == blank:
+                continue         # символа нет в vocab (напр. надстрочный алеф U+0670) — пропускаем
+            labels.append(j)
+            lab_word.append(gi)
 
-    if windows:
-        starts = _fill_starts(windows, verses, dur)
-        segments = _build_segments(verses, starts, dur, vranges)
-    else:
-        segments = [(0.0, dur, " ".join(v[2] for v in verses), list(range(len(ref))))]
+    T = int(E.shape[0])
+    if not labels or T == 0:
+        return _empty(ref)
 
-    seg_inputs = [{"start": s, "end": e, "text": t} for s, e, t, _ in segments]
-    res = whisperx.align(seg_inputs, model_a, meta_a, audio, device, return_char_alignments=False)
-    torch.cuda.empty_cache()
-    res_segments = res.get("segments", [])
+    path, _ext = _ctc_viterbi(E, labels, blank)
+    sec = stride_ms / 1000.0
+    L = len(labels)
 
-    # кандидаты на каждый ref-индекс: (t, t_end, edge_dist). Берём с макс edge_dist (interior).
-    best = {}  # gi -> (t, t_end, edge_dist)
-    for k, (win_s, win_e, _text, ref_idx) in enumerate(segments):
-        if k >= len(res_segments):
-            break
-        wx = [w for w in (res_segments[k].get("words") or [])
-              if w.get("start") is not None and w.get("end") is not None]
-        seg_ref_norm = [_norm(ref_words[gi]) for gi in ref_idx]
-        wx_norm = [_norm(w.get("word", "")) for w in wx]
-        sm = difflib.SequenceMatcher(a=seg_ref_norm, b=wx_norm, autojunk=False)
-        for tag, i1, i2, j1, j2 in sm.get_opcodes():
-            if tag in ("equal", "replace"):
-                for d in range(min(i2 - i1, j2 - j1)):
-                    gi = ref_idx[i1 + d]
-                    w = wx[j1 + d]
-                    s, e = float(w["start"]), float(w["end"])
-                    if e <= s:
-                        continue
-                    mid = (s + e) / 2
-                    edge = min(mid - win_s, win_e - mid)
-                    prev = best.get(gi)
-                    if prev is None or edge > prev[2]:
-                        best[gi] = (s, e, edge)
+    # первый/последний кадр каждой метки (метка li в расширенной посл-ти на позиции 2*li+1 — нечётной)
+    first = [-1] * L
+    last = [-1] * L
+    for t in range(T):
+        s = int(path[t])
+        if s & 1:                # нечётная позиция → реальная метка
+            li = (s - 1) // 2
+            if first[li] < 0:
+                first[li] = t
+            last[li] = t
+
+    # онсет/конец слова из его меток
+    w_first, w_last = {}, {}
+    for li, gi in enumerate(lab_word):
+        if first[li] < 0:
+            continue
+        if gi not in w_first:
+            w_first[gi] = first[li]
+        w_last[gi] = last[li]
+    known = sorted(w_first)      # слова с метками, по возрастанию (путь монотонен → онсеты растут)
 
     bounds_opt = [None] * len(ref)
-    for gi, (s, e, _edge) in best.items():
-        bounds_opt[gi] = (s, e)
-    matched = sum(1 for b in bounds_opt if b is not None)
+    for idx, gi in enumerate(known):
+        f0 = w_first[gi]
+        # слово владеет временем ДО онсета следующего слова (мадд/протяжка висит на держателе);
+        # последнее слово — до последнего своего кадра (+1).
+        f1 = w_first[known[idx + 1]] if idx + 1 < len(known) else (w_last[gi] + 1)
+        t0 = f0 * sec
+        t1 = max(f0 + 1, f1) * sec
+        bounds_opt[gi] = (t0, t1)
+    matched = len(known)
 
     bounds, interp_flags = _interp_missing(bounds_opt)
 
-    # подтяжка границ к тишине (RMS), только у реально выровненных (опт-аут SYNC_W2V_SNAP=0)
+    # снап к тишине (RMS): поджать границы ТОЛЬКО внутрь к речи. Мадд = речь → держится; реальная
+    # пауза → триммится (заливка замирает на 100%, подсветка ждёт след. слово). Опт-аут SYNC_W2V_SNAP=0.
+    audio = _load_wav(audio_path)
     snapped = 0
     do_snap = (os.environ.get("SYNC_W2V_SNAP", "1") != "0") if snap is None else snap
     if do_snap:
@@ -234,7 +241,7 @@ def align(audio_path, verses, windows=None, snap: bool | None = None) -> dict:
         for k, i in enumerate(real_idx):
             bounds[i] = snapped_bounds[k]
 
-    # строгий рост t + сборка дорожек
+    # сборка дорожек
     word_timeline, timeline, char_timeline = [], [], []
     seen_ayah = set()
     for i, (surah, ayah, wi, arabic) in enumerate(ref):
@@ -257,43 +264,18 @@ def align(audio_path, verses, windows=None, snap: bool | None = None) -> dict:
                 ct1 = t0 + (t1 - t0) * (frac0 if ch in _HARAKAT else frac1)
                 char_timeline.append({"t": round(ct0, 3), "t_end": round(ct1, 3),
                                       "surah": surah, "ayah": ayah, "wi": wi, "ci": ci})
-    # РАЗЛОЖИТЬ слипшиеся прогоны: на мелодичном таджвиде whisperx не может акустически разделить
-    # серию слов (буквы-blank) → сваливает их в ОДИН момент (rec7: 6:102:10..103:7 все в 210.16с,
-    # collapsed_words=14 → подсветка проскакивает). Слова РЕАЛЬНО читаются, аллайнер лишь не разделил
-    # → честно растягиваем серию равномерно по времени до следующего распознанного слова (как align.py
-    # интерполирует пропущенные; НЕ замазка — слова звучат в этом окне). t_end снимаем (нет реального).
-    i = 0
-    n_wt = len(word_timeline)
-    while i < n_wt:
-        j = i
-        while j + 1 < n_wt and abs(word_timeline[j + 1]["t"] - word_timeline[i]["t"]) < 0.05:
-            j += 1
-        if j - i >= 2:                                   # ≥3 слова в один момент — слипшийся прогон
-            t0 = word_timeline[i]["t"]
-            t1 = word_timeline[j + 1]["t"] if j + 1 < n_wt else t0 + (j - i + 1) * 0.3
-            if t1 <= t0:
-                t1 = t0 + (j - i + 1) * 0.3
-            span = t1 - t0
-            for k in range(i, j + 1):
-                word_timeline[k]["t"] = round(t0 + span * (k - i) / (j - i + 1), 3)
-                word_timeline[k].pop("t_end", None)      # интерполированному конца не даём
-                word_timeline[k]["spread"] = True
-            i = j + 1
-        else:
-            i += 1
+
+    # строгий рост t (страховка — онсеты уже растут) + чистка невалидного t_end
     for i in range(1, len(word_timeline)):
         if word_timeline[i]["t"] <= word_timeline[i - 1]["t"]:
             word_timeline[i]["t"] = round(word_timeline[i - 1]["t"] + 0.001, 3)
-        # форс монотонности сдвинул старт вперёд — исходный t_end мог стать < t (частый случай на
-        # повторяющихся рефренах, напр. Ар-Рахман: w2v матчит рефрен не с тем вхождением → слово
-        # выровнено назад по времени, монотонность схлопывает его). Невалидному t_end не верим.
         te = word_timeline[i].get("t_end")
         if te is not None and te <= word_timeline[i]["t"]:
             del word_timeline[i]["t_end"]
 
     meta = {
-        "aligner": "wav2vec2-whisperx",
-        "align_model": _ALIGN_MODEL or "jonatasgrosman/wav2vec2-large-xlsr-53-arabic",
+        "aligner": "wav2vec2-ctc-viterbi",
+        "align_model": _MODEL_NAME,
         "ref_words": len(ref),
         "aligned_units": matched,
         "coverage": round(matched / len(ref), 3) if ref else 0.0,
@@ -301,10 +283,17 @@ def align(audio_path, verses, windows=None, snap: bool | None = None) -> dict:
         "snapped_to_silence": snapped,
         "wt": len(word_timeline),
         "ct": len(char_timeline),
-        "device": device,
+        "device": "cuda",
     }
     return {"meta": meta, "timeline": timeline,
             "word_timeline": word_timeline, "char_timeline": char_timeline}
+
+
+def _empty(ref) -> dict:
+    """Вырожденный результат (нет меток/кадров) — пустые дорожки, чтобы пайплайн не падал."""
+    return {"meta": {"aligner": "wav2vec2-ctc-viterbi", "ref_words": len(ref),
+                     "aligned_units": 0, "coverage": 0.0, "wt": 0, "ct": 0},
+            "timeline": [], "word_timeline": [], "char_timeline": []}
 
 
 def _interp_missing(bounds):

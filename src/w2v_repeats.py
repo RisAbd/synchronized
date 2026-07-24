@@ -47,8 +47,8 @@ def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_pa
     """Вернуть список word_timeline-точек перечиток (rep=True) для вклейки. При проблеме → []."""
     try:
         import numpy as np
-        import whisperx
         import quran as quranmod
+        import w2v_align
 
         special = {ch2idx.get(t) for t in ("<pad>", "<s>", "</s>", "<unk>", "|", "-", "ـ")} - {None}
         blank = ch2idx.get("<pad>", 0)
@@ -85,8 +85,8 @@ def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_pa
                 prev = a
             return _askel("".join(out))
 
-        # RMS-речь
-        audio = whisperx.load_audio(str(audio_path))
+        # RMS-речь (аудио грузим тем же независимым загрузчиком, что и forced_align — без whisperx)
+        audio = w2v_align._load_wav(audio_path)
         frame_len = max(1, int(SAMPLE_RATE * _SNAP_FRAME_MS / 1000))
         db = falign._frame_db(audio, frame_len)
         speech = None
