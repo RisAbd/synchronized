@@ -49,24 +49,44 @@ def greedy_skeleton(emissions: np.ndarray, idx2ch: dict, special: set, times: bo
 
 
 def ayah_start_hints(emissions, verses, index, idx2ch, ch2idx, stride_ms):
-    """Грубые старты аятов (с) из СВОЕЙ акустики (k-грамм-попадания decode-время→аят) — для нарезки
-    длинного аудио в force-align БЕЗ ASR-таймлайна. verses=[(surah,ayah,text)] в порядке. Возвращает
-    список стартов (с) по verses (None где нет опоры — потом интерполируется _fill_starts)."""
+    """Старты аятов (с) из СВОЕЙ акустики — для нарезки длинного аудио в force-align БЕЗ ASR.
+
+    Выравниваем ВЕСЬ decode-скелет к склеенному согласному тексту диапазона одним difflib →
+    matching-блоки дают соответствие decode-позиция↔позиция-в-тексте. Для КАЖДОЙ границы аята
+    (накопленный char-offset в тексте) берём ближайший блок → decode-позиция → время (по stride).
+    Плотнее и надёжнее k-грамм (у мелодичных аятов k-грамм-попаданий нет, а difflib-блок находится
+    от соседей). verses=[(surah,ayah,text)]. Возвращает старты (с) по verses (None где не легло)."""
+    import difflib
     special = {ch2idx.get(t) for t in ("<pad>", "<s>", "</s>", "<unk>", "|", "-", "ـ")} - {None}
-    _Cs, char2fa, kidx, flat_ayahs, _fa_skel = index
-    fa_of = {key: i for i, key in enumerate(flat_ayahs)}
+    _Cs, _char2fa, _kidx, _flat, _fa_skel = index
     dec, ts = greedy_skeleton(emissions, idx2ch, special, times=True, stride_ms=stride_ms)
-    # для каждого плоского аята — времена decode-позиций, чьи k-граммы туда попали (монотонный отбор)
-    hit_times = {}
-    for sp in range(len(dec) - _K + 1):
-        for cp in kidx.get(dec[sp:sp + _K], ()):
-            hit_times.setdefault(char2fa[cp], []).append(ts[sp])
-    starts = []
-    for s, a, _ in verses:
-        fa = fa_of.get((s, a))
-        tv = hit_times.get(fa) if fa is not None else None
-        starts.append(float(np.percentile(tv, 20)) if tv else None)
-    # монотонизируем (старты аятов растут; выбросы назад роняем в None → интерполяция)
+
+    from quran import normalize
+    ay_skel = [normalize(t).replace(" ", "") for _, _, t in verses]
+    ref = "".join(ay_skel)
+    # накопленный char-offset начала каждого аята в ref
+    offsets, acc = [], 0
+    for sk in ay_skel:
+        offsets.append(acc); acc += len(sk)
+
+    sm = difflib.SequenceMatcher(None, dec, ref, autojunk=False)
+    blocks = [b for b in sm.get_matching_blocks() if b.size > 0]   # (a=decode_pos, b=ref_pos, size)
+    if not blocks:
+        return [None] * len(verses)
+
+    def ref_to_time(off):
+        """Ближайшая по ref-позиции точка соответствия → её decode-время."""
+        best = None
+        for b in blocks:
+            if b.b <= off < b.b + b.size:            # offset внутри блока → точное соответствие
+                return ts[b.a + (off - b.b)]
+            d = min(abs(b.b - off), abs(b.b + b.size - off))
+            if best is None or d < best[0]:
+                best = (d, b.a)
+        return ts[best[1]] if best else None
+
+    starts = [ref_to_time(off) for off in offsets]
+    # монотонизируем (старты аятов растут; выбросы назад/невалидные → None → интерполяция _fill_starts)
     mono, last = [], -1.0
     for x in starts:
         if x is None or x < last:
