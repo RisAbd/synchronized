@@ -257,6 +257,30 @@ def align(audio_path, verses, windows=None, snap: bool | None = None) -> dict:
                 ct1 = t0 + (t1 - t0) * (frac0 if ch in _HARAKAT else frac1)
                 char_timeline.append({"t": round(ct0, 3), "t_end": round(ct1, 3),
                                       "surah": surah, "ayah": ayah, "wi": wi, "ci": ci})
+    # РАЗЛОЖИТЬ слипшиеся прогоны: на мелодичном таджвиде whisperx не может акустически разделить
+    # серию слов (буквы-blank) → сваливает их в ОДИН момент (rec7: 6:102:10..103:7 все в 210.16с,
+    # collapsed_words=14 → подсветка проскакивает). Слова РЕАЛЬНО читаются, аллайнер лишь не разделил
+    # → честно растягиваем серию равномерно по времени до следующего распознанного слова (как align.py
+    # интерполирует пропущенные; НЕ замазка — слова звучат в этом окне). t_end снимаем (нет реального).
+    i = 0
+    n_wt = len(word_timeline)
+    while i < n_wt:
+        j = i
+        while j + 1 < n_wt and abs(word_timeline[j + 1]["t"] - word_timeline[i]["t"]) < 0.05:
+            j += 1
+        if j - i >= 2:                                   # ≥3 слова в один момент — слипшийся прогон
+            t0 = word_timeline[i]["t"]
+            t1 = word_timeline[j + 1]["t"] if j + 1 < n_wt else t0 + (j - i + 1) * 0.3
+            if t1 <= t0:
+                t1 = t0 + (j - i + 1) * 0.3
+            span = t1 - t0
+            for k in range(i, j + 1):
+                word_timeline[k]["t"] = round(t0 + span * (k - i) / (j - i + 1), 3)
+                word_timeline[k].pop("t_end", None)      # интерполированному конца не даём
+                word_timeline[k]["spread"] = True
+            i = j + 1
+        else:
+            i += 1
     for i in range(1, len(word_timeline)):
         if word_timeline[i]["t"] <= word_timeline[i - 1]["t"]:
             word_timeline[i]["t"] = round(word_timeline[i - 1]["t"] + 0.001, 3)
