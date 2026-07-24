@@ -474,11 +474,11 @@ def run_one(run, on_stage=None) -> None:
         # Подпроцесс грузит фреймворк, пишет sync-map.json, выходит → VRAM освобождается целиком.
         _run_aligner_subprocess(rec.id, run.recognizer, out)
         sync_map = json.loads((out / "sync-map.json").read_text())
-        # w2v монотонен и возвраты чтеца (П8) не выражает — переносим готовые rep-точки из
-        # forced-прогона (тот же детектор по MMS-эмиссиям, тот же файл). До build_data, чтобы
-        # rep-точки прошли ту же сборку word_timeline, что и у forced.
-        if run.recognizer == rz.W2V:
-            _inherit_repeats(rec, sync_map)
+        # w2v — ПОЛНОСТЬЮ независимый источник (директива владельца 24.07): диапазон он определяет
+        # сам (w2v_range в gpu_align), возвраты чтеца (П8) — тоже из СВОЕЙ акустики (w2v_repeats,
+        # задача #3). Наследование rep-точек из forced (_inherit_repeats) УБРАНО — никаких данных
+        # от других источников. До реализации нативных возвратов w2v на записях с перечиткой
+        # временно без rep-точек (база выравнивания корректна).
     else:
         import align as align_mod
         stage("asr")

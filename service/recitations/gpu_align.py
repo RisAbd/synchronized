@@ -45,20 +45,31 @@ def main() -> int:
         import w2v_align
         import w2v_range
         from quran import Quran
-        E, _stride, idx2ch, ch2idx = w2v_align.emissions(str(audio))
+        E, stride, idx2ch, ch2idx = w2v_align.emissions(str(audio))
         q = Quran.load()
-        rng = w2v_range.find_range(E, q, idx2ch, ch2idx)   # [(surah, ayah), ...] по порядку
+        index = w2v_range.build_index(q)
+        rng = w2v_range.find_range(E, q, idx2ch, ch2idx, index=index)   # [(surah, ayah), ...]
         if not rng:
             print("w2v: не удалось определить диапазон из акустики", file=sys.stderr)
             return 3
         verses = [(s, a, q.surah(s).verses[a - 1].text) for s, a in rng]
-        # окна аятов w2v НЕ знает заранее (нет ASR-таймлайна) → равномерная нарезка длинного аудио
-        # (для памяти whisperx); _fill_starts раскидает старты по числу слов. Ноль данных от ASR.
-        windows = [[None, None] for _ in verses]
+        # грубые старты аятов для нарезки длинного аудио — из СВОЕЙ акустики (k-грамм-попадания
+        # decode-время→аят), НЕ из ASR-таймлайна. _fill_starts добьёт пропуски интерполяцией.
+        starts = w2v_range.ayah_start_hints(E, verses, index, idx2ch, ch2idx, stride)
+        windows = [[st, None] for st in starts]
         sync_map = w2v_align.align(str(audio), verses, windows=windows)
+        # возвраты/перечитки чтеца (П8) из СВОЕЙ акустики w2v (не наследуем у forced) — вклейка
+        # rep-точек в word_timeline, как в falign.align. Эмиссии переиспользуем (посчитаны выше).
+        import w2v_repeats
+        reps = w2v_repeats.detect(E, stride, idx2ch, ch2idx,
+                                  sync_map["word_timeline"], verses, str(audio))
+        if reps:
+            sync_map["word_timeline"].extend(reps)
+            sync_map["word_timeline"].sort(key=lambda w: (w["t"], w["surah"], w["ayah"], w["wi"]))
         meta = sync_map.setdefault("meta", {})
         meta["range_source"] = "w2v-self"
         meta["range"] = f"{rng[0][0]}:{rng[0][1]}..{rng[-1][0]}:{rng[-1][1]}"
+        meta["repeats_inserted"] = len(reps)
     else:
         src = pipeline._forced_source(rec)
         if src is None:

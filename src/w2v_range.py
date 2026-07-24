@@ -32,16 +32,48 @@ _REGION_MARGIN = 6        # ± аятов запаса вокруг плотно
 
 # --- greedy-декод эмиссий → согласный скелет (нормализация как у корпуса quran) ---
 
-def greedy_skeleton(emissions: np.ndarray, idx2ch: dict, special: set) -> str:
-    """argmax + collapse + выброс blank/служебных → буквы, нормализованные как корпус (fold+strip)."""
+def greedy_skeleton(emissions: np.ndarray, idx2ch: dict, special: set, times: bool = False,
+                    stride_ms: float = 20.0):
+    """argmax + collapse + выброс blank/служебных → буквы, нормализованные как корпус (fold+strip).
+    times=True → вернуть (skel, char_times) где char_times[k] — время (с) появления символа k."""
     ids = emissions.argmax(axis=1)
-    out, prev = [], -1
-    for a in ids:
+    out, ts, prev = [], [], -1
+    for fi, a in enumerate(ids):
         a = int(a)
         if a != prev and a not in special:
-            out.append(idx2ch.get(a, "").translate(_STRIP_TABLE).translate(_FOLD_TABLE))
+            ch = idx2ch.get(a, "").translate(_STRIP_TABLE).translate(_FOLD_TABLE)
+            for c in ch:
+                out.append(c); ts.append(fi * stride_ms / 1000.0)
         prev = a
-    return "".join(out)
+    return ("".join(out), ts) if times else "".join(out)
+
+
+def ayah_start_hints(emissions, verses, index, idx2ch, ch2idx, stride_ms):
+    """Грубые старты аятов (с) из СВОЕЙ акустики (k-грамм-попадания decode-время→аят) — для нарезки
+    длинного аудио в force-align БЕЗ ASR-таймлайна. verses=[(surah,ayah,text)] в порядке. Возвращает
+    список стартов (с) по verses (None где нет опоры — потом интерполируется _fill_starts)."""
+    special = {ch2idx.get(t) for t in ("<pad>", "<s>", "</s>", "<unk>", "|", "-", "ـ")} - {None}
+    _Cs, char2fa, kidx, flat_ayahs, _fa_skel = index
+    fa_of = {key: i for i, key in enumerate(flat_ayahs)}
+    dec, ts = greedy_skeleton(emissions, idx2ch, special, times=True, stride_ms=stride_ms)
+    # для каждого плоского аята — времена decode-позиций, чьи k-граммы туда попали (монотонный отбор)
+    hit_times = {}
+    for sp in range(len(dec) - _K + 1):
+        for cp in kidx.get(dec[sp:sp + _K], ()):
+            hit_times.setdefault(char2fa[cp], []).append(ts[sp])
+    starts = []
+    for s, a, _ in verses:
+        fa = fa_of.get((s, a))
+        tv = hit_times.get(fa) if fa is not None else None
+        starts.append(float(np.percentile(tv, 20)) if tv else None)
+    # монотонизируем (старты аятов растут; выбросы назад роняем в None → интерполяция)
+    mono, last = [], -1.0
+    for x in starts:
+        if x is None or x < last:
+            mono.append(None)
+        else:
+            mono.append(x); last = x
+    return mono
 
 
 def build_index(quran):
