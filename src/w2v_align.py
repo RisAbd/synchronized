@@ -48,6 +48,43 @@ def _norm(w: str) -> str:
     return quranmod.normalize(w)
 
 
+def emissions(audio_path, window_sec: float = 20.0):
+    """wav2vec2 CTC log-softmax эмиссии по ВСЕЙ записи (окнами, чтобы влезть в 6ГБ) — GPU.
+
+    Возвращает (E, stride_ms, idx2ch, ch2idx): E[кадр, класс] float32 (log-prob), шаг кадра в мс,
+    словарь класс↔символ модели. Это сырьё для независимого определения диапазона (`w2v_range`,
+    CTC-скоринг) и для детекта возвратов из СВОЕЙ акустики — БЕЗ данных других распознавателей."""
+    import numpy as np
+    import torch
+    import whisperx
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device != "cuda":
+        raise RuntimeError("w2v emissions требует GPU")
+    model_a, meta_a = _load_model(device)
+    dictionary = meta_a["dictionary"]
+    idx2ch = {int(v): k for k, v in dictionary.items()}
+    ch2idx = {k: int(v) for k, v in dictionary.items()}
+
+    audio = whisperx.load_audio(str(audio_path))
+    dur = len(audio) / SAMPLE_RATE
+    chunks, strides = [], []
+    t = 0.0
+    while t < dur:
+        e = min(dur, t + window_sec)
+        seg = audio[int(t * SAMPLE_RATE):int(e * SAMPLE_RATE)]
+        wav = torch.from_numpy(seg).to(device).unsqueeze(0)
+        with torch.inference_mode():
+            emis = torch.log_softmax(model_a(wav).logits, dim=-1)[0].cpu().numpy().astype("float32")
+        chunks.append(emis)
+        strides.append((e - t) / len(emis))
+        t = e
+    torch.cuda.empty_cache()
+    E = np.concatenate(chunks, axis=0)
+    stride_ms = float(np.mean(strides) * 1000)
+    return E, stride_ms, idx2ch, ch2idx
+
+
 def _load_model(device: str):
     global _align_model, _align_meta
     if _align_model is None:
