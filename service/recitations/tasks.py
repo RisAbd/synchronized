@@ -66,18 +66,18 @@ def _maybe_forced(rec, refresh: bool = False) -> None:
 
 
 def _maybe_w2v(rec, refresh: bool = False) -> None:
-    """Авто-пост-шаг: wav2vec2-выравнивание (whisperx) поверх готового ASR-прогона — аналог
-    `_maybe_forced`, но держит мадд → честный coverage, и это ДЕФОЛТНЫЙ выравниватель в плеере
-    (порядок REGISTRY: w2v выше forced). torch(cu124)+whisperx теперь в docker-воркере, поэтому
-    w2v-прогон заводится автоматически на каждую запись (раньше требовал ручного host-прогона).
-    В окружении без whisperx/torch (голый CPU-образ) — ТИХО пропускаем, запись живёт по forced/ASR.
-    refresh=True — пересчитать даже готовый (диапазон-источник мог смениться после пересчёта ASR)."""
+    """wav2vec2-источник (whisperx) — ПОЛНОСТЬЮ независим (директива владельца): audio → своя
+    акустика → сам находит диапазон (w2v_range) → выравнивание → свои возвраты. НЕ поверх ASR, ASR
+    ему не нужен (в отличие от forced/`_maybe_forced`, который берёт диапазон у ASR). Держит мадд →
+    честный coverage; дефолтный выравниватель в плеере (REGISTRY: w2v выше forced). torch(cu124)+
+    whisperx в docker-воркере → заводится автоматически на каждую запись. Без whisperx/torch (голый
+    CPU-образ) — ТИХО пропускаем. refresh=True — пересчитать даже готовый."""
     from .models import AsrRun, Status
-    from . import pipeline, recognizers as rz
+    from . import recognizers as rz
 
     key = rz.W2V
-    if pipeline._forced_source(rec) is None:
-        return  # нет готового ASR-источника с диапазоном аятов — нечего выравнивать
+    # w2v ПОЛНОСТЬЮ независим (директива владельца): диапазон определяет своей акустикой
+    # (w2v_range) — ASR-источник ему НЕ нужен. Никакого гейта на _forced_source.
     try:
         import w2v_align
         if not w2v_align.available():
