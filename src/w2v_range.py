@@ -28,6 +28,7 @@ from quran import _FOLD_TABLE, _STRIP_TABLE
 _K = 5                    # длина k-граммы для буквенной локализации
 _NEG = -1e9
 _REGION_MARGIN = 6        # ± аятов запаса вокруг плотного кластера (CTC добьёт точную границу)
+_REFINE_BAND = 4          # ± аятов точного difflib-добора вокруг приближённой (по префиксам) границы
 
 
 # --- greedy-декод эмиссий → согласный скелет (нормализация как у корпуса quran) ---
@@ -241,17 +242,60 @@ def find_range(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
         s0, a0 = flat_ayahs[lo]; s1, a1 = flat_ayahs[hi]
         print(f"буквенный регион: {s0}:{a0}..{s1}:{a1} ({hi-lo+1} аятов)")
 
-    # 2) ПОЛНЫЙ перебор окон в регионе (difflib дёшев): для каждого старта i0 — все концы i1 в
-    # пределах разумной длины; берём максимум ratio. Жадный добор застревал в локальном оптимуме
-    # (rec7 6:95-110 ratio 0.313 вместо истинного 6:95-103 0.338); перебор находит глобальный.
-    max_len = hi - lo + 1
-    best = (-1.0, lo, lo)
-    for i0 in range(lo, hi + 1):
-        for i1 in range(i0, min(hi, i0 + max_len) + 1):
-            v = _difflib_score(dec, "".join(fa_skel[i0:i1 + 1]))
-            if v > best[0]:
-                best = (v, i0, i1)
-    cur, i0, i1 = best
+    # 2) границы окна. Полный O(регион²) перебор difflib НЕ масштабируется на длинные суры (целая
+    # Марьям: регион ~121 аят, декод 18-мин записи → difflib на огромных строках × тысячи окон =
+    # минуты-десятки минут CPU). Дёшево и точно:
+    #   (а) ОДНО глобальное difflib-выравнивание декода к тексту всего региона → matching-блоки →
+    #       matched-символов на каждый аят (cov[k]);
+    #   (б) АППРОКСИМАЦИЯ той же метрики ratio≈2·ΣCov/(len(dec)+ΣLen) через ПРЕФИКС-СУММЫ: максимум
+    #       по ВСЕМ окнам за O(регион²) чистой арифметики (микросекунды, без difflib);
+    #   (в) КРОШЕЧНЫЙ добор ±_REFINE_BAND настоящей метрикой _difflib_score (десятки вызовов) —
+    #       правит приближение до точного max. Результат тот же (rec5 25:63-77, rec7 6:95-103),
+    #       но find_range секунды вместо минут даже на целой суре.
+    region_skels = fa_skel[lo:hi + 1]
+    nreg = len(region_skels)
+    char2ay = []                              # char-позиция в region_text → локальный индекс аята
+    for k, sk in enumerate(region_skels):
+        char2ay.extend([k] * len(sk))
+    region_text = "".join(region_skels)
+
+    import difflib
+    sm = difflib.SequenceMatcher(None, dec, region_text, autojunk=False)
+    cov = [0] * nreg
+    for b in sm.get_matching_blocks():
+        for pos in range(b.b, b.b + b.size):
+            cov[char2ay[pos]] += 1
+    lens = [len(sk) for sk in region_skels]
+    pc = [0] * (nreg + 1)                      # префикс-суммы matched (cov)
+    pl = [0] * (nreg + 1)                      # префикс-суммы длин аятов
+    for k in range(nreg):
+        pc[k + 1] = pc[k] + cov[k]
+        pl[k + 1] = pl[k] + lens[k]
+    Ld = len(dec)
+    # (б) приближённый максимум ratio по всем окнам (арифметика на префиксах)
+    e0 = e1 = 0
+    best_ar = -1.0
+    for a in range(nreg):
+        for b in range(a, nreg):
+            m = pc[b + 1] - pc[a]
+            if m == 0:
+                continue
+            ar = 2.0 * m / (Ld + (pl[b + 1] - pl[a]))
+            if ar > best_ar:
+                best_ar = ar; e0, e1 = a, b
+
+    # (в) узкий добор точной метрикой по НЕЗАВИСИМЫМ осям (O(band), не O(band²)): при конце=e1
+    # ищем лучший старт в ±B, затем при этом старте — лучший конец в ±B. На длинной суре каждый
+    # _difflib_score дорог (окно ~тысячи симв.), поэтому десятки вызовов, не сотни.
+    B = _REFINE_BAND
+    def _score(a, b):
+        return _difflib_score(dec, "".join(region_skels[a:b + 1]))
+    cand0 = range(max(0, e0 - B), min(nreg, e0 + B + 1))
+    c0 = max(cand0, key=lambda a: _score(a, e1))
+    cand1 = [b for b in range(max(0, e1 - B), min(nreg, e1 + B + 1)) if b >= c0]
+    c1 = max(cand1, key=lambda b: _score(c0, b)) if cand1 else e1
+    cur = _score(c0, c1)
+    i0, i1 = lo + c0, lo + c1
     verses = flat_ayahs[i0:i1 + 1]
     if verbose:
         s0, a0 = verses[0]; s1, a1 = verses[-1]
