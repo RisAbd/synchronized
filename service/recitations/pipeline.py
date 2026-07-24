@@ -331,26 +331,50 @@ def _inherit_repeats(rec, sync_map: dict) -> int:
         return 0
     w2v_wt = sync_map.get("word_timeline") or []
 
-    def by_ayah(wt):
-        d = {}
-        for w in wt:
-            d.setdefault((w["surah"], w["ayah"]), []).append(w)
-        return d
-    f_ay, v_ay = by_ayah(forced_wt), by_ayah(w2v_wt)
+    def key_of(w):
+        return (w["surah"], w["ayah"], w["wi"])
 
-    ayahs = {(w["surah"], w["ayah"]) for w in reps}
-    for key in ayahs:
-        rep_wis = [w["wi"] for w in reps if (w["surah"], w["ayah"]) == key]
-        f_t = {w["wi"]: w["t"] for w in f_ay.get(key, []) if not w.get("rep")}
-        v_t = {w["wi"]: w["t"] for w in v_ay.get(key, [])}
-        # wi, где forced и w2v заметно расходятся по времени → зона, сдвинутая повтором
-        diverge = [wi for wi in f_t if wi in v_t and abs(f_t[wi] - v_t[wi]) > _REPEAT_ZONE_MARGIN]
-        lo = min(rep_wis + diverge)
-        hi = max(rep_wis + diverge)
-        # заместить w2v-точки [lo..hi] этого аята на forced-точки того же диапазона (обычные + rep)
-        w2v_wt = [w for w in w2v_wt
-                  if not ((w["surah"], w["ayah"]) == key and lo <= w["wi"] <= hi)]
-        w2v_wt += [w for w in f_ay.get(key, []) if lo <= w["wi"] <= hi]
+    # Времена по каноническому слову (без rep): forced = истина в зоне возврата, w2v = дорожка плеера.
+    f_t = {key_of(w): w["t"] for w in forced_wt if not w.get("rep")}
+    v_t = {key_of(w): w["t"] for w in w2v_wt}
+
+    # Плоский порядок чтения по объединению слов обеих дорожек (кортеж (surah,ayah,wi) монотонен
+    # в пределах непрерывного отрывка, в т.ч. через границы аятов).
+    order = sorted(set(f_t) | set(v_t))
+    pos = {k: i for i, k in enumerate(order)}
+
+    # Слово принадлежит зоне возврата, если это точка возврата (rep) ИЛИ forced↔w2v заметно
+    # разъехались по времени (монотонный w2v сдвинул слово из-за перечитки).
+    rep_keys = {key_of(w) for w in reps}
+    zone = {k for k in order
+            if k in rep_keys
+            or (k in f_t and k in v_t and abs(f_t[k] - v_t[k]) > _REPEAT_ZONE_MARGIN)}
+    if not zone:
+        return 0
+
+    # Разбить на НЕПРЕРЫВНЫЕ кластеры в плоском порядке (соседние по позиции): разные возвраты
+    # (напр. 53:20, 53:36, 53:53) — отдельные зоны; честный w2v между ними не трогаем. Внутри
+    # кластера возврат может пересекать границы аятов (rec11: 53:53→54→55) — заместим весь диапазон.
+    zpos = sorted(pos[k] for k in zone)
+    clusters, cur = [], [zpos[0]]
+    for p in zpos[1:]:
+        if p == cur[-1] + 1:
+            cur.append(p)
+        else:
+            clusters.append((cur[0], cur[-1]))
+            cur = [p]
+    clusters.append((cur[0], cur[-1]))
+
+    forced_by_key = {}
+    for w in forced_wt:
+        forced_by_key.setdefault(key_of(w), []).append(w)   # incl. rep-дубликаты
+
+    for lo_i, hi_i in clusters:
+        lo_key, hi_key = order[lo_i], order[hi_i]
+        # весь плоский диапазон [lo_key..hi_key] замещаем forced-точками (обычные + rep)
+        w2v_wt = [w for w in w2v_wt if not (lo_key <= key_of(w) <= hi_key)]
+        for i in range(lo_i, hi_i + 1):
+            w2v_wt += forced_by_key.get(order[i], [])
 
     w2v_wt.sort(key=lambda w: (w["t"], w.get("surah", 0), w.get("ayah", 0), w.get("wi", 0)))
     sync_map["word_timeline"] = w2v_wt
