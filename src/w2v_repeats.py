@@ -70,6 +70,7 @@ def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_pa
         if n < 2:
             return []
         skel = [_askel(w) for (_, _, _, w) in ref]
+        _refpos = {(s, a, wi): idx for idx, (s, a, wi, _) in enumerate(ref)}
 
         # span каждого ref-слова из word_timeline (первое вхождение (surah,ayah,wi))
         bt = {}
@@ -136,7 +137,11 @@ def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_pa
                     run = 0
             return best_end * frame_sec if best_len * frame_sec >= _PAUSE_MIN else t0
 
-        inserts = []
+        # собираем группы-кандидаты (каждая = набор rep-точек одного возврата), затем ПОСТ-ГАРД:
+        # принимаем группу только если она НЕ вносит прыжок вперёд в финальный порядок (инвариант
+        # чтеца fj=0 — жёсткое требование). refpos слова = его индекс в ref (порядок чтения) →
+        # плоский индекс; пайплайн сортирует по (t, surah, ayah, wi) == (t, refpos). Симулируем.
+        groups = []
         for i in range(_INTRO_SKIP, n):
             if spans[i] is None or len(skel[i]) < _MIN_HOLDER_SKEL:
                 continue
@@ -173,28 +178,56 @@ def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_pa
                 # FWD: держатель i оставляет свою долю в начале span, дальше [i+1..j] едут по остатку
                 j = fbest[1]
                 hshare = span * len(skel[i]) / max(1, sum(len(skel[k]) for k in range(i, j + 1)))
-                _distribute(inserts, ref, skel, list(range(i + 1, j + 1)), t0 + hshare, span - hshare)
+                g = _mk_group(ref, skel, list(range(i + 1, j + 1)), t0 + hshare, span - hshare)
             elif (bbest[0] >= _MIN_SIM and bbest[0] - held >= _HELD_MARGIN
                     and bbest[0] - fbest[0] >= _DIR_MARGIN):
                 # BACK: держатель держится до конца паузы, дальше перечитка [ra..i]
                 ra = bbest[1]
                 onset_r = repeat_onset(t0, t1)
-                _distribute(inserts, ref, skel, list(range(ra, i + 1)), onset_r, t1 - onset_r)
+                g = _mk_group(ref, skel, list(range(ra, i + 1)), onset_r, t1 - onset_r)
+            else:
+                continue
+            if g:
+                groups.append(g)
+
+        # база: реальные точки (первое вхождение) с refpos = индекс в ref
+        base = [(onset[i], i) for i in range(n) if onset[i] is not None]
+
+        def _fj(entries):
+            """Прыжки вперёд (skip≥1) в порядке (t, refpos) — как в pipeline.alignment_invariants."""
+            seq = sorted(entries, key=lambda e: (e[0], e[1]))
+            fj = 0; prev = None
+            for _t, rp in seq:
+                if prev is not None and rp - prev >= 2:
+                    fj += 1
+                prev = rp
+            return fj
+
+        base_fj = _fj(base)
+        accepted = list(base)
+        inserts = []
+        for g in sorted(groups, key=lambda gr: gr[0]["t"]):    # по времени первой точки группы
+            g_entries = [(p["t"], _refpos[(p["surah"], p["ayah"], p["wi"])]) for p in g]
+            if _fj(accepted + g_entries) <= base_fj:           # группа не добавляет прыжков
+                accepted += g_entries
+                inserts += g
         return inserts
     except Exception:
         return []
 
 
-def _distribute(inserts, ref, skel, rng, onset, span):
-    """Раздать время [onset, onset+span] словам rng пропорц. длине их скелета → точки rep=True."""
+def _mk_group(ref, skel, rng, onset, span):
+    """Группа rep-точек: время [onset, onset+span] раздать словам rng пропорц. длине их скелета."""
     if not rng or span <= 0:
-        return
+        return []
     lens = [max(1, len(skel[k])) for k in rng]
     total = sum(lens)
     acc = onset
+    grp = []
     for off, k in enumerate(rng):
         t0 = acc
         acc += span * lens[off] / total
         su, ay, wi, _ = ref[k]
-        inserts.append({"t": round(t0, 3), "t_end": round(acc, 3),
-                        "surah": su, "ayah": ay, "wi": wi, "rep": True})
+        grp.append({"t": round(t0, 3), "t_end": round(acc, 3),
+                    "surah": su, "ayah": ay, "wi": wi, "rep": True})
+    return grp
