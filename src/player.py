@@ -76,7 +76,9 @@ def build_data(sync_map: dict, quran: Quran, audio_src: str) -> dict:
         "timeline": [{"t": e["t"], "surah": e["surah"], "ayah": e["ayah"]} for e in timeline],
         # t_end (если есть, forced его даёт) тащим на фронт: плеер по нему замораживает
         # karaoke-заливку слова на паузах (не «ползёт» прогресс, пока чтец молчит/договаривает).
-        "word_timeline": [{k: w[k] for k in ("t", "t_end", "surah", "ayah", "wi") if k in w}
+        # rep=True — точка-перечитка (возврат чтеца, П8): тащим флаг на фронт/в аудит, чтобы
+        # отличать повтор от первого прочтения (плеер может пометить, аудит — посчитать).
+        "word_timeline": [{k: w[k] for k in ("t", "t_end", "surah", "ayah", "wi", "rep") if k in w}
                           for w in sync_map.get("word_timeline", [])],
         "sections": sections,
         "chapters": chapters,
