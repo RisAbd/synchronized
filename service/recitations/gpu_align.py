@@ -38,23 +38,36 @@ def main() -> int:
 
     rec = Recitation.objects.get(pk=rec_id)
     audio = pipeline.ensure_audio(rec)
-    src = pipeline._forced_source(rec)
-    if src is None:
-        print("нет готового ASR-прогона (google/whisper) для диапазона аятов", file=sys.stderr)
-        return 3
-    verses = falign.verses_from_data(src.data)
-    if not verses:
-        print(f"в прогоне-источнике '{src.recognizer}' нет разделов/аятов", file=sys.stderr)
-        return 4
 
     if recognizer == rz.W2V:
+        # ПОЛНАЯ независимость (директива владельца 24.07): w2v НЕ берёт диапазон/окна у ASR.
+        # Своя акустика: эмиссии → find_range (какие аяты) → force-align этого диапазона → sync_map.
         import w2v_align
-        # окна аятов из timeline ASR-источника (для нарезки длинного аудио на короткие сегменты)
-        tl = (src.data.get("timeline") or [])
-        tmap = {(t["surah"], t["ayah"]): t["t"] for t in tl}
-        windows = [[tmap.get((s, a)), None] for s, a, _ in verses]
+        import w2v_range
+        from quran import Quran
+        E, _stride, idx2ch, ch2idx = w2v_align.emissions(str(audio))
+        q = Quran.load()
+        rng = w2v_range.find_range(E, q, idx2ch, ch2idx)   # [(surah, ayah), ...] по порядку
+        if not rng:
+            print("w2v: не удалось определить диапазон из акустики", file=sys.stderr)
+            return 3
+        verses = [(s, a, q.surah(s).verses[a - 1].text) for s, a in rng]
+        # окна аятов w2v НЕ знает заранее (нет ASR-таймлайна) → равномерная нарезка длинного аудио
+        # (для памяти whisperx); _fill_starts раскидает старты по числу слов. Ноль данных от ASR.
+        windows = [[None, None] for _ in verses]
         sync_map = w2v_align.align(str(audio), verses, windows=windows)
+        meta = sync_map.setdefault("meta", {})
+        meta["range_source"] = "w2v-self"
+        meta["range"] = f"{rng[0][0]}:{rng[0][1]}..{rng[-1][0]}:{rng[-1][1]}"
     else:
+        src = pipeline._forced_source(rec)
+        if src is None:
+            print("нет готового ASR-прогона (google/whisper) для диапазона аятов", file=sys.stderr)
+            return 3
+        verses = falign.verses_from_data(src.data)
+        if not verses:
+            print(f"в прогоне-источнике '{src.recognizer}' нет разделов/аятов", file=sys.stderr)
+            return 4
         sync_map = falign.align(str(audio), verses)
 
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -2,30 +2,32 @@
 
 w2v — самодостаточный источник (директива владельца 24.07): audio → wav2vec2 CTC-эмиссии → САМ
 находит, что читается. Greedy-декод мелодичного таджвида беден (модель молчит на распеве, ~84%
-blank) → словесный/char-матчинг ненадёжен для точного диапазона. Робастный сигнал — CTC-forward-
-скоринг: logP(эмиссии | текст-кандидат) правильно моделирует blank'и. Истинное окно = максимум
-нормированного score (доказано: rec7 6:95-103 norm/char −3.803 против неверных −4.4..−5.9).
+blank), НО буквы, что есть, ложатся на текст → чисто БУКВЕННЫЙ поиск диапазона (подход владельца,
+difflib), без CTC/GPU.
 
-Двухступенчато (CTC-forward на весь корпус дорог):
-  1. Грубо: greedy-декод → согласный скелет → k-граммы → топ-N сур-кандидатов (истинная сура
-     стабильно в топе; точность не нужна, нужен recall).
-  2. Точно: внутри кандидат-сур скользящее окно → CTC-скоринг → лучший центр → добор/сжатие до
-     границ аятов по максимуму score. Возвращает (surah, ayah_lo, ayah_hi).
+Диапазон = ПРОИЗВОЛЬНЫЙ непрерывный отрезок аятов (указка владельца 24.07: чтение бывает частью
+суры и может пересекать границы сур — не привязываемся к «одна сура»/«вся сура»). По ПЛОСКОМУ
+индексу аятов всего Корана:
+  1. Локализация (дёшево): greedy-декод → согласный скелет → k-граммы → плотность попаданий по
+     плоским аятам → densest непрерывный кластер аятов (± запас; отсекает 90%+ Корана).
+  2. Точно: difflib-скоринг (подход владельца — и совпадения, и промежутки несовпадения:
+     SequenceMatcher.ratio) окон вокруг кластера, ПОЛНЫЙ перебор → максимум ratio = истинное окно.
+     Проверено: rec7 6:95-103, rec5 25:63-77 — ровно истина, <1с.
 
-CTC-скоринг — numpy, БЕЗ GPU (гоняется на сохранённых/переданных эмиссиях). Эмиссии считает
-`w2v_align.emissions()` (GPU).
+Всё на CPU, БЕЗ GPU. Эмиссии (для greedy-декода) считает `w2v_align.emissions()` (GPU).
+Резерв: CTC-forward-скоринг (`ctc_logprob`) — дороже, но тоже без GPU и тоже даёт истинное окно.
 """
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 import numpy as np
 
 from quran import _FOLD_TABLE, _STRIP_TABLE
 
-_K = 5                    # длина k-граммы для грубого префильтра
-_TOPN_SURAHS = 8          # сколько сур-кандидатов брать в CTC-поиск (recall > precision)
+_K = 5                    # длина k-граммы для буквенной локализации
 _NEG = -1e9
+_REGION_MARGIN = 6        # ± аятов запаса вокруг плотного кластера (CTC добьёт точную границу)
 
 
 # --- greedy-декод эмиссий → согласный скелет (нормализация как у корпуса quran) ---
@@ -42,75 +44,88 @@ def greedy_skeleton(emissions: np.ndarray, idx2ch: dict, special: set) -> str:
     return "".join(out)
 
 
-def _corpus_chars(quran):
-    """Плоский char-поток нормализованного корпуса + карта позиция→token_index."""
-    C, char2tok = [], []
-    for ti, t in enumerate(quran.tokens):
-        for ch in t.text:
-            C.append(ch); char2tok.append(ti)
-    return "".join(C), char2tok
-
-
-def _kmer_hits(skel: str, kidx):
-    """Все попадания k-грамм декода в корпус: список corpus-позиций cp."""
-    cps = []
-    for sp in range(len(skel) - _K + 1):
-        cps.extend(kidx.get(skel[sp:sp + _K], ()))
-    return cps
-
-
-def candidate_surahs(cps, quran, char2tok, surlen, topn: int = _TOPN_SURAHS) -> list[int]:
-    """Топ-N сур по числу k-грамм-попаданий декода, нормированному на sqrt(длину суры).
-    Recall-ориентировано: истинная сура должна ПОПАСТЬ в список (не обязательно первой)."""
-    raw = Counter(quran.tokens[char2tok[cp]].surah for cp in cps)
-    if not raw:
-        return list(range(1, min(topn, 114) + 1))
-    scored = sorted(raw, key=lambda s: raw[s] / (surlen[s] ** 0.5), reverse=True)
-    return scored[:topn]
-
-
-def _dense_region(cps, quran, char2tok, surah: int, margin: int = 8) -> tuple[int, int] | None:
-    """Плотный регион аятов суры по k-грамм-попаданиям (буквенная локализация — дёшево).
-    Отсекает одиночные ложные попадания (порог по плотности), берёт мин..макс плотных аятов + запас.
-    CTC потом сканит ТОЛЬКО этот регион, не всю суру."""
-    ays = [quran.tokens[char2tok[cp]].ayah for cp in cps if quran.tokens[char2tok[cp]].surah == surah]
-    if not ays:
-        return None
-    ayc = Counter(ays)
-    thr = max(2, len(ays) // 30)
-    dense = sorted(a for a, n in ayc.items() if n >= thr)
-    if not dense:
-        dense = sorted(ayc)
-    na = quran.surah(surah).verses_count
-    return max(1, dense[0] - margin), min(na, dense[-1] + margin)
-
-
 def build_index(quran):
-    """Один раз: char-поток корпуса, карта, инвертированный k-грамм-индекс, длины сур."""
-    Cs, char2tok = _corpus_chars(quran)
+    """Один раз: карты char→(плоский аят), инвертированный k-грамм-индекс, плоский список аятов
+    (surah,ayah) в порядке корпуса + согласный скелет текста каждого плоского аята (для difflib)."""
+    flat_ayahs = []                 # [(surah, ayah)] уникально, в порядке корпуса
+    fa_text = []                    # нормализованный (безхаракатный) текст каждого плоского аята
+    C, char2fa = [], []             # char2fa[pos] = индекс в flat_ayahs
+    last = None
+    for t in quran.tokens:
+        key = (t.surah, t.ayah)
+        if key != last:
+            flat_ayahs.append(key); fa_text.append([]); last = key
+        fa = len(flat_ayahs) - 1
+        fa_text[fa].append(t.text)
+        for ch in t.text:
+            C.append(ch); char2fa.append(fa)
+    Cs = "".join(C)
+    fa_skel = ["".join(words) for words in fa_text]   # t.text уже нормализован (без харакат) в корпусе
     kidx = defaultdict(list)
     for p in range(len(Cs) - _K + 1):
         kidx[Cs[p:p + _K]].append(p)
-    surlen = Counter(t.surah for t in quran.tokens)
-    return Cs, char2tok, kidx, surlen
+    return Cs, char2fa, kidx, flat_ayahs, fa_skel
+
+
+# --- буквенная локализация: плотный кластер плоских аятов ---
+
+def _ayah_density(skel: str, char2fa, kidx, n_fa: int) -> np.ndarray:
+    """Число k-грамм-попаданий декода на каждый плоский аят (буквенно, дёшево)."""
+    dens = np.zeros(n_fa, dtype=np.int32)
+    for sp in range(len(skel) - _K + 1):
+        for cp in kidx.get(skel[sp:sp + _K], ()):
+            dens[char2fa[cp]] += 1
+    return dens
+
+
+def _dense_region(dens: np.ndarray) -> tuple[int, int] | None:
+    """Densest непрерывный кластер плоских аятов. Сглаживаем плотность, берём пик, расширяем пока
+    плотность выше фона. Отсекает рассеянный шум (ложные k-граммы по всему Корану)."""
+    if dens.sum() == 0:
+        return None
+    n = len(dens)
+    # сглаживание окном 3 (аяты рядом с читаемыми тоже ловят попадания)
+    k = np.array([1.0, 1.0, 1.0])
+    sm = np.convolve(dens.astype(float), k, mode="same")
+    peak = int(sm.argmax())
+    floor = float(np.percentile(sm[sm > 0], 50)) if (sm > 0).any() else 0.0
+    thr = max(1.0, floor)
+    lo = hi = peak
+    while lo - 1 >= 0 and sm[lo - 1] >= thr:
+        lo -= 1
+    while hi + 1 < n and sm[hi + 1] >= thr:
+        hi += 1
+    return lo, hi
 
 
 # --- CTC-forward скоринг (лог-пространство, векторизовано по S) ---
+
+def pool_emissions(emis: np.ndarray, factor: int) -> np.ndarray:
+    """Mean-pool лог-вероятностей по времени (factor кадров → 1). Абсолютный score меняется, но
+    ОТНОСИТЕЛЬНЫЙ ранкинг окон сохраняется (до factor≈4; при ≥8 CTC ломается на коротком T) →
+    argmax окно то же, а CTC-forward в factor раз быстрее."""
+    if factor <= 1:
+        return emis
+    T, V = emis.shape
+    n = T // factor
+    if n == 0:
+        return emis
+    return emis[:n * factor].reshape(n, factor, V).mean(axis=1)
+
 
 def _text_to_ids(text: str, ch2idx: dict, blank: int) -> list[int]:
     """Текст аята → id-последовательность vocab модели (буквы + ХАРАКАТЫ, что есть в vocab).
 
     ⚠️ Владелец (24.07) предлагал скорить без харакатов (их плохо распознают). Для СЛОВЕСНОГО ПОИСКА
-    (difflib/k-граммы) так и есть — там нормализованный (безхаракатный) текст. Но для CTC-скоринга
-    ЭМПИРИКА обратная: с харакатами истинное окно выигрывает (rec7 6:95-103 −3.8 vs неверные −4.4),
-    БЕЗ харакатов ранкинг ломается (6:90-103/7:1-23 обгоняют истину). Причина: wav2vec2 ЧАСТЬ
-    харакатов эмитит (фатха ~3%, кясра, сукун), они добавляют дискриминации; недоэмиченные CTC-forward
-    разруливает сам через blank. Поэтому в CTC-таргете харакаты ОСТАВЛЯЕМ (только те, что в vocab)."""
+    (k-граммы) так и есть — там нормализованный (безхаракатный) текст. Но для CTC-скоринга ЭМПИРИКА
+    обратная: с харакатами истинное окно выигрывает (rec7 −3.8 vs неверные −4.4), БЕЗ них ранкинг
+    ломается. Причина: wav2vec2 ЧАСТЬ харакатов эмитит (фатха/кясра/сукун), они дают дискриминацию;
+    недоэмиченные CTC-forward разруливает сам через blank. Поэтому харакаты (что в vocab) ОСТАВЛЯЕМ."""
     ids = []
     for ch in text:
         if ch == " ":
             continue
-        j = ch2idx.get(ch)          # символы не из vocab (дагер-алиф, вакфы) отсеются сами
+        j = ch2idx.get(ch)
         if j is not None and j != blank:
             ids.append(j)
     return ids
@@ -137,99 +152,56 @@ def ctc_logprob(emis: np.ndarray, labels: list[int], blank: int) -> float:
     return float(np.logaddexp(a[S - 1], a[S - 2]) if S > 1 else a[0])
 
 
-def pool_emissions(emis: np.ndarray, factor: int) -> np.ndarray:
-    """Mean-pool лог-вероятностей по времени (factor кадров → 1). Абсолютный score меняется, но
-    ОТНОСИТЕЛЬНЫЙ ранкинг окон сохраняется (все скорятся на одних пулингованных эмиссиях) → argmax
-    окно то же, а CTC-forward в factor раз быстрее (T↓). Для грубого скана диапазона этого хватает."""
-    if factor <= 1:
-        return emis
-    T, V = emis.shape
-    n = T // factor
-    if n == 0:
-        return emis
-    return emis[:n * factor].reshape(n, factor, V).mean(axis=1)
-
-
-def _ayah_text(quran, surah: int, ayah: int) -> str:
-    try:
-        return quran.surah(surah).verses[ayah - 1].text
-    except Exception:
-        return ""
-
-
-def _score_span(emis, quran, surah, a0, a1, ch2idx, blank) -> tuple[float, int]:
-    """Нормированный на длину меток logP окна [a0..a1] суры. Возвращает (norm_score, n_labels)."""
-    txt = " ".join(_ayah_text(quran, surah, a) for a in range(a0, a1 + 1))
-    ids = _text_to_ids(txt, ch2idx, blank)
-    if not ids:
-        return _NEG, 0
-    return ctc_logprob(emis, ids, blank) / len(ids), len(ids)
+def _difflib_score(dec: str, ref: str) -> float:
+    """Качество выравнивания декода к тексту отрезка (подход владельца): и совпадения, и промежутки
+    несовпадения. difflib.ratio() = 2·matched/(len(dec)+len(ref)) — учитывает и матчи, и «дыры»
+    (несматченные куски штрафуют знаменателем). Максимум ratio по окнам = истинный диапазон
+    (проверено: rec7 6:95-103, rec5 25:63-77 — ровно истина). Быстро (C), без CTC/GPU."""
+    if not ref or not dec:
+        return 0.0
+    import difflib
+    return difflib.SequenceMatcher(None, dec, ref, autojunk=False).ratio()
 
 
 def find_range(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
-               index=None, pool: int = 2, verbose: bool = False) -> tuple[int, int, int] | None:
-    """Главный вход: (surah, ayah_lo, ayah_hi) читаемого диапазона из эмиссий. None если не найдено.
+               index=None, verbose: bool = False) -> list[tuple[int, int]] | None:
+    """Главный вход: список (surah, ayah) читаемого диапазона из эмиссий (по порядку). None если нет.
 
-    pool — фактор mean-pool эмиссий для скоринга (скорость; ОТНОСИТЕЛЬНЫЙ ранкинг окон сохраняется
-    до pool≈4, при pool≥8 CTC ломается на коротком T). Весь поиск/добор — на одних pooled-эмиссиях,
-    поэтому сравнимо. Точные тайминги не тут — их даёт последующий force-align диапазона."""
-    blank = ch2idx.get("<pad>", 0)
+    Диапазон — произвольный непрерывный отрезок плоских аятов (часть суры / через границу сур —
+    указка владельца). Чисто буквенно (без CTC/GPU): (1) k-грамм-плотность → плотный кластер аятов;
+    (2) difflib-добор границ (совпадения+промежутки) → максимум ratio = истинное окно."""
     special = {ch2idx.get(t) for t in ("<pad>", "<s>", "</s>", "<unk>", "|", "-", "ـ")} - {None}
-    Cs, char2tok, kidx, surlen = index or build_index(quran)
+    Cs, char2fa, kidx, flat_ayahs, fa_skel = index or build_index(quran)
+    n_fa = len(flat_ayahs)
 
-    skel = greedy_skeleton(emissions, idx2ch, special)
-    if len(skel) < _K:
+    dec = greedy_skeleton(emissions, idx2ch, special)
+    if len(dec) < _K:
         return None
-    cps = _kmer_hits(skel, kidx)
-    cand = candidate_surahs(cps, quran, char2tok, surlen)
-    if verbose:
-        print("кандидат-суры:", cand)
 
-    emis = pool_emissions(emissions, pool)
-
-    def score(s, a0, a1):
-        return _score_span(emis, quran, s, a0, a1, ch2idx, blank)[0]
-
-    # В КАЖДОЙ суре-кандидате: буквенный регион (k-граммы) сужает поиск → грубое окно внутри региона
-    # → жадный добор границ по максимуму нормированного score. Сравниваем ДОБОРАННЫЕ score всех
-    # кандидатов (тесное истинное окно обгоняет спурьёзные; rec7 6:95-103). Все на pooled-эмиссиях.
-    refined = []
-    for s in cand:
-        na = quran.surah(s).verses_count
-        region = _dense_region(cps, quran, char2tok, s) or (1, na)
-        r_lo, r_hi = region
-        W = min(r_hi - r_lo + 1, 12)
-        step = max(1, W // 3)
-        sbest = None
-        a0 = r_lo
-        while a0 <= r_hi:
-            a1 = min(r_hi, a0 + W - 1)
-            sc0 = score(s, a0, a1)
-            if sbest is None or sc0 > sbest[0]:
-                sbest = (sc0, a0, a1)
-            if a1 >= r_hi:
-                break
-            a0 += step
-        cur, a0, a1 = sbest
-        improved = True
-        while improved:
-            improved = False
-            for na0, na1 in ((a0 - 1, a1), (a0 + 1, a1), (a0, a1 + 1), (a0, a1 - 1),
-                             (a0 + 1, a1 + 1), (a0 - 1, a1 - 1)):
-                if na0 < 1 or na1 > na or na0 > na1:
-                    continue
-                v = score(s, na0, na1)
-                if v > cur + 1e-6:
-                    cur, a0, a1 = v, na0, na1
-                    improved = True
-                    break
-        refined.append((cur, s, a0, a1))
-        if verbose:
-            print(f"  кандидат {s}:{a0}..{a1}  norm/char={cur:.3f}")
-    if not refined:
+    # 1) буквенная локализация → плотный кластер плоских аятов (± запас)
+    dens = _ayah_density(dec, char2fa, kidx, n_fa)
+    reg = _dense_region(dens)
+    if reg is None:
         return None
-    refined.sort(key=lambda x: -x[0])
-    cur, s, a0, a1 = refined[0]
+    lo = max(0, reg[0] - _REGION_MARGIN)
+    hi = min(n_fa - 1, reg[1] + _REGION_MARGIN)
     if verbose:
-        print(f"диапазон: {s}:{a0}..{s}:{a1}  norm/char={cur:.3f}")
-    return s, a0, a1
+        s0, a0 = flat_ayahs[lo]; s1, a1 = flat_ayahs[hi]
+        print(f"буквенный регион: {s0}:{a0}..{s1}:{a1} ({hi-lo+1} аятов)")
+
+    # 2) ПОЛНЫЙ перебор окон в регионе (difflib дёшев): для каждого старта i0 — все концы i1 в
+    # пределах разумной длины; берём максимум ratio. Жадный добор застревал в локальном оптимуме
+    # (rec7 6:95-110 ratio 0.313 вместо истинного 6:95-103 0.338); перебор находит глобальный.
+    max_len = hi - lo + 1
+    best = (-1.0, lo, lo)
+    for i0 in range(lo, hi + 1):
+        for i1 in range(i0, min(hi, i0 + max_len) + 1):
+            v = _difflib_score(dec, "".join(fa_skel[i0:i1 + 1]))
+            if v > best[0]:
+                best = (v, i0, i1)
+    cur, i0, i1 = best
+    verses = flat_ayahs[i0:i1 + 1]
+    if verbose:
+        s0, a0 = verses[0]; s1, a1 = verses[-1]
+        print(f"диапазон: {s0}:{a0}..{s1}:{a1}  difflib-ratio={cur:.3f}")
+    return verses
