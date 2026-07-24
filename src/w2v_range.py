@@ -123,11 +123,21 @@ def build_index(quran):
 # --- буквенная локализация: плотный кластер плоских аятов ---
 
 def _ayah_density(skel: str, char2fa, kidx, n_fa: int) -> np.ndarray:
-    """Число k-грамм-попаданий декода на каждый плоский аят (буквенно, дёшево)."""
-    dens = np.zeros(n_fa, dtype=np.int32)
+    """Взвешенная плотность k-грамм-попаданий декода на каждый плоский аят (буквенно, дёшево).
+
+    IDF-взвешивание: каждая k-грамма декода вносит СУММАРНО 1.0, размазанное по своим совпадениям
+    (вес 1/df на попадание, df = число позиций k-граммы в Коране). Редкая (дискриминативная)
+    k-грамма → вес концентрируется на немногих аятах (сильный сигнал); частая (общие фразы —
+    истиаза/басмала/زачины) → размазана в пыль. Без IDF пик плотности создавали именно общие
+    фразы (rec10 Ар-Рахман улетал в 33-34: там острый мусорный пик, а сура 55 размазана)."""
+    dens = np.zeros(n_fa, dtype=np.float64)
     for sp in range(len(skel) - _K + 1):
-        for cp in kidx.get(skel[sp:sp + _K], ()):
-            dens[char2fa[cp]] += 1
+        cps = kidx.get(skel[sp:sp + _K])
+        if not cps:
+            continue
+        w = 1.0 / len(cps)
+        for cp in cps:
+            dens[char2fa[cp]] += w
     return dens
 
 
@@ -217,7 +227,7 @@ def _difflib_score(dec: str, ref: str) -> float:
 
 
 def find_range(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
-               index=None, verbose: bool = False) -> list[tuple[int, int]] | None:
+               index=None, verbose: bool = False, dec: str | None = None) -> list[tuple[int, int]] | None:
     """Главный вход: список (surah, ayah) читаемого диапазона из эмиссий (по порядку). None если нет.
 
     Диапазон — произвольный непрерывный отрезок плоских аятов (часть суры / через границу сур —
@@ -227,20 +237,31 @@ def find_range(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
     Cs, char2fa, kidx, flat_ayahs, fa_skel = index or build_index(quran)
     n_fa = len(flat_ayahs)
 
-    dec = greedy_skeleton(emissions, idx2ch, special)
+    if dec is None:
+        dec = greedy_skeleton(emissions, idx2ch, special)
     if len(dec) < _K:
         return None
 
-    # 1) буквенная локализация → плотный кластер плоских аятов (± запас)
+    # 1) буквенная локализация. IDF-плотность даёт ОСТРЫЙ пик на самом дискриминативном аяте
+    # чтения (напр. rec10 Ар-Рахман → пик на 55:33). Регион вокруг пика берём ШИРОКО — не уже, чем
+    # ВСЯ сура пика (короткоаятные суры типа Аль-Вакиа: 96 аятов, но по ~25 симв → оценка по средней
+    # длине аята сильно занижала и регион обрезал старт/конец). Ширина = max(оценка по длине декода,
+    # длина суры пика) + запас, с ОБЕИХ сторон пика (истинные границы гарантированно влезают; лишнее
+    # обрежет добор). difflib на широком регионе — всё равно секунды.
     dens = _ayah_density(dec, char2fa, kidx, n_fa)
-    reg = _dense_region(dens)
-    if reg is None:
+    if dens.sum() == 0:
         return None
-    lo = max(0, reg[0] - _REGION_MARGIN)
-    hi = min(n_fa - 1, reg[1] + _REGION_MARGIN)
+    peak = int(dens.argmax())
+    avg_ay = max(1.0, len(Cs) / n_fa)          # средняя длина скелета аята (симв.)
+    n_est = int(len(dec) / avg_ay)             # оценка числа читаемых аятов
+    s_peak = flat_ayahs[peak][0]
+    s_len = len(quran.surah(s_peak).verses)    # длина суры пика (аятов)
+    half = max(n_est, s_len) + _REGION_MARGIN
+    lo = max(0, peak - half)
+    hi = min(n_fa - 1, peak + half)
     if verbose:
-        s0, a0 = flat_ayahs[lo]; s1, a1 = flat_ayahs[hi]
-        print(f"буквенный регион: {s0}:{a0}..{s1}:{a1} ({hi-lo+1} аятов)")
+        ps, pa = flat_ayahs[peak]; s0, a0 = flat_ayahs[lo]; s1, a1 = flat_ayahs[hi]
+        print(f"пик плотности: {ps}:{pa}; регион {s0}:{a0}..{s1}:{a1} ({hi-lo+1} аятов, n_est={n_est})")
 
     # 2) границы окна. Полный O(регион²) перебор difflib НЕ масштабируется на длинные суры (целая
     # Марьям: регион ~121 аят, декод 18-мин записи → difflib на огромных строках × тысячи окон =
@@ -295,7 +316,28 @@ def find_range(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
     cand1 = [b for b in range(max(0, e1 - B), min(nreg, e1 + B + 1)) if b >= c0]
     c1 = max(cand1, key=lambda b: _score(c0, b)) if cand1 else e1
     cur = _score(c0, c1)
+
+    # (г) добор границ ВНУТРИ ТОЙ ЖЕ суры: мелодичный/необычный зачин (напр. Марьям 19:1 كٓهيعٓصٓ —
+    # разрозненные буквы, декодятся бедно → ratio их отрезает) реально читается, но у него низкий
+    # cov. Тянем старт назад / конец вперёд, пока аят той же суры и его cov не ноль. НЕ пересекаем
+    # границу суры (иначе ложно залезаем в предыдущую — rec9: 16:127 ловит истиазу, но чтение с 17:1).
+    # тянем только В ПРЕДЕЛАХ суры ПИКА (s_peak) — надёжный якорь чтения; так не залезаем в
+    # соседнюю суру по ложному cov (rec14: старт refine уже в суре 68 ≠ пик 69 → добор не бежит).
+    while (c0 - 1 >= 0 and flat_ayahs[lo + c0 - 1][0] == s_peak
+           and flat_ayahs[lo + c0][0] == s_peak and cov[c0 - 1] > 0):
+        c0 -= 1
+    while (c1 + 1 < nreg and flat_ayahs[lo + c1 + 1][0] == s_peak
+           and flat_ayahs[lo + c1][0] == s_peak and cov[c1 + 1] > 0):
+        c1 += 1
     i0, i1 = lo + c0, lo + c1
+
+    # (д) срезать ОДИНОЧНЫЕ хвосты чужой суры на краях: диапазон не должен начинаться последним
+    # аятом суры перед сменой суры (или кончаться первым аятом новой) — это почти всегда ложный
+    # cov на границе, а не реальное кросс-сурное чтение (rec14: старт 68:52 перед 69:1 → срезать).
+    while i0 < i1 and flat_ayahs[i0][0] != flat_ayahs[i0 + 1][0]:
+        i0 += 1
+    while i1 > i0 and flat_ayahs[i1][0] != flat_ayahs[i1 - 1][0]:
+        i1 -= 1
     verses = flat_ayahs[i0:i1 + 1]
     if verbose:
         s0, a0 = verses[0]; s1, a1 = verses[-1]
