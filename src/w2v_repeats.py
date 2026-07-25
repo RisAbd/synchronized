@@ -41,6 +41,7 @@ _DIR_MARGIN = 0.08        # и обгоняет другое направлен�
 _MIN_HOLDER_SKEL = 2      # односимвольные держатели (напр. إِلَّا→'ل') ненадёжны
 _INTRO_SKIP = 3           # первые N слов диапазона — интро (истиаза/басмала), не держатели
 _LOOKBACK = 12            # на сколько слов назад искать возврат
+_BACK_TIE_EPS = 0.05      # ничья sim BACK-кандидатов → берём меньший откат (защита от перелёта влево)
 _FWD_SPAN = 8             # на сколько слов вперёд пробовать форвард-фразу
 _PAUSE_MIN = 0.15         # мин. пауза, чтобы якорить назадний повтор на её конец
 _SNAP_FRAME_MS = 20
@@ -163,14 +164,21 @@ def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_pa
                         sm = alignbricks._sim(dec, cand * reps)
                         if sm > fbest[0]:
                             fbest = (sm, j)
-            # назад: [ra..i]
-            bbest = (0.0, None)
+            # назад: [ra..i] — при БЛИЗКИХ sim предпочитаем МЕНЬШИЙ откат (больший ra).
+            # Частый дефект (rec7 خضرا, место 1 владельца): sim у ra=شيء и ra=فأخرجنا РАВНЫ (ничья),
+            # старый `>` брал первый (меньший ra) → перелёт на 1 слово влево. Чтец редко возвращается
+            # ДАЛЬШЕ, чем перечитывает; на ничьей верен более короткий откат.
+            back_scores = []
             for ra in range(max(0, i - _LOOKBACK), i):
                 cand = "".join(skel[ra:i + 1])
                 if cand:
-                    sm = alignbricks._sim(dec, cand)
-                    if sm > bbest[0]:
-                        bbest = (sm, ra)
+                    back_scores.append((alignbricks._sim(dec, cand), ra))
+            bbest = (0.0, None)
+            if back_scores:
+                bmax = max(s for s, _ in back_scores)
+                ra_pick = max(ra for s, ra in back_scores if s >= bmax - _BACK_TIE_EPS)
+                sim_pick = next(s for s, ra in back_scores if ra == ra_pick)
+                bbest = (sim_pick, ra_pick)
 
             span = t1 - t0
             if (fbest[0] >= _MIN_SIM and fbest[0] - held >= _HELD_MARGIN
