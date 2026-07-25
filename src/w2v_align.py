@@ -116,6 +116,11 @@ def _ctc_viterbi(E, labels, blank: int):
 
     Ключевое: скип на blank-цель запрещён (ext[s]==ext[s-2]==blank) → путь ОБЯЗАН постоять на
     каждой метке ≥1 кадр → ни одно слово не «схлопывается» в ноль (в отличие от whisperx-рутины).
+
+    Возвращает (path, ext, total_score), где total_score = лог-вероятность лучшего пути (alpha в
+    конце). T один и тот же для двух проходов (одни эмиссии) → total_score прямо сравним между
+    выравниваниями: дополненный повторами эталон, если он реально бьётся со вторым звучанием,
+    даёт БОЛЬШЕ total_score (иначе — меньше, т.к. лишние метки тянутся по не-своим кадрам).
     """
     import numpy as np
     T = E.shape[0]
@@ -154,28 +159,115 @@ def _ctc_viterbi(E, labels, blank: int):
             s -= 1
         elif cc == 2:
             s -= 2
-    return path, ext
+    return path, ext, float(alpha[end_s])
+
+
+def _ctc_viterbi_repeats(E, labels, lab_word, blank: int, R: int, P: float):
+    """CTC-Viterbi С ВОЗВРАТАМИ (подход владельца: один проход, аллайнер сам ходит назад).
+
+    К обычным переходам stay/+1/+2 добавлен ПРЫЖОК-НАЗАД: с последней буквы слова w путь может уйти
+    на первую букву более раннего слова w' (w-R ≤ w' ≤ w) за штраф P. Возврат чтеца выражается
+    нативно — путь идёт ...w, [jump] w', w'+1, ..., w, w+1... Прыжки ВПЕРЁД через слова структурно
+    невозможны (только +1/+2 по буквам); время монотонно (кадры растут) → ложная петля «оплачивается»
+    несоответствием акустики и не берётся. P — мягкий регуляризатор от микро-петель (по умолчанию 0:
+    возврат бесплатен, акустика сама держит чистоту). Возвращает path[t] = позиция в ext.
+    """
+    import numpy as np
+    T = int(E.shape[0]); L = len(labels)
+    S = 2 * L + 1
+    ext = np.empty(S, dtype=np.int64)
+    ext[0] = blank; ext[1::2] = labels; ext[2::2] = blank
+    skip = np.zeros(S, dtype=bool)
+    skip[2:] = (ext[2:] != blank) & (ext[2:] != ext[:-2])
+    NEG = -1e30
+
+    # старт/конец каждого слова в ext (по порядку слов, только слова С метками)
+    lab_lo, lab_hi = {}, {}
+    for li, gi in enumerate(lab_word):
+        lab_lo.setdefault(gi, li); lab_hi[gi] = li
+    words = sorted(lab_lo)
+    starts = np.array([2 * lab_lo[w] + 1 for w in words])   # цель прыжка (первая буква)
+    lasts = np.array([2 * lab_hi[w] + 1 for w in words])    # источник прыжка (последняя буква)
+    nW = len(words)
+
+    alpha = np.full(S, NEG); alpha[0] = float(E[0, ext[0]])
+    if S > 1:
+        alpha[1] = float(E[0, ext[1]])
+    bp = np.full((T, S), -1, dtype=np.int32)     # предшественник-состояние
+    idxS = np.arange(S)
+    widx = np.arange(nW)
+    for t in range(1, T):
+        e_t = E[t, ext]
+        frm1 = np.empty(S); frm1[0] = NEG; frm1[1:] = alpha[:-1]
+        frm2 = np.full(S, NEG); frm2[2:] = np.where(skip[2:], alpha[:-2], NEG)
+        cand = np.stack([alpha, frm1, frm2])
+        c = cand.argmax(axis=0)
+        best = cand[c, idxS]
+        pred = np.where(c == 0, idxS, np.where(c == 1, idxS - 1, idxS - 2))
+        # прыжок-назад: цель starts[w'], источник lasts[w], w' ≤ w ≤ w'+R
+        last_vals = alpha[lasts]
+        best_src_val = np.full(nW, NEG)
+        best_src_w = np.zeros(nW, dtype=int)
+        for off in range(0, R + 1):
+            shifted = np.full(nW, NEG)
+            if off == 0:
+                shifted = last_vals.copy()
+            else:
+                shifted[:-off] = last_vals[off:]
+            better = shifted > best_src_val
+            best_src_val = np.where(better, shifted, best_src_val)
+            best_src_w = np.where(better, np.minimum(widx + off, nW - 1), best_src_w)
+        jump_val = best_src_val - P
+        for k in np.where(jump_val > best[starts])[0]:
+            s = int(starts[k])
+            best[s] = jump_val[k]
+            bp[t, s] = int(lasts[best_src_w[k]])
+        alpha = best + e_t
+        bp[t] = np.where(bp[t] >= 0, bp[t], pred)
+
+    end_s = S - 1 if (S == 1 or alpha[S - 1] >= alpha[S - 2]) else S - 2
+    path = np.empty(T, dtype=np.int64)
+    s = end_s
+    for t in range(T - 1, -1, -1):
+        path[t] = s
+        nxt = int(bp[t, s])
+        s = nxt if nxt >= 0 else s
+    return path
 
 
 def forced_align(E, stride_ms: float, verses, idx2ch: dict, ch2idx: dict,
-                 audio_path, snap: bool | None = None) -> dict:
+                 audio_path, snap: bool | None = None, slots=None) -> dict:
     """СВОЙ CTC-forced-align диапазона аятов к аудио по готовым эмиссиям E (Viterbi). GPU не нужен
     (эмиссии уже посчитаны в `emissions()`), считаем на CPU.
 
     verses — [(surah, ayah, text), ...] (диапазон нашёл w2v_range из своей акустики). Онсет каждого
     слова = время первого кадра его первой метки; слово ВЛАДЕЕТ временем до онсета следующего слова
     (мадд/хвост честно висит на слове-держателе), затем снап к тишине поджимает реальные паузы.
+
+    slots — опциональный ЯВНЫЙ порядок слотов (list of (surah, ayah, wi, word, rep_bool)). Когда
+    задан — эталон берём из него как есть (в т.ч. с ДУБЛИРОВАННЫМИ кусками-перечитками: тот же
+    (surah,ayah,wi) встречается несколько раз подряд), и Viterbi монотонно раскладывает КАЖДОЕ
+    звучание на свою копию → возврат выражается движением ВПЕРЁД по дублированному тексту, без
+    latания пост-фактум (подход владельца: «виттербидуй сразу задублированный оригинал»). rep-слоты
+    получают в word_timeline пометку rep=True. Когда slots=None — обычный эталон (каждое слово раз).
     """
     import numpy as np
 
     # выкинуть токены-вакфы/паузы из текста аятов — единая безвакфовая индексация wi (как build_data)
     verses = [(s, a, " ".join(quranmod.word_tokens(t))) for s, a, t in verses]
 
-    # плоский ref: слова диапазона по порядку
+    # плоский ref: слоты по порядку чтения. rep_flags[i] = слот i — копия-перечитка.
     ref = []                     # (surah, ayah, wi, arabic_word)
-    for surah, ayah, txt in verses:
-        for wi, w in enumerate(txt.split()):
+    if slots is None:
+        for surah, ayah, txt in verses:
+            for wi, w in enumerate(txt.split()):
+                ref.append((surah, ayah, wi, w))
+        rep_flags = [False] * len(ref)
+    else:
+        rep_flags = []
+        for surah, ayah, wi, w, rep in slots:
             ref.append((surah, ayah, wi, w))
+            rep_flags.append(bool(rep))
 
     blank = ch2idx.get("<pad>", 0)
     labels, lab_word = [], []    # id-метки vocab + индекс слова (в ref) для каждой метки
@@ -191,7 +283,7 @@ def forced_align(E, stride_ms: float, verses, idx2ch: dict, ch2idx: dict,
     if not labels or T == 0:
         return _empty(ref)
 
-    path, _ext = _ctc_viterbi(E, labels, blank)
+    path, _ext, path_score = _ctc_viterbi(E, labels, blank)
     sec = stride_ms / 1000.0
     L = len(labels)
 
@@ -249,6 +341,8 @@ def forced_align(E, stride_ms: float, verses, idx2ch: dict, ch2idx: dict,
         entry = {"t": round(t0, 3), "surah": surah, "ayah": ayah, "wi": wi}
         if not interp_flags[i] and t1 > t0:
             entry["t_end"] = round(t1, 3)
+        if rep_flags[i]:
+            entry["rep"] = True
         word_timeline.append(entry)
         if (surah, ayah) not in seen_ayah:
             seen_ayah.add((surah, ayah))
@@ -283,10 +377,167 @@ def forced_align(E, stride_ms: float, verses, idx2ch: dict, ch2idx: dict,
         "snapped_to_silence": snapped,
         "wt": len(word_timeline),
         "ct": len(char_timeline),
+        "path_score": round(path_score, 2),
+        "reps": sum(1 for f in rep_flags if f),
         "device": "cuda",
     }
     return {"meta": meta, "timeline": timeline,
             "word_timeline": word_timeline, "char_timeline": char_timeline}
+
+
+_REPEAT_R = int(os.environ.get("SYNC_W2V_REPEAT_R", "9") or 9)
+_REPEAT_P = float(os.environ.get("SYNC_W2V_REPEAT_P", "0") or 0)
+
+
+def repeat_align(E, stride_ms: float, verses, idx2ch: dict, ch2idx: dict,
+                 audio_path, snap: bool | None = None, R: int | None = None,
+                 P: float | None = None) -> dict:
+    """ОДИН проход CTC-Viterbi С ВОЗВРАТАМИ (подход владельца): аллайнер сам ходит назад по акустике.
+    Возврат чтеца выражается как сегмент пути с УБЫВАЮЩИМ индексом слова → помечаем rep=True. Ни
+    пред-детекта, ни дублирования эталона, ни жёстких порогов — только окно R и штраф P (по умолч. 0).
+    Дорожки — В ПОРЯДКЕ ПУТИ (перечитка inline, движение вперёд между возвратами монотонно)."""
+    import numpy as np
+    R = _REPEAT_R if R is None else R
+    P = _REPEAT_P if P is None else P
+
+    verses = [(s, a, " ".join(quranmod.word_tokens(t))) for s, a, t in verses]
+    ref = []
+    for surah, ayah, txt in verses:
+        for wi, w in enumerate(txt.split()):
+            ref.append((surah, ayah, wi, w))
+    blank = ch2idx.get("<pad>", 0)
+    labels, lab_word = [], []
+    for gi, (_s, _a, _wi, w) in enumerate(ref):
+        for ch in w:
+            j = ch2idx.get(ch)
+            if j is None or j == blank:
+                continue
+            labels.append(j); lab_word.append(gi)
+    T = int(E.shape[0])
+    if not labels or T == 0:
+        return _empty(ref)
+
+    path = _ctc_viterbi_repeats(E, labels, lab_word, blank, R, P)
+    sec = stride_ms / 1000.0
+
+    # сегменты пути: непрерывные ряды одного слова → (gi, f0, f1)
+    segs = []
+    cur, f0 = None, 0
+    for t in range(T):
+        s = int(path[t])
+        w = lab_word[(s - 1) // 2] if (s % 2 == 1) else None
+        if w is not None and w != cur:
+            if cur is not None:
+                segs.append((cur, f0, t))
+            cur, f0 = w, t
+    if cur is not None:
+        segs.append((cur, f0, T))
+
+    # границы сегмента: онсет = f0; слово владеет временем до онсета СЛЕДУЮЩЕГО сегмента (мадд висит)
+    seg_bounds = []
+    for idx, (gi, a, b) in enumerate(segs):
+        t0 = a * sec
+        t1 = (segs[idx + 1][1] * sec) if idx + 1 < len(segs) else (b * sec)
+        seg_bounds.append((gi, t0, max(t0 + 0.001, t1)))
+    # rep-флаг сегмента: индекс слова МЕНЬШЕ максимума виденного (путь ушёл назад = возврат)
+    maxw, rep_flags = -1, []
+    for (gi, _t0, _t1) in seg_bounds:
+        rep_flags.append(gi < maxw); maxw = max(maxw, gi)
+    matched = len(set(gi for gi, _, _ in seg_bounds))
+
+    # снап к тишине (RMS) на границах сегментов
+    audio = _load_wav(audio_path)
+    snapped = 0
+    do_snap = (os.environ.get("SYNC_W2V_SNAP", "1") != "0") if snap is None else snap
+    bounds = [(t0, t1) for (_gi, t0, t1) in seg_bounds]
+    if do_snap and bounds:
+        bounds, snapped = alignbricks._snap_bounds(bounds, audio)
+
+    word_timeline, timeline, char_timeline = [], [], []
+    seen_ayah = set()
+    for idx, (gi, _t0, _t1) in enumerate(seg_bounds):
+        surah, ayah, wi, arabic = ref[gi]
+        t0, t1 = bounds[idx]
+        entry = {"t": round(t0, 3), "surah": surah, "ayah": ayah, "wi": wi}
+        if t1 > t0:
+            entry["t_end"] = round(t1, 3)
+        if rep_flags[idx]:
+            entry["rep"] = True
+        word_timeline.append(entry)
+        if not rep_flags[idx] and (surah, ayah) not in seen_ayah:
+            seen_ayah.add((surah, ayah))
+            timeline.append({"t": round(t0, 3), "surah": surah, "ayah": ayah})
+        if t1 > t0:
+            base_positions = [p for p, ch in enumerate(arabic) if ch not in _HARAKAT]
+            nb = max(1, len(base_positions))
+            for ci, ch in enumerate(arabic):
+                kk = sum(1 for p in base_positions if p < ci)
+                frac0 = kk / nb
+                ct0 = t0 + (t1 - t0) * frac0
+                ct1 = t0 + (t1 - t0) * (frac0 if ch in _HARAKAT else (kk + 1) / nb)
+                char_timeline.append({"t": round(ct0, 3), "t_end": round(ct1, 3),
+                                      "surah": surah, "ayah": ayah, "wi": wi, "ci": ci})
+
+    # добор канонических слов, ни разу не посещённых (без vocab-метки) — интерполяцией в forward-позиции
+    present = {(e["surah"], e["ayah"], e["wi"]) for e in word_timeline if not e.get("rep")}
+    for gi, (surah, ayah, wi, _w) in enumerate(ref):
+        if (surah, ayah, wi) in present:
+            continue
+        # сосед слева (предыдущее канон. слово с временем) — берём его t как приближение
+        tprev = None
+        for gj in range(gi - 1, -1, -1):
+            k = (ref[gj][0], ref[gj][1], ref[gj][2])
+            e = next((x for x in word_timeline if not x.get("rep")
+                      and (x["surah"], x["ayah"], x["wi"]) == k), None)
+            if e:
+                tprev = e["t"]; break
+        word_timeline.append({"t": round((tprev if tprev is not None else 0.0) + 0.001, 3),
+                              "surah": surah, "ayah": ayah, "wi": wi})
+
+    word_timeline.sort(key=lambda e: e["t"])
+    for i in range(1, len(word_timeline)):
+        if word_timeline[i]["t"] <= word_timeline[i - 1]["t"]:
+            word_timeline[i]["t"] = round(word_timeline[i - 1]["t"] + 0.001, 3)
+        te = word_timeline[i].get("t_end")
+        if te is not None and te <= word_timeline[i]["t"]:
+            del word_timeline[i]["t_end"]
+
+    n_rep = sum(1 for f in rep_flags if f)
+    meta = {"aligner": "wav2vec2-ctc-viterbi-repeats", "align_model": _MODEL_NAME,
+            "ref_words": len(ref), "aligned_units": matched,
+            "coverage": round(matched / len(ref), 3) if ref else 0.0,
+            "snapped_to_silence": snapped, "wt": len(word_timeline), "ct": len(char_timeline),
+            "reps": n_rep, "repeat_R": R, "repeat_P": P, "device": "cuda"}
+    return {"meta": meta, "timeline": timeline,
+            "word_timeline": word_timeline, "char_timeline": char_timeline}
+
+
+def slots_from_verses(verses, ch2idx):
+    """Плоский slot-список (surah, ayah, wi, word, rep=False) из verses — базовый эталон без повторов.
+    Тот же токенайзинг, что forced_align (безвакфовые wi). Отправная точка для дополнения повторами."""
+    slots = []
+    for s, a, txt in verses:
+        for wi, w in enumerate(quranmod.word_tokens(txt)):
+            slots.append((s, a, wi, w, False))
+    return slots
+
+
+def align_score(E, slots, ch2idx) -> float:
+    """ДЕШЁВАЯ оценка: только total path score Viterbi для данного slot-эталона (без снапа/аудио/
+    char_timeline). Для валидации кандидатов-повторов: сравниваем score дополненного эталона vs
+    базового на ТЕХ ЖЕ эмиссиях — дубликат принимаем, только если score вырос (иначе лишние метки
+    тянутся по не-своим кадрам → score падает; замазка невозможна). Возвращает -inf при вырожденном."""
+    blank = ch2idx.get("<pad>", 0)
+    labels = []
+    for _s, _a, _wi, w, _rep in slots:
+        for ch in w:
+            j = ch2idx.get(ch)
+            if j is not None and j != blank:
+                labels.append(j)
+    if not labels or int(E.shape[0]) == 0 or int(E.shape[0]) < len(labels):
+        return float("-inf")
+    _path, _ext, score = _ctc_viterbi(E, labels, blank)
+    return score
 
 
 def _empty(ref) -> dict:

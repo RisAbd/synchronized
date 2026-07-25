@@ -234,123 +234,128 @@ def _ctc_fwd_group(emissions, stride_ms, ch2idx, ref, skel, i, t0, t1, n):
     return grp or None
 
 
+def _scan(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_path):
+    """Общий разбор длинных span'ов первого прохода → группы-кандидаты возвратов. Возвращает
+    (ref, refpos, onset, n, groups), где groups = [(holder_i, [rep-точки]), ...]. Разделяемо между
+    detect() (старый путь — вклейка точек) и detect_chunks() (новый — дублирование эталона)."""
+    import numpy as np
+    import quran as quranmod
+
+    special = {ch2idx.get(t) for t in ("<pad>", "<s>", "</s>", "<unk>", "|", "-", "ـ")} - {None}
+
+    # ref в порядке чтения + скелеты
+    ref = []
+    for s, a, txt in verses:
+        for wi, w in enumerate(quranmod.word_tokens(txt)):
+            ref.append((s, a, wi, w))
+    n = len(ref)
+    if n < 2:
+        return ref, {}, [], n, []
+    skel = [_askel(w) for (_, _, _, w) in ref]
+    _refpos = {(s, a, wi): idx for idx, (s, a, wi, _) in enumerate(ref)}
+
+    # span каждого ref-слова из word_timeline (первое вхождение (surah,ayah,wi))
+    bt = {}
+    for e in word_timeline:
+        key = (e["surah"], e["ayah"], e["wi"])
+        if key not in bt:
+            bt[key] = (e["t"], e.get("t_end"))
+    onset = [bt.get((s, a, wi), (None, None))[0] for (s, a, wi, _) in ref]
+    tend = [bt.get((s, a, wi), (None, None))[1] for (s, a, wi, _) in ref]
+    spans = []
+    for i in range(n):
+        t0 = onset[i]
+        if t0 is None:
+            spans.append(None); continue
+        t1 = tend[i]
+        if t1 is None:
+            t1 = onset[i + 1] if i + 1 < n and onset[i + 1] is not None else t0
+        spans.append((t0, t1))
+    dur = [b - a for s2 in spans if s2 for a, b in (s2,) if b > a]
+    med = float(np.median(dur)) if dur else 1.0
+    span_thr = max(_MIN_SPAN_ABS, _SPAN_FACTOR * med)
+
+    # greedy-CTC декод окна эмиссий → арабский согласный скелет
+    def decode(t0, t1):
+        f0 = max(0, int(t0 * 1000 / stride_ms)); f1 = min(emissions.shape[0], int(t1 * 1000 / stride_ms))
+        if f1 <= f0:
+            return ""
+        ids = emissions[f0:f1].argmax(axis=1)
+        out, prev = [], -1
+        for a in ids:
+            a = int(a)
+            if a != prev and a not in special:
+                out.append(idx2ch.get(a, ""))
+            prev = a
+        return _askel("".join(out))
+
+    # RMS-речь (аудио грузим тем же независимым загрузчиком, что и forced_align — без whisperx)
+    import w2v_align
+    audio = w2v_align._load_wav(audio_path)
+    frame_len = max(1, int(SAMPLE_RATE * _SNAP_FRAME_MS / 1000))
+    db = alignbricks._frame_db(audio, frame_len)
+    speech = None
+    if db is not None and len(db) >= 3:
+        thr = float(np.percentile(db, 15)) + 10.0
+        speech = db >= thr
+    frame_sec = frame_len / SAMPLE_RATE
+
+    def repeat_onset(t0, t1):
+        """Начало назаднего повтора = конец самой длинной паузы в [t0,t1] (до неё держим слово-стоп)."""
+        if speech is None:
+            return t0
+        a, b = max(0, int(t0 / frame_sec)), min(len(speech), int(t1 / frame_sec))
+        if b - a < 2:
+            return t0
+        seg = speech[a:b]; best_len, best_end, run = 0, a, 0
+        for j in range(len(seg)):
+            if not seg[j]:
+                run += 1
+            else:
+                if run > best_len:
+                    best_len, best_end = run, a + j
+                run = 0
+        return best_end * frame_sec if best_len * frame_sec >= _PAUSE_MIN else t0
+
+    groups = []
+    for i in range(_INTRO_SKIP, n):
+        if spans[i] is None or len(skel[i]) < _MIN_HOLDER_SKEL:
+            continue
+        t0, t1 = spans[i]
+        if t1 - t0 < span_thr:
+            continue
+
+        # --- greedy FWD/BACK (как раньше) ---
+        g = None
+        dec = alignbricks._collapse_tandem(decode(t0, t1))
+        if len(dec) >= _MIN_DECODE and len(dec) >= _DEC_LEN_FACTOR * max(1, len(skel[i])):
+            g = _greedy_group(dec, ref, skel, i, t0, t1, n, held_span=(t0, t1),
+                              repeat_onset=repeat_onset)
+        # --- CTC-FWD fallback: только если greedy НИЧЕГО не дал (аддитивно, не трогает
+        # существующие возвраты — устойчивее к шуму распева, ловит السماوات/شيء rec7) ---
+        if g is None:
+            try:
+                g = _ctc_fwd_group(emissions, stride_ms, ch2idx, ref, skel, i, t0, t1, n)
+            except Exception:
+                g = None
+        if g:
+            groups.append((i, g))
+
+    return ref, _refpos, onset, n, groups
+
+
 def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_path):
-    """Вернуть список word_timeline-точек перечиток (rep=True) для вклейки. При проблеме → []."""
+    """СТАРЫЙ путь: вернуть список word_timeline-точек перечиток (rep=True) для вклейки в готовую
+    дорожку. Пост-гард fj≤base (группа не добавляет прыжков вперёд). При проблеме → []."""
     try:
-        import numpy as np
-        import quran as quranmod
-
-        special = {ch2idx.get(t) for t in ("<pad>", "<s>", "</s>", "<unk>", "|", "-", "ـ")} - {None}
-
-        # ref в порядке чтения + скелеты
-        ref = []
-        for s, a, txt in verses:
-            for wi, w in enumerate(quranmod.word_tokens(txt)):
-                ref.append((s, a, wi, w))
-        n = len(ref)
-        if n < 2:
+        ref, _refpos, onset, n, groups = _scan(
+            emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_path)
+        if not groups:
             return []
-        skel = [_askel(w) for (_, _, _, w) in ref]
-        _refpos = {(s, a, wi): idx for idx, (s, a, wi, _) in enumerate(ref)}
 
-        # span каждого ref-слова из word_timeline (первое вхождение (surah,ayah,wi))
-        bt = {}
-        order = {}
-        for e in word_timeline:
-            key = (e["surah"], e["ayah"], e["wi"])
-            if key not in bt:
-                bt[key] = (e["t"], e.get("t_end"))
-                order[key] = e["t"]
-        onset = [bt.get((s, a, wi), (None, None))[0] for (s, a, wi, _) in ref]
-        tend = [bt.get((s, a, wi), (None, None))[1] for (s, a, wi, _) in ref]
-        spans = []
-        for i in range(n):
-            t0 = onset[i]
-            if t0 is None:
-                spans.append(None); continue
-            t1 = tend[i]
-            if t1 is None:
-                t1 = onset[i + 1] if i + 1 < n and onset[i + 1] is not None else t0
-            spans.append((t0, t1))
-        dur = [b - a for s2 in spans if s2 for a, b in (s2,) if b > a]
-        med = float(np.median(dur)) if dur else 1.0
-        span_thr = max(_MIN_SPAN_ABS, _SPAN_FACTOR * med)
-
-        # greedy-CTC декод окна эмиссий → арабский согласный скелет
-        def decode(t0, t1):
-            f0 = max(0, int(t0 * 1000 / stride_ms)); f1 = min(emissions.shape[0], int(t1 * 1000 / stride_ms))
-            if f1 <= f0:
-                return ""
-            ids = emissions[f0:f1].argmax(axis=1)
-            out, prev = [], -1
-            for a in ids:
-                a = int(a)
-                if a != prev and a not in special:
-                    out.append(idx2ch.get(a, ""))
-                prev = a
-            return _askel("".join(out))
-
-        # RMS-речь (аудио грузим тем же независимым загрузчиком, что и forced_align — без whisperx)
-        import w2v_align
-        audio = w2v_align._load_wav(audio_path)
-        frame_len = max(1, int(SAMPLE_RATE * _SNAP_FRAME_MS / 1000))
-        db = alignbricks._frame_db(audio, frame_len)
-        speech = None
-        if db is not None and len(db) >= 3:
-            thr = float(np.percentile(db, 15)) + 10.0
-            speech = db >= thr
-        frame_sec = frame_len / SAMPLE_RATE
-
-        def repeat_onset(t0, t1):
-            """Начало назаднего повтора = конец самой длинной паузы в [t0,t1] (до неё держим слово-стоп)."""
-            if speech is None:
-                return t0
-            a, b = max(0, int(t0 / frame_sec)), min(len(speech), int(t1 / frame_sec))
-            if b - a < 2:
-                return t0
-            seg = speech[a:b]; best_len, best_end, run = 0, a, 0
-            for j in range(len(seg)):
-                if not seg[j]:
-                    run += 1
-                else:
-                    if run > best_len:
-                        best_len, best_end = run, a + j
-                    run = 0
-            return best_end * frame_sec if best_len * frame_sec >= _PAUSE_MIN else t0
-
-        # собираем группы-кандидаты (каждая = набор rep-точек одного возврата), затем ПОСТ-ГАРД:
-        # принимаем группу только если она НЕ вносит прыжок вперёд в финальный порядок (инвариант
-        # чтеца fj=0 — жёсткое требование). refpos слова = его индекс в ref (порядок чтения) →
-        # плоский индекс; пайплайн сортирует по (t, surah, ayah, wi) == (t, refpos). Симулируем.
-        groups = []
-        for i in range(_INTRO_SKIP, n):
-            if spans[i] is None or len(skel[i]) < _MIN_HOLDER_SKEL:
-                continue
-            t0, t1 = spans[i]
-            if t1 - t0 < span_thr:
-                continue
-
-            # --- greedy FWD/BACK (как раньше) ---
-            g = None
-            dec = alignbricks._collapse_tandem(decode(t0, t1))
-            if len(dec) >= _MIN_DECODE and len(dec) >= _DEC_LEN_FACTOR * max(1, len(skel[i])):
-                g = _greedy_group(dec, ref, skel, i, t0, t1, n, held_span=(t0, t1),
-                                  repeat_onset=repeat_onset)
-            # --- CTC-FWD fallback: только если greedy НИЧЕГО не дал (аддитивно, не трогает
-            # существующие возвраты — устойчивее к шуму распева, ловит السماوات/شيء rec7) ---
-            if g is None:
-                try:
-                    g = _ctc_fwd_group(emissions, stride_ms, ch2idx, ref, skel, i, t0, t1, n)
-                except Exception:
-                    g = None
-            if g:
-                groups.append(g)
-
-        # база: реальные точки (первое вхождение) с refpos = индекс в ref
         base = [(onset[i], i) for i in range(n) if onset[i] is not None]
 
         def _fj(entries):
-            """Прыжки вперёд (skip≥1) в порядке (t, refpos) — как в pipeline.alignment_invariants."""
             seq = sorted(entries, key=lambda e: (e[0], e[1]))
             fj = 0; prev = None
             for _t, rp in seq:
@@ -362,14 +367,125 @@ def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_pa
         base_fj = _fj(base)
         accepted = list(base)
         inserts = []
-        for g in sorted(groups, key=lambda gr: gr[0]["t"]):    # по времени первой точки группы
+        for _i, g in sorted(groups, key=lambda ig: ig[1][0]["t"]):
             g_entries = [(p["t"], _refpos[(p["surah"], p["ayah"], p["wi"])]) for p in g]
-            if _fj(accepted + g_entries) <= base_fj:           # группа не добавляет прыжков
+            if _fj(accepted + g_entries) <= base_fj:
                 accepted += g_entries
                 inserts += g
         return inserts
     except Exception:
         return []
+
+
+_CHUNK_MAX_K = 8          # потолок слов в дублируемой фразе (span-cap ниже режет короткие спаны)
+_CHUNK_TOP_HOLDERS = 12   # ограничение числа длинных держателей на реку
+
+
+def _long_holders(word_timeline, verses):
+    """(ref, spans, длинные-держатели). Держатель = ref-слово с аномально длинным span'ом (≥ порога)
+    в первом проходе — там монотонный Viterbi слил перечитку. Возвращает держателей по порядку чтения."""
+    import numpy as np
+    import quran as quranmod
+    ref = []
+    for s, a, txt in verses:
+        for wi, w in enumerate(quranmod.word_tokens(txt)):
+            ref.append((s, a, wi, w))
+    n = len(ref)
+    bt = {}
+    for e in word_timeline:
+        key = (e["surah"], e["ayah"], e["wi"])
+        if key not in bt:
+            bt[key] = (e["t"], e.get("t_end"))
+    onset = [bt.get((s, a, wi), (None, None))[0] for (s, a, wi, _) in ref]
+    tend = [bt.get((s, a, wi), (None, None))[1] for (s, a, wi, _) in ref]
+    spans = []
+    for i in range(n):
+        t0 = onset[i]
+        if t0 is None:
+            spans.append(None); continue
+        t1 = tend[i]
+        if t1 is None:
+            t1 = onset[i + 1] if i + 1 < n and onset[i + 1] is not None else t0
+        spans.append((t0, t1))
+    dur = [b - a for s2 in spans if s2 for a, b in (s2,) if b > a]
+    med = float(np.median(dur)) if dur else 1.0
+    span_thr = max(_MIN_SPAN_ABS, _SPAN_FACTOR * med)
+    holders = [i for i in range(_INTRO_SKIP, n)
+               if spans[i] and (spans[i][1] - spans[i][0]) >= span_thr
+               and len(_askel(ref[i][3])) >= 1]
+    # по УБЫВАНИЮ длины спана: худший (больше всего слил перечитку) обрабатывается первым и берёт
+    # самый полный кусок; иначе жадный выбор мог взять короткий и перекрыть кандидат соседа.
+    holders.sort(key=lambda i: -(spans[i][1] - spans[i][0]))
+    holders = holders[:_CHUNK_TOP_HOLDERS]
+    return ref, spans, holders, med
+
+
+def detect_chunks(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_path):
+    """НОВЫЙ путь (подход владельца): «генерируй-и-проверяй». Не решаем акустикой, ЧТО перечитано —
+    для каждого длинного держателя ЩЕДРО предлагаем куски-кандидаты на ДУБЛИРОВАНИЕ, а отбор делает
+    внешняя валидация по path_score (дубль принимается только если объясняет эмиссии лучше).
+
+    Кусок = (insert_after_ref, [ref-индексы копии]). Три семейства перечитки на держателе i:
+      • FWD           — держатель i проглотил ПЕРВОЕ чтение следующей фразы [i+1..i+k];
+                        копия встаёт после i (перед каноном) → (i, [i+1..i+k]);
+      • BACK-return   — чтец вернулся и перечитал фразу, ЗАКАНЧИВАЮЩУЮСЯ на i [i-k+1..i];
+                        копия после i (после канона) → (i, [i-k+1..i]);
+      • BACK-preceding— в span держателя i влезла перечитка ПРЕДЫДУЩЕЙ фразы [i-k..i-1]
+                        (кейс ذلكم: перечитка وخلق..عليم села в span ذلكم); копия перед i → (i-1, [i-k..i-1]).
+
+    Возвращает список ВЗАИМОИСКЛЮЧАЮЩИХ наборов (по держателю): [[(after,refs),...], ...]. Внешний
+    оркестратор берёт ≤1 лучший из каждого набора (по score). При проблеме → []."""
+    try:
+        ref, spans, holders, med = _long_holders(word_timeline, verses)
+        n = len(ref)
+        out = []
+        for i in holders:
+            # нельзя перечитать больше слов, чем влезает в аномальный span (dur/медиана + запас)
+            dur = spans[i][1] - spans[i][0]
+            kmax = min(_CHUNK_MAX_K, int(round(dur / max(0.2, med))) + 1)
+            cands = []
+            for k in range(1, kmax + 1):
+                if i + k < n:                                   # FWD: [i+1..i+k]
+                    cands.append((i, list(range(i + 1, i + k + 1))))
+                if i - k + 1 >= _INTRO_SKIP:                     # BACK-return: [i-k+1..i]
+                    cands.append((i, list(range(i - k + 1, i + 1))))
+                if i - 1 >= _INTRO_SKIP and i - k >= _INTRO_SKIP:  # BACK-preceding: [i-k..i-1]
+                    cands.append((i - 1, list(range(i - k, i))))
+            # уникализируем (after, refs)
+            seen = set(); uniq = []
+            for after, refs in cands:
+                key = (after, tuple(refs))
+                if key not in seen and refs:
+                    seen.add(key); uniq.append((after, refs))
+            if uniq:
+                out.append(uniq)
+        return out
+    except Exception:
+        return []
+
+
+def build_slots(verses, chunks):
+    """Дополненный slot-эталон: базовый порядок чтения + вставленные ПОСЛЕ holder_i копии кусков
+    (rep=True). Копии несут ту же (surah,ayah,wi), что оригинал → плеер вернёт подсветку назад, но
+    времена им даст второй Viterbi по реальному второму звучанию (не пропорция). Куски с одинаковым
+    holder_i вставляются в порядке обнаружения."""
+    import quran as quranmod
+    ref = []
+    for s, a, txt in verses:
+        for wi, w in enumerate(quranmod.word_tokens(txt)):
+            ref.append((s, a, wi, w))
+    inserts_after = {}
+    for i, refs in chunks:
+        inserts_after.setdefault(i, []).append(refs)
+    slots = []
+    for gi, (s, a, wi, w) in enumerate(ref):
+        slots.append((s, a, wi, w, False))
+        for refs in inserts_after.get(gi, []):
+            for r in refs:
+                if 0 <= r < len(ref):
+                    s2, a2, wi2, w2 = ref[r]
+                    slots.append((s2, a2, wi2, w2, True))
+    return slots
 
 
 def _mk_group(ref, skel, rng, onset, span):
