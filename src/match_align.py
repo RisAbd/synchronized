@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -332,10 +333,15 @@ def match_stats(asr_norms: list[str], sync_map: dict, quran: Quran) -> dict:
 # ======================= БУКВЕННЫЙ ВХОД (w2v/mms) — ЛОКАЛИЗАЦИЯ =======================
 
 
-_K = 5                    # длина k-граммы для буквенной локализации
+_K = 5                    # длина k-граммы для буквенной локализации (арабский алфавит, w2v)
+_K_ROM = 7                # длиннее для РОМАНИЗОВАННОГО пути (MMS/forced): ~20 латинских согласных
+                          # против ~36 арабских → k=5 даёт коллизии, пик плотности уезжает; k=7
+                          # разделяет (проверено rec5: k=5 пик 38:3 мимо, k=7 пик 25:72 в цель)
 _NEG = -1e9
 _REGION_MARGIN = 6        # ± аятов запаса вокруг плотного кластера (CTC добьёт точную границу)
 _REFINE_BAND = 4          # ± аятов точного difflib-добора вокруг приближённой (по префиксам) границы
+_SEED_SURAS = 8           # сколько top-плотностных сур пробовать целиком как сид (шаг е) — робастность
+                          # к ложному пику (рефрен/истиаза-интро) без регресса частичных чтений
 
 
 # --- greedy-декод эмиссий → согласный скелет (нормализация как у корпуса quran) ---
@@ -404,11 +410,17 @@ def ayah_start_hints(emissions, verses, index, idx2ch, ch2idx, stride_ms):
     return mono
 
 
-def build_index(quran):
-    """Один раз: карты char→(плоский аят), инвертированный k-грамм-индекс, плоский список аятов
-    (surah,ayah) в порядке корпуса + согласный скелет текста каждого плоского аята (для difflib)."""
+def _index_over(quran, tok_str, k: int = _K):
+    """Ядро построения буквенного индекса над ПРОИЗВОЛЬНЫМ алфавитом токенов: `tok_str(token)->str`
+    задаёт строковое представление каждого корпусного слова (арабский скелет ИЛИ романизованный —
+    см. build_index / build_romanized_index). k — длина k-граммы для kidx (арабский _K, романиз.
+    _K_ROM). Возвращает (Cs, char2fa, kidx, flat_ayahs, fa_skel).
+
+    find_range алфавит-агностична: density/difflib работают на этих строках как есть, лишь бы декод
+    источника был в ТОМ ЖЕ алфавите (и k совпадал с индексом). flat_ayahs (surah,ayah) — общий для
+    обоих индексов (порядок корпуса не зависит от представления)."""
     flat_ayahs = []                 # [(surah, ayah)] уникально, в порядке корпуса
-    fa_text = []                    # нормализованный (безхаракатный) текст каждого плоского аята
+    fa_text = []                    # строковое представление каждого плоского аята (по tok_str)
     C, char2fa = [], []             # char2fa[pos] = индекс в flat_ayahs
     last = None
     for t in quran.tokens:
@@ -416,21 +428,61 @@ def build_index(quran):
         if key != last:
             flat_ayahs.append(key); fa_text.append([]); last = key
         fa = len(flat_ayahs) - 1
-        fa_text[fa].append(t.text)
-        for ch in t.text:
+        s = tok_str(t)
+        fa_text[fa].append(s)
+        for ch in s:
             C.append(ch); char2fa.append(fa)
     Cs = "".join(C)
-    fa_skel = ["".join(words) for words in fa_text]   # t.text уже нормализован (без харакат) в корпусе
+    fa_skel = ["".join(words) for words in fa_text]
     kidx = defaultdict(list)
-    for p in range(len(Cs) - _K + 1):
-        kidx[Cs[p:p + _K]].append(p)
+    for p in range(len(Cs) - k + 1):
+        kidx[Cs[p:p + k]].append(p)
     return Cs, char2fa, kidx, flat_ayahs, fa_skel
+
+
+def build_index(quran):
+    """Один раз: карты char→(плоский аят), инвертированный k-грамм-индекс, плоский список аятов
+    (surah,ayah) в порядке корпуса + согласный скелет текста каждого плоского аята (для difflib).
+    Арабский алфавит — для источников с арабским greedy-декодом (w2v). t.text уже нормализован
+    (без харакат) в корпусе."""
+    return _index_over(quran, lambda t: t.text)
+
+
+_ROM_VOWELS = set("aeiou")
+
+
+@lru_cache(maxsize=200000)
+def _rom_skeleton_word(w: str) -> str:
+    """Арабское слово → романизованный согласный скелет тем же конвейером, что MMS-greedy-декод
+    (`falign._greedy_ctc` над романизованным vocab): unidecode+uroman, гласные/апостроф долой.
+    Так декод MMS и романизованный индекс — в ОДНОМ алфавите (латинские согласные)."""
+    import ctc_forced_aligner as cfa
+    from unidecode import unidecode
+    r = cfa.normalize_uroman(unidecode(w)).replace(" ", "")
+    return "".join(c for c in r if c not in _ROM_VOWELS and c != "'")
+
+
+def build_romanized_index(quran):
+    """Романизованный (латинские согласные) двойник build_index — для MMS/forced, который декодит
+    эмиссии в романизованную латиницу, а не арабский. Тот же формат, что build_index → find_range
+    работает без изменений (передаём index=этот + dec=романизованный скелет аудио, idx2ch/ch2idx
+    не нужны). Романизация корпуса ~0.3с (uroman дёшев); мемоизируем на объекте quran."""
+    cache = getattr(quran, "_rom_index_cache", None)
+    if cache is not None:
+        return cache
+    idx = _index_over(quran, lambda t: _rom_skeleton_word(t.text), k=_K_ROM)
+    try:
+        quran._rom_index_cache = idx
+    except Exception:
+        pass
+    return idx
 
 
 # --- буквенная локализация: плотный кластер плоских аятов ---
 
-def _ayah_density(skel: str, char2fa, kidx, n_fa: int) -> np.ndarray:
+def _ayah_density(skel: str, char2fa, kidx, n_fa: int, k: int = _K) -> np.ndarray:
     """Взвешенная плотность k-грамм-попаданий декода на каждый плоский аят (буквенно, дёшево).
+    k — длина k-граммы (должна совпадать с той, что строила kidx: арабский _K, романиз. _K_ROM).
 
     IDF-взвешивание: каждая k-грамма декода вносит СУММАРНО 1.0, размазанное по своим совпадениям
     (вес 1/df на попадание, df = число позиций k-граммы в Коране). Редкая (дискриминативная)
@@ -438,8 +490,8 @@ def _ayah_density(skel: str, char2fa, kidx, n_fa: int) -> np.ndarray:
     истиаза/басмала/زачины) → размазана в пыль. Без IDF пик плотности создавали именно общие
     фразы (rec10 Ар-Рахман улетал в 33-34: там острый мусорный пик, а сура 55 размазана)."""
     dens = np.zeros(n_fa, dtype=np.float64)
-    for sp in range(len(skel) - _K + 1):
-        cps = kidx.get(skel[sp:sp + _K])
+    for sp in range(len(skel) - k + 1):
+        cps = kidx.get(skel[sp:sp + k])
         if not cps:
             continue
         w = 1.0 / len(cps)
@@ -534,19 +586,23 @@ def _difflib_score(dec: str, ref: str) -> float:
 
 
 def find_range(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
-               index=None, verbose: bool = False, dec: str | None = None) -> list[tuple[int, int]] | None:
+               index=None, verbose: bool = False, dec: str | None = None,
+               k: int = _K) -> list[tuple[int, int]] | None:
     """Главный вход: список (surah, ayah) читаемого диапазона из эмиссий (по порядку). None если нет.
 
     Диапазон — произвольный непрерывный отрезок плоских аятов (часть суры / через границу сур —
     указка владельца). Чисто буквенно (без CTC/GPU): (1) k-грамм-плотность → плотный кластер аятов;
-    (2) difflib-добор границ (совпадения+промежутки) → максимум ratio = истинное окно."""
+    (2) difflib-добор границ (совпадения+промежутки) → максимум ratio = истинное окно.
+
+    k — длина k-граммы плотности; ДОЛЖНА совпадать с той, что строила index.kidx (арабский _K
+    для w2v; _K_ROM для романизованного MMS/forced-индекса — иначе плотность промахнётся)."""
     special = {ch2idx.get(t) for t in ("<pad>", "<s>", "</s>", "<unk>", "|", "-", "ـ")} - {None}
     Cs, char2fa, kidx, flat_ayahs, fa_skel = index or build_index(quran)
     n_fa = len(flat_ayahs)
 
     if dec is None:
         dec = greedy_skeleton(emissions, idx2ch, special)
-    if len(dec) < _K:
+    if len(dec) < k:
         return None
 
     # 1) буквенная локализация. IDF-плотность даёт ОСТРЫЙ пик на самом дискриминативном аяте
@@ -555,7 +611,7 @@ def find_range(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
     # длине аята сильно занижала и регион обрезал старт/конец). Ширина = max(оценка по длине декода,
     # длина суры пика) + запас, с ОБЕИХ сторон пика (истинные границы гарантированно влезают; лишнее
     # обрежет добор). difflib на широком регионе — всё равно секунды.
-    dens = _ayah_density(dec, char2fa, kidx, n_fa)
+    dens = _ayah_density(dec, char2fa, kidx, n_fa, k=k)
     if dens.sum() == 0:
         return None
     peak = int(dens.argmax())
@@ -646,17 +702,30 @@ def find_range(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
     while i1 > i0 and flat_ayahs[i1][0] != flat_ayahs[i1 - 1][0]:
         i1 -= 1
 
-    # (е) РОБАСТНОСТЬ К ПОВТОРЯЮЩИМСЯ СУРАМ. Приближение по префиксам (б) полагается на ОДНО
-    # глобальное difflib-выравнивание декода к региону. Рефрен (Ар-Рахман 55: «فبأي آلاء ربكما
-    # تكذبان» ×31) путает монотонный difflib → cov по суре пика ≈ 0 → префикс-макс уводит в соседа
-    # (rec10: даёт 55:77..56:39 вместо всей суры 55:1-78). Пробуем ВТОРОЙ сид — ЦЕЛУЮ суру пика — и
-    # оставляем окно с бОльшим РЕАЛЬНЫМ difflib-ratio (истинная цель дизайна; проверено: истина
-    # 55:1-78 имеет ratio 0.32 — максимум среди окон). Частичное чтение сид-2 НЕ перебьёт: у целой
-    # суры ratio ниже частичного окна (непрочитанные аяты раздувают знаменатель) — 8/9 не задеты.
+    # (е) РОБАСТНОСТЬ К ЛОЖНОМУ ПИКУ ПЛОТНОСТИ (рефрен / истиаза-басмала-интро). Приближение по
+    # префиксам (б) полагается на ОДНО глобальное difflib-выравнивание к региону вокруг ПИКА, а пик
+    # плотности бывает ложным: рефрен (Ар-Рахман 55 «فبأي آلاء ربكما تكذبان» ×31) размазывает
+    # истинную суру и пик уходит в сосед; интро-истиаза матчит 16:98 (аят про истиазу) и создаёт
+    # пик В ДРУГОЙ суре (rec10-MMS: пик 16:98 → primary-окно в мусор 17:67-76, а истина 55 далеко от
+    # региона). Лечение: пробуем ЦЕЛЫЕ суры из top-N плотности как сиды и оставляем окно с
+    # МАКСИМАЛЬНЫМ РЕАЛЬНЫМ difflib-ratio (истинная цель дизайна). Целая сура перебьёт primary
+    # только если реально ближе к декоду: частичное чтение сохраняет primary (у целой суры ratio
+    # ниже — непрочитанные аяты раздувают знаменатель: rec5 primary 0.784 vs whole-25 0.238);
+    # Ар-Рахман whole-55 0.384 бьёт мусорный primary 0.214. Прежний одиночный сид (сура пика) —
+    # частный случай N=1. Ложные суры дают ratio <0.15 → не мешают.
     cur = _difflib_score(dec, "".join(fa_skel[i0:i1 + 1]))
-    ps_lo = next((k for k, fa in enumerate(flat_ayahs) if fa[0] == s_peak), None)
-    ps_hi = next((k for k in range(len(flat_ayahs) - 1, -1, -1) if flat_ayahs[k][0] == s_peak), None)
-    if ps_lo is not None:
+    seen_s, cand_suras = set(), []
+    for r in np.argsort(-dens):
+        s = flat_ayahs[r][0]
+        if s not in seen_s:
+            seen_s.add(s); cand_suras.append(s)
+        if len(cand_suras) >= _SEED_SURAS:
+            break
+    for s in cand_suras:
+        ps_lo = next((k for k, fa in enumerate(flat_ayahs) if fa[0] == s), None)
+        ps_hi = next((k for k in range(len(flat_ayahs) - 1, -1, -1) if flat_ayahs[k][0] == s), None)
+        if ps_lo is None:
+            continue
         rj = _difflib_score(dec, "".join(fa_skel[ps_lo:ps_hi + 1]))   # RAW вся сура (без ±B-добора)
         if rj > cur:
             i0, i1, cur = ps_lo, ps_hi, rj

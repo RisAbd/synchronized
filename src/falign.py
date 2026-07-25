@@ -359,22 +359,49 @@ def _session_and_tokenizer():
     return session, cfa.Tokenizer(), cfa
 
 
-def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int | None = None) -> dict:
-    """Forced alignment диапазона аятов к аудио.
-
-    verses — [(surah, ayah, text), ...] по порядку чтения (текст из quran.db, с харакат).
-    Возвращает sync_map: {meta, timeline, word_timeline, char_timeline}.
+def emissions(audio_path, batch_size: int | None = None):
+    """Один MMS-проход по аудио → (emissions, stride_ms, wav, id2ch). Разделён от align_verses,
+    чтобы forced посчитал эмиссии ОДИН раз и использовал их И для локализации диапазона
+    (whole_decode_skeleton → match_align.find_range), И для выравнивания (align_verses) —
+    независимость от ASR-источника (инкремент 3).
 
     batch_size — сколько 30-с окон гнать через wav2vec2 за один session.run. На GPU память
-    ~线ейна по batch_size×окно (feature-extractor layer-norm аллоцирует буфер на весь батч):
+    ~линейна по batch_size×окно (feature-extractor layer-norm аллоцирует буфер на весь батч):
     RTX 3060 (6 ГБ): batch_size=8 (~272с разом) падает OOM (7 ГБ); даже batch_size=2 (1.78 ГБ)
     падал при свободных 5.7 ГБ (арена onnxruntime растёт неудачно). batch_size=1 стабилен и
     быстр — forced rec10 (654с аудио) = 17.6с на GPU (против ~6 мин на CPU). Дефолт 1.
-    Переопределяется env SYNC_FALIGN_BATCH. На CPU значение почти не важно (память хостовая).
-    """
+    Переопределяется env SYNC_FALIGN_BATCH. На CPU значение почти не важно (память хостовая)."""
     if batch_size is None:
         batch_size = int(os.environ.get("SYNC_FALIGN_BATCH", "1"))
+    session, _tok, cfa = _session_and_tokenizer()
+    wav = cfa.load_audio(str(audio_path))
+    emis, stride = cfa.generate_emissions(session, wav, batch_size=batch_size)
+    id2ch = {v: k for k, v in cfa.VOCAB_DICT.items()}
+    return emis, stride, wav, id2ch
+
+
+def whole_decode_skeleton(emis, stride_ms, id2ch) -> str:
+    """Романизованный согласный скелет ВСЕГО аудио — вход match_align.find_range для локализации
+    диапазона аятов из СВОЕЙ акустики MMS (без ASR-источника). Тот же greedy-CTC-декод, что у
+    детектора возвратов, но по всему аудио → скелет (гласные долой), совпадает по алфавиту с
+    романизованным индексом корпуса (match_align.build_romanized_index)."""
+    dur = emis.shape[0] * stride_ms / 1000.0
+    return _skeleton(_greedy_ctc(emis, stride_ms, 0.0, dur, id2ch))
+
+
+def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int | None = None) -> dict:
+    """Forced alignment диапазона аятов к аудио (обёртка: эмиссии + align_verses одним вызовом,
+    прежний контракт). verses — [(surah, ayah, text), ...] по порядку чтения (текст из quran.db,
+    с харакат). Возвращает sync_map: {meta, timeline, word_timeline, char_timeline}."""
+    emis, stride, wav, _ = emissions(audio_path, batch_size)
+    return align_verses(emis, stride, wav, verses)
+
+
+def align_verses(emis, stride, wav, verses: list[tuple[int, int, str]]) -> dict:
+    """Выровнять диапазон аятов к аудио по УЖЕ посчитанным эмиссиям MMS (см. emissions()). Тело
+    прежнего align() без генерации эмиссий — источник диапазона (свой find_range или ASR) снаружи."""
     session, tokenizer, cfa = _session_and_tokenizer()
+    emissions = emis   # ниже тело оперирует именем emissions/stride (сохранено дословно)
 
     # эталон: плоский список слов с привязкой к аяту; индекс слова = word_index в аяте.
     # word_tokens роняет токены-вакфы/паузы (отдельные знаки-неслова) — их не выравниваем,
@@ -386,8 +413,6 @@ def align(audio_path, verses: list[tuple[int, int, str]], batch_size: int | None
             ref.append((surah, ayah, wi, w))
     text = " ".join(" ".join(_q.word_tokens(txt)) for _, _, txt in verses)
 
-    wav = cfa.load_audio(str(audio_path))
-    emissions, stride = cfa.generate_emissions(session, wav, batch_size=batch_size)
     tokens_starred, text_starred = cfa.preprocess_text(text, romanize=True, language="ara")
     segments, scores, blank = cfa.get_alignments(emissions, tokens_starred, tokenizer)
     spans = cfa.get_spans(tokens_starred, segments, blank)

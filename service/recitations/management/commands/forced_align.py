@@ -5,11 +5,12 @@
 (как и whisper-GPU). Пока их нет в контейнере — forced-прогон генерим здесь, на хосте;
 БД (SQLite) и media примонтированы bind-mount, поэтому web-контейнер сразу отдаёт результат.
 
-Требует готового прогона google/whisper у записи (из него берётся диапазон читаемых аятов).
+forced теперь ПОЛНОСТЬЮ независим (инкремент 3): сам находит диапазон из своей акустики MMS,
+готовый ASR-прогон больше не нужен.
 
     python manage.py forced_align 5           # одна запись
     python manage.py forced_align 5 6 7        # несколько
-    python manage.py forced_align --all-ready  # все записи с готовым ASR-прогоном
+    python manage.py forced_align --all        # все записи
 """
 from __future__ import annotations
 
@@ -26,14 +27,13 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("rec_ids", nargs="*", type=int, help="id записей")
-        parser.add_argument("--all-ready", action="store_true",
-                            help="все записи, у которых есть готовый ASR-прогон")
+        parser.add_argument("--all", action="store_true", help="все записи")
 
     def handle(self, *args, **opts):
         ids = list(opts["rec_ids"])
-        if opts["all_ready"]:
+        if opts["all"]:
             for rec in Recitation.objects.all():
-                if pipeline._forced_source(rec) is not None and rec.id not in ids:
+                if rec.id not in ids:
                     ids.append(rec.id)
         if not ids:
             self.stderr.write("нечего делать: укажи id записей или --all-ready")

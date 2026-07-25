@@ -219,22 +219,6 @@ def _fill_meta(rec, path: Path) -> None:
     rec.save(update_fields=fields)
 
 
-def _forced_source(rec):
-    """Готовый прогон-источник для forced align: из него берём диапазон читаемых аятов.
-    Лучший по честному покрытию времени аудио (metrics.coverage), при равенстве —
-    google > whisper. Фикс-приоритет google отдавал forced мусор, когда google плох:
-    rec10 google cov 0.591 с ложным диапазоном 16:98 против whisper 0.803 (реальные 55:1→56).
-
-    (Инкремент 3 снимет эту зависимость — forced получит свой find_range через match_align.)"""
-    from .models import AsrRun
-    from . import sources
-    ready = [r for r in rec.runs.all()
-             if r.status == AsrRun.Status.READY and r.data and not sources.is_aligned(r.recognizer)]
-    prio = {"google": 0, "whisper": 1}
-    return max(ready, key=lambda r: ((r.metrics or {}).get("coverage") or 0.0,
-                                     -prio.get(r.recognizer, 9)), default=None)
-
-
 def _run_aligner_subprocess(rec_id: int, recognizer: str, out: Path) -> None:
     """Запустить выравниватель (forced/w2v) отдельным процессом `python -m recitations.gpu_align`.
 
