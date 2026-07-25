@@ -114,7 +114,13 @@
      движущийся прогресс = «моргающий светофор», визуальное напряжение). Фон целиком, слово не
      режем на буквы-спаны (арабская вязь). Буква+харакат внутри — отложено (см. updateHighlight). */
   .w.hot { color:#fff; background:var(--hot); box-shadow:0 1px 10px rgba(46,139,69,.42);
-    transition:color .25s, background .25s; }
+    transition:color .25s, background .25s; position:relative; }
+  /* прогресс чтения слова — ТОНКАЯ жёлтая полоска ПОД словом (владелец tg_4059): растёт от 0 до
+     ширины слова к концу его звучания, текст не перекрывает (как прогресс в видеоплеерах).
+     Без бегущей заливки внутри слова (тот самый «моргающий светофор»). */
+  .w.hot::after { content:''; position:absolute; inset-inline-start:.14em; bottom:-2px;
+    height:2px; width:calc(var(--prog,0) * (100% - .28em)); background:#ffd24a;
+    border-radius:2px; box-shadow:0 0 4px rgba(255,210,74,.7); transition:width .09s linear; }
   #badge { position:fixed; z-index:30; bottom:14px; inset-inline-start:14px;
     display:flex; align-items:center; gap:8px; direction:rtl; background:var(--card);
     border:1px solid var(--line); border-radius:999px; padding:6px 14px;
@@ -525,7 +531,7 @@ function update(t){
     // окно подсветки ±R слов: центр (hot) + соседи с затухающей интенсивностью (градиент) —
     // шире и мягче → маскирует неточность привязки слова к таймстемпу
     hotEls.forEach(x=>{ x.classList.remove('hot','lit'); x.style.removeProperty('--wi');
-      x.style.background=''; }); hotEls=[];
+      x.style.removeProperty('--prog'); x.style.background=''; }); hotEls=[];
     const R=3;
     for(let dwi=-R; dwi<=R; dwi++){
       const el=wordEl[e.surah+':'+e.ayah+':'+(e.wi+dwi)];
@@ -540,6 +546,12 @@ function update(t){
     // Буква+харакат (П5, char_timeline у нас ЕСТЬ) — ОТЛОЖЕНО: спаны могут ломать арабскую вязь;
     // вернёмся после ручного ввода (проверить порчу рендера, иначе — маркер-оверлей поверх слова).
     const hotEl = wordEl[e.surah+':'+e.ayah+':'+e.wi];
+    // прогресс чтения слова → ширина жёлтой полоски под ним (t_end реальный, иначе онсет следующего)
+    if(hotEl){
+      let end=e.t_end; if(end==null){ const nx=WT[i+1]; end = nx ? nx.t : (e.t+0.4); }
+      let p = end>e.t ? (t-e.t)/(end-e.t) : 0;
+      hotEl.style.setProperty('--prog', Math.max(0, Math.min(1, p)).toFixed(3));
+    }
     scrollTargetEl = hotEl || scrollTargetEl;
     return;
   }
