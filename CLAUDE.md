@@ -51,10 +51,24 @@
   модуль по ключу. `active_run`→`sources.keys()`/`is_aligned` (логика та же). views/models на `sources`.
   Поведение-сохраняюще e2e rec5: google/w2v/forced word_timeline байт-в-байт идентичны (cov 0.977/0.914/
   0.478, fj0), `run_single`→`_ensure_auto` гонит w2v+forced, VRAM свободна, 0 осиротевших gpu_align,
-  `manage.py check` чист. **ДАЛЬШЕ:** (3) MMS/forced свой диапазон через `match_align.find_range` (снять
-  `pipeline._forced_source` + гейт `sources/forced.py::ready()`; forced станет полностью независим как
-  w2v) → (5-чистка) разорвать импорт `w2v_*`→`falign` (кирпичи в общий `src/arabic.py`, часть уже в
-  `alignbricks.py`). Каждый шаг — рабочее состояние + коммит+пуш; тест `manage.py check` + офлайн
+  `manage.py check` чист. ✅ ИНКРЕМЕНТ 3 СДЕЛАН (сессия 17, коммит `3298a69`): **forced ПОЛНОСТЬЮ
+  независим — свой диапазон из акустики MMS.** `_forced_source`+гейт `ready()` сняты. `match_align`:
+  `find_range` сделана алфавит-агностичной (общее ядро `_index_over(quran, tok_str, k)`); добавлен
+  `build_romanized_index` — двойник индекса в РОМАНИЗОВАННЫХ согласных скелетах (uroman+unidecode = тот
+  же алфавит, что MMS-greedy-декод). Романизованный путь `k=_K_ROM=7` (~20 латинских согласных → k=5
+  коллизии, пик плотности уезжал); шаг (е) обобщён в **мульти-сид по top-`_SEED_SURAS=8` сурам плотности
+  с выбором по реальному difflib-ratio** — робастность к ложному пику (истиаза-интро матчит 16:98;
+  рефрен Ар-Рахмана размазывает суру). `falign.align()` расщеплён на `emissions()`/`align_verses()`/
+  `whole_decode_skeleton()` — один MMS-проход и на локализацию, и на выравнивание (align() — тонкая
+  обёртка, поведение цело). `sources/forced.py`: run() = свои эмиссии→find_range(романиз.)→align_verses;
+  AUTO без предусловия. `_forced_source` удалён; forced_align-команда `--all-ready`→`--all`. **Валидация:**
+  w2v-путь (арабский k=5) 8/9 без регресса (`work/verify_match_align.py`; rec7 — известный артефакт
+  устаревших эмиссий, live верно); forced-самолокализация e2e **7/9 точно** (id5/9/10/12/13/14; Ар-Рахман
+  id10 55:1-78 ПОЧИНЕН мульти-сидом), id6/id7 off-by-one на краю (зачин كٓهيعٓصٓ / хвостовой аят — предел
+  акустики MMS, w2v-дефолт их берёт верно). Офлайн-фикстуры `work/rec{5,10,14}_mms_emis.npy`.
+  **ДАЛЬШЕ (шаг 5-чистка):** разорвать импорт `w2v_*`→`falign` — общие DSP/арабские кирпичи в общий
+  модуль (часть уже в `src/alignbricks.py`; w2v_align/w2v_repeats уже импортят alignbricks, осталось
+  вычистить остаток связи). Каждый шаг — рабочее состояние + коммит+пуш; тест `manage.py check` + офлайн
   `work/verify_match_align.py` + e2e через `pipeline.run_one`/`run_single` на 1 записи (GPU по одному).
 - **Сделано 24-25.07 (сессия 15): w2v ПОЛНОСТЬЮ независим — whisperx выкинут, свой CTC-Viterbi +
   точный find_range.** Директива владельца: «Wave2Vec отдельный, зачем ему WhisperX?» + «ничего от
