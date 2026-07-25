@@ -115,12 +115,12 @@
      режем на буквы-спаны (арабская вязь). Буква+харакат внутри — отложено (см. updateHighlight). */
   .w.hot { color:#fff; background:var(--hot); box-shadow:0 1px 10px rgba(46,139,69,.42);
     transition:color .25s, background .25s; position:relative; }
-  /* прогресс чтения слова — ТОНКАЯ жёлтая полоска ПОД словом (владелец tg_4059): растёт от 0 до
-     ширины слова к концу его звучания, текст не перекрывает (как прогресс в видеоплеерах).
-     Без бегущей заливки внутри слова (тот самый «моргающий светофор»). */
-  .w.hot::after { content:''; position:absolute; inset-inline-start:.14em; bottom:-2px;
-    height:2px; width:calc(var(--prog,0) * (100% - .28em)); background:#ffd24a;
-    border-radius:2px; box-shadow:0 0 4px rgba(255,210,74,.7); transition:width .09s linear; }
+  /* прогресс чтения слова — жёлтая полоска ВНУТРИ слова у нижнего края (владелец: не снизу/снаружи,
+     чуть потолще): растёт от 0 до ширины слова к концу звучания, текст не перекрывает.
+     Без бегущей заливки-«светофора». */
+  .w.hot::after { content:''; position:absolute; inset-inline-start:.14em; bottom:2px;
+    height:4px; width:calc(var(--prog,0) * (100% - .28em)); background:#ffd24a;
+    border-radius:2px; box-shadow:0 0 5px rgba(255,210,74,.8); transition:width .09s linear; }
   #badge { position:fixed; z-index:30; bottom:14px; inset-inline-start:14px;
     display:flex; align-items:center; gap:8px; direction:rtl; background:var(--card);
     border:1px solid var(--line); border-radius:999px; padding:6px 14px;
