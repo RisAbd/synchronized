@@ -87,6 +87,48 @@
 (aligner/recognizer) нет. Сегодня `recognizers.REGISTRY` — зачаток, но логика размазана по
 `asr.py`/`falign.py`/`w2v_align.py`/`align.py`/`pipeline.py` с кросс-связями → в модули-источники.
 
+### ✅ ПОДТВЕРЖДЕНО 25.07 (сессия 16): владелец дал точный референс (tg_1958) — паттерн применим
+
+Владелец указал конкретный код: **`~/work/wildbox/airflow-backend-analytics/dags/analytics_notifications`**.
+Изучен. Паттерн ровно тот, что нужен:
+- `subscriptions/` — по файлу на тип (`cpa.py`, `cpm.py`, `crr.py`, `romi.py`…), каждый самодостаточен.
+- **Единый контракт по соглашению** (не базовый класс): каждый файл экспонирует `get_to_notify(session,
+  users_by_cabinet_id, date_from, date_to)` + `format_to_text(user_setting, data, cabinet_name)`.
+- **Динамический импорт по имени:** `main.py:100` → `importlib.import_module(f'.subscriptions.{field}',
+  __package__)`; снаружи вызов ЕДИНООБРАЗНЫЙ (`subscription_module.get_to_notify(...)` /
+  `.format_to_text(...)`) — оркестратор про внутренности типа не знает. Новый тип = новый файл.
+
+**Ложится на источники так:** пакет `service/recitations/sources/` (или `src/sources/`), файл на источник
+(`google.py`/`whisper.py`/`w2v.py`/`mms.py`/`manual.py`). Контракт по соглашению:
+```python
+KEY, LABEL, NOTE = "w2v", "…", "…"          # метаданные (заменяют recognizers.REGISTRY-запись)
+def available() -> bool: ...
+def run(audio_path, quran, ctx) -> dict:    # audio → своя акустика → sync_map {meta,timeline,word_timeline,[char_timeline]}
+    ...                                     #   внутри зовёт ОБЩИЙ match_align, свой матчинг не пишет
+```
+Лоадер (`sources/__init__.py`): `pkgutil.iter_modules` → динамически собирает плоский массив по KEY.
+Убирает `recognizers.ALIGNERS`/`is_aligner`/`selectable_recognizers` и ветвление `_maybe_forced`/
+`_maybe_w2v`/`_recognize` — `pipeline` просто итерирует `sources` и зовёт `run` одинаково.
+
+### Статус плана (обновлено 25.07)
+
+- **Шаг 1 (w2v свои возвраты, убрать inherit):** ✅ СДЕЛАНО — `w2v_repeats.detect` (span, FWD/BACK,
+  пост-гард fj=0); `_inherit_repeats` из пути вызова убран (но код-заглушка `pipeline.py:305-382` ещё
+  висит — **удалить в шаге 5**). w2v дефолт на всех 9, диапазоны верны (кейс F закрыт), cov 0.914–0.998.
+- **Шаг 2 (общий `match_align`, буквенный вход):** 🔴 НЕ начат. `src/align.py` — словесное ядро; нужно
+  обобщить на буквы (декод w2v/MMS) и вынести в `src/match_align.py`, импортируемый источниками.
+- **Шаг 3 (MMS/forced независим, свой диапазон):** 🔴 НЕ начат. forced ещё берёт диапазон из ASR
+  (`_forced_source`). Дать ему свой range-детект (как `w2v_range`) поверх общего match_align.
+- **Шаг 4 (уплостить модель источников, плагин-пакет):** 🔴 НЕ начат. Создать `sources/` + лоадер,
+  снять `ALIGNERS`/типы, `active_run` упростить (min forward_jumps + coverage).
+- **Шаг 5 (чистка):** 🔴 удалить мёртвый `_inherit_repeats`+`_REPEAT_ZONE_MARGIN`, разорвать
+  импорт-связь `w2v_*`→`falign` (общие DSP/арабские кирпичи `_HARAKAT`/`_snap_bounds`/`_frame_db`/
+  `_sim`/`_collapse_tandem`/`_skeleton`/`_uroman_word` → общий `src/arabic.py`).
+
+**Порядок исполнения (безопасный, каждый шаг — рабочее состояние + коммит+пуш):** 5-DSP-кирпичи →
+2-match_align → 4-плагин-пакет+лоадер → 3-MMS-свой-диапазон. Кейс rec7 (SPEC-alignment §4 E) чинить
+параллельно по спеке — он про качество w2v-возвратов, не про структуру.
+
 **Общие шаги:** матчинг к тексту Корана, возможно и выравнивание — скорее ОБЩИЕ для всех (модуль
 `match_align`, импортируется каждым источником). Либо общие только для источников, что выдают
 ПОБУКВЕННО (mms/w2v): словесные (google/whisper) → общий словесный матчинг; буквенные → общий
