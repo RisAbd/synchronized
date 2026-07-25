@@ -54,6 +54,186 @@ def _askel(word: str) -> str:
     return "".join(c for c in word if c not in _DROP)
 
 
+# --- CTC-правдоподобие по эмиссиям (устойчивее greedy-декода на распеве) ------------------
+# Владелец tg_3795: «декодируй отрезки, вытаскивай слова сам». Greedy-argmax→строка на таджвиде
+# шумит (sim≈0 даже на чистых словах). CTC-скор (Viterbi best-path, per-frame) гипотезы прямо по
+# эмиссиям — акустический likelihood: сравниваем MADD (буквы держателя i, растянуты по span'у) vs
+# CONT (буквы [i..j]). CONT≫MADD ⇒ span СОДЕРЖИТ продолжение = чтец ушёл вперёд/перечитал, подсветка
+# залипла. Границы CONT берём из того же Viterbi-пути (реальные онсеты, не пропорция скелета).
+_CTC_MARGIN = 0.03        # CONT обгоняет MADD по per-frame score хотя бы на столько
+_CTC_MIN_WORD_SEC = 0.14  # каждое вставленное слово должно получить ≥ столько (не «сплющенный» шум)
+
+
+def _wlabels(word: str, ch2idx: dict, blank: int) -> list:
+    out = []
+    for ch in word:
+        j = ch2idx.get(ch)
+        if j is not None and j != blank:
+            out.append(j)
+    return out
+
+
+def _viterbi(E, labels, blank: int):
+    """Лучший CTC-путь labels→кадры E. Возвращает (per_frame_score, path, ext). Тот же DP, что
+    w2v_align._ctc_viterbi, но с накоплением score (финальный alpha / T)."""
+    import numpy as np
+    T = E.shape[0]; L = len(labels)
+    if L == 0 or T == 0:
+        return -1e9, None, None
+    S = 2 * L + 1
+    ext = np.empty(S, dtype=np.int64)
+    ext[0] = blank; ext[1::2] = labels; ext[2::2] = blank
+    skip = np.zeros(S, dtype=bool)
+    skip[2:] = (ext[2:] != blank) & (ext[2:] != ext[:-2])
+    NEG = -1e30
+    alpha = np.full(S, NEG); alpha[0] = float(E[0, ext[0]])
+    if S > 1:
+        alpha[1] = float(E[0, ext[1]])
+    bp = np.zeros((T, S), dtype=np.int8)
+    idxS = np.arange(S)
+    for t in range(1, T):
+        e_t = E[t, ext]
+        frm1 = np.empty(S); frm1[0] = NEG; frm1[1:] = alpha[:-1]
+        frm2 = np.full(S, NEG); frm2[2:] = np.where(skip[2:], alpha[:-2], NEG)
+        cand = np.stack([alpha, frm1, frm2])
+        c = cand.argmax(axis=0)
+        alpha = cand[c, idxS] + e_t
+        bp[t] = c.astype(np.int8)
+    end_s = S - 1 if (S == 1 or alpha[S - 1] >= alpha[S - 2]) else S - 2
+    path = np.empty(T, dtype=np.int64)
+    s = end_s
+    for t in range(T - 1, -1, -1):
+        path[t] = s
+        cc = int(bp[t, s])
+        if cc == 1:
+            s -= 1
+        elif cc == 2:
+            s -= 2
+    score = float(alpha[end_s]) / T
+    return score, path, ext
+
+
+def _greedy_group(dec, ref, skel, i, t0, t1, n, held_span, repeat_onset):
+    """Прежняя greedy-логика FWD/BACK по строковому декоду span'а. Вернуть группу rep-точек или None.
+    (Вынесено из detect() без изменения поведения; CTC-FWD подключается как fallback, когда None.)"""
+    held = max((alignbricks._sim(dec, skel[i] * k) for k in range(1, 15)), default=0.0)
+    # вперёд: [i+1..j] × reps
+    fbest = (0.0, None)
+    for reps in (1, 2, 3):
+        cand = ""
+        for j in range(i + 1, min(n, i + 1 + _FWD_SPAN)):
+            cand += skel[j]
+            if cand:
+                sm = alignbricks._sim(dec, cand * reps)
+                if sm > fbest[0]:
+                    fbest = (sm, j)
+    # назад: [ra..i] — при БЛИЗКИХ sim предпочитаем МЕНЬШИЙ откат (больший ra).
+    # Частый дефект (rec7 خضرا, место 1 владельца): sim у ra=شيء и ra=فأخرجنا РАВНЫ (ничья),
+    # старый `>` брал первый (меньший ra) → перелёт на 1 слово влево. Чтец редко возвращается
+    # ДАЛЬШЕ, чем перечитывает; на ничьей верен более короткий откат.
+    back_scores = []
+    for ra in range(max(0, i - _LOOKBACK), i):
+        cand = "".join(skel[ra:i + 1])
+        if cand:
+            back_scores.append((alignbricks._sim(dec, cand), ra))
+    bbest = (0.0, None)
+    if back_scores:
+        bmax = max(s for s, _ in back_scores)
+        ra_pick = max(ra for s, ra in back_scores if s >= bmax - _BACK_TIE_EPS)
+        sim_pick = next(s for s, ra in back_scores if ra == ra_pick)
+        bbest = (sim_pick, ra_pick)
+
+    span = t1 - t0
+    if (fbest[0] >= _MIN_SIM and fbest[0] - held >= _HELD_MARGIN
+            and fbest[0] - bbest[0] >= _DIR_MARGIN):
+        # FWD: держатель i оставляет свою долю в начале span, дальше [i+1..j] едут по остатку
+        j = fbest[1]
+        hshare = span * len(skel[i]) / max(1, sum(len(skel[k]) for k in range(i, j + 1)))
+        return _mk_group(ref, skel, list(range(i + 1, j + 1)), t0 + hshare, span - hshare)
+    if (bbest[0] >= _MIN_SIM and bbest[0] - held >= _HELD_MARGIN
+            and bbest[0] - fbest[0] >= _DIR_MARGIN):
+        # BACK: держатель держится до конца паузы, дальше перечитка [ra..i]
+        ra = bbest[1]
+        onset_r = repeat_onset(*held_span)
+        return _mk_group(ref, skel, list(range(ra, i + 1)), onset_r, t1 - onset_r)
+    return None
+
+
+def _ctc_fwd_group(emissions, stride_ms, ch2idx, ref, skel, i, t0, t1, n):
+    """CTC-разбор длинного span'а держателя i: если [i..j] объясняет span лучше держателя-мадда,
+    вернуть группу rep-точек [i+1..j] с РЕАЛЬНЫМИ Viterbi-онсетами (первое чтение перечитанной
+    фразы, проглоченное span'ом). Иначе None. Гварды: маржа score + мин. кадров на слово."""
+    import numpy as np
+    blank = ch2idx.get("<pad>", 0)
+    f0 = max(0, int(t0 * 1000 / stride_ms)); f1 = min(emissions.shape[0], int(t1 * 1000 / stride_ms))
+    seg = emissions[f0:f1]
+    if seg.shape[0] < 4:
+        return None
+    held_lab = _wlabels(ref[i][3], ch2idx, blank)
+    if not held_lab:
+        return None
+    madd, _, _ = _viterbi(seg, held_lab, blank)
+    best = (madd, i)
+    for j in range(i + 1, min(n, i + 1 + _FWD_SPAN)):
+        labels = []
+        for k in range(i, j + 1):
+            labels += _wlabels(ref[k][3], ch2idx, blank)
+        sc, _, _ = _viterbi(seg, labels, blank)
+        if sc > best[0]:
+            best = (sc, j)
+    j = best[1]
+    if j <= i or best[0] - madd < _CTC_MARGIN:
+        return None
+    # ГАРД ПРОТИВ ЛОЖНОЙ ПЕРЕЧИТКИ (замазки): вставляем первое чтение [i+1..j] ТОЛЬКО если чтец
+    # прочёл эти слова ЕЩЁ РАЗ после span'а (настоящая перечитка), а не один раз (под-сегментация).
+    # Проверяем: объясняет ли акустика сразу ПОСЛЕ span'а те же [i+1..j] (2-е чтение). Окно = длина
+    # span'а (перечитка сопоставима по длине). Нет второго чтения → это не перечитка, не трогаем.
+    cont_lab = []
+    for k in range(i + 1, j + 1):
+        cont_lab += _wlabels(ref[k][3], ch2idx, blank)
+    if cont_lab:
+        g1 = min(emissions.shape[0], f1 + (f1 - f0))
+        after = emissions[f1:g1]
+        if after.shape[0] >= 4:
+            sc_after, _, _ = _viterbi(after, cont_lab, blank)
+            # что там по умолчанию (следующие по тексту слова [j+1..]) — база для сравнения
+            nxt = []
+            for k in range(j + 1, min(n, j + 1 + (j - i))):
+                nxt += _wlabels(ref[k][3], ch2idx, blank)
+            sc_nxt = _viterbi(after, nxt, blank)[0] if nxt else -1e9
+            if sc_after < sc_nxt - _CTC_MARGIN:   # после span'а звучит продолжение, НЕ повтор [i+1..j]
+                return None
+    # границы: Viterbi по [i..j], онсет каждого слова = первый кадр его первой метки
+    labels, lab_word = [], []
+    for k in range(i, j + 1):
+        for lb in _wlabels(ref[k][3], ch2idx, blank):
+            labels.append(lb); lab_word.append(k)
+    _sc, path, _ext = _viterbi(seg, labels, blank)
+    if path is None:
+        return None
+    sec = stride_ms / 1000.0
+    onset = {}
+    for fr, s in enumerate(path):
+        if s % 2 == 1:
+            k = lab_word[s // 2]
+            onset.setdefault(k, f0 + fr)
+    ks = sorted(onset)
+    if ks[0] != i or len(ks) < 2:
+        return None
+    grp = []
+    for idx2, k in enumerate(ks):
+        if k == i:
+            continue                         # держатель уже в базовой дорожке
+        a = onset[k] * sec
+        b = (onset[ks[idx2 + 1]] * sec) if idx2 + 1 < len(ks) else t1
+        if b - a < _CTC_MIN_WORD_SEC:         # слово «сплющено» → разбор ненадёжен, отвергаем весь span
+            return None
+        su, ay, wi, _ = ref[k]
+        grp.append({"t": round(a, 3), "t_end": round(b, 3),
+                    "surah": su, "ayah": ay, "wi": wi, "rep": True})
+    return grp or None
+
+
 def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_path):
     """Вернуть список word_timeline-точек перечиток (rep=True) для вклейки. При проблеме → []."""
     try:
@@ -149,52 +329,20 @@ def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_pa
             t0, t1 = spans[i]
             if t1 - t0 < span_thr:
                 continue
+
+            # --- greedy FWD/BACK (как раньше) ---
+            g = None
             dec = alignbricks._collapse_tandem(decode(t0, t1))
-            if len(dec) < _MIN_DECODE or len(dec) < _DEC_LEN_FACTOR * max(1, len(skel[i])):
-                continue
-
-            held = max((alignbricks._sim(dec, skel[i] * k) for k in range(1, 15)), default=0.0)
-            # вперёд: [i+1..j] × reps
-            fbest = (0.0, None)
-            for reps in (1, 2, 3):
-                cand = ""
-                for j in range(i + 1, min(n, i + 1 + _FWD_SPAN)):
-                    cand += skel[j]
-                    if cand:
-                        sm = alignbricks._sim(dec, cand * reps)
-                        if sm > fbest[0]:
-                            fbest = (sm, j)
-            # назад: [ra..i] — при БЛИЗКИХ sim предпочитаем МЕНЬШИЙ откат (больший ra).
-            # Частый дефект (rec7 خضرا, место 1 владельца): sim у ra=شيء и ra=فأخرجنا РАВНЫ (ничья),
-            # старый `>` брал первый (меньший ra) → перелёт на 1 слово влево. Чтец редко возвращается
-            # ДАЛЬШЕ, чем перечитывает; на ничьей верен более короткий откат.
-            back_scores = []
-            for ra in range(max(0, i - _LOOKBACK), i):
-                cand = "".join(skel[ra:i + 1])
-                if cand:
-                    back_scores.append((alignbricks._sim(dec, cand), ra))
-            bbest = (0.0, None)
-            if back_scores:
-                bmax = max(s for s, _ in back_scores)
-                ra_pick = max(ra for s, ra in back_scores if s >= bmax - _BACK_TIE_EPS)
-                sim_pick = next(s for s, ra in back_scores if ra == ra_pick)
-                bbest = (sim_pick, ra_pick)
-
-            span = t1 - t0
-            if (fbest[0] >= _MIN_SIM and fbest[0] - held >= _HELD_MARGIN
-                    and fbest[0] - bbest[0] >= _DIR_MARGIN):
-                # FWD: держатель i оставляет свою долю в начале span, дальше [i+1..j] едут по остатку
-                j = fbest[1]
-                hshare = span * len(skel[i]) / max(1, sum(len(skel[k]) for k in range(i, j + 1)))
-                g = _mk_group(ref, skel, list(range(i + 1, j + 1)), t0 + hshare, span - hshare)
-            elif (bbest[0] >= _MIN_SIM and bbest[0] - held >= _HELD_MARGIN
-                    and bbest[0] - fbest[0] >= _DIR_MARGIN):
-                # BACK: держатель держится до конца паузы, дальше перечитка [ra..i]
-                ra = bbest[1]
-                onset_r = repeat_onset(t0, t1)
-                g = _mk_group(ref, skel, list(range(ra, i + 1)), onset_r, t1 - onset_r)
-            else:
-                continue
+            if len(dec) >= _MIN_DECODE and len(dec) >= _DEC_LEN_FACTOR * max(1, len(skel[i])):
+                g = _greedy_group(dec, ref, skel, i, t0, t1, n, held_span=(t0, t1),
+                                  repeat_onset=repeat_onset)
+            # --- CTC-FWD fallback: только если greedy НИЧЕГО не дал (аддитивно, не трогает
+            # существующие возвраты — устойчивее к шуму распева, ловит السماوات/شيء rec7) ---
+            if g is None:
+                try:
+                    g = _ctc_fwd_group(emissions, stride_ms, ch2idx, ref, skel, i, t0, t1, n)
+                except Exception:
+                    g = None
             if g:
                 groups.append(g)
 
