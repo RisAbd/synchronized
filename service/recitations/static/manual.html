@@ -310,8 +310,6 @@ function wireKeyboard(){
     if(e.key === '['){ e.preventDefault(); changeSpeed(-1); return; }
     if(e.key === ']'){ e.preventDefault(); changeSpeed(+1); return; }
   });
-  // перемотка нативным ползунком аудио: коммитим открытый интервал по прошлому времени, якорь
-  // фокуса пере-ставим на новую позицию (интервал не тянется через шов перемотки).
   // перемотка нативным ползунком аудио (клик по плееру) = ВОЗВРАТ: стереть запись после метки,
   // фокус на слово этой метки, 1с грейс (не пишем реакцию), потом запись/игра продолжаются.
   audio.addEventListener('seeked', () => {
@@ -360,10 +358,14 @@ function commitFocus(bTime){
   if(focusIdx < 0) return;
   const k = wordOrder[focusIdx];
   const a = Math.max(focusStart, recordFrom);   // грейс: раньше recordFrom действия не пишем
-  if(bTime - a >= MIN_LEN){
-    events.push({k, a, b: bTime});
-    paintDone(); updateStats();
-  }
+  if(bTime - a < MIN_LEN) return;
+  // если предыдущий интервал — то же слово подряд (нет чужого слова между) → это ПРОДОЛЖЕНИЕ
+  // того же чтения (напр. после отката/грейса), а не перечитка → склеиваем, не плодим дубль-спан.
+  // Перечитка = клик по слову ПОСЛЕ других слов → между ними чужой интервал → last.k≠k → новый.
+  const last = events[events.length - 1];
+  if(last && last.k === k){ last.b = bTime; }
+  else events.push({k, a, b: bTime});
+  paintDone(); updateStats();
 }
 function clearRec(){ for(const k in wordEl) wordEl[k].classList.remove('rec'); }
 function paintFocus(){
