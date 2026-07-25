@@ -75,12 +75,11 @@
   <audio id="audio" controls preload="metadata"></audio>
   <div class="bar">
     <span><kbd>Space</kbd> пауза</span>
-    <span><kbd>→</kbd> след. слово · <kbd>←</kbd> назад на слово</span>
+    <span><kbd>←</kbd> след. слово · <kbd>→</kbd> назад на слово</span>
     <span><kbd>↑</kbd><kbd>↓</kbd> скорость</span>
     <label>скорость <select class="spd" id="spd" title="замедлить чтеца — легче успевать вести фокус">
       <option value="1" selected>1×</option><option value="0.75">0.75×</option>
-      <option value="0.5">0.5×</option><option value="0.25">0.25×</option>
-      <option value="0.1">0.1×</option></select></label>
+      <option value="0.5">0.5×</option><option value="0.25">0.25×</option></select></label>
     <button class="btn tgl on" id="btnAuto" title="автоскролл текста за фокусом">⭯ автоскролл</button>
     <span>клик по слову = возврат фокуса (перечитка) · hover не пишется</span>
     <span class="rec off" id="recState">⏸ пауза</span>
@@ -98,10 +97,10 @@
 // РУЧНОЙ ЭЛАЙНЕР (П12) — v3 (владелец 25.07 tg_3610: hover/dwell выкинуты, только КЛИКИ+КЛАВИШИ).
 // Модель: есть СЛОВО-ФОКУС (курсор ввода). Пока аудио играет — фокус-слово «пишется» (открытый
 // интервал [focusStart, t] в АУДИО-шкале). Смена фокуса коммитит интервал:
-//   → следующее слово (вперёд по чтению)   ← назад на одно слово (мелкая коррекция)
+//   ← следующее слово (вперёд по чтению, RTL)   → назад на одно слово (мелкая коррекция)
 //   клик по слову = ВОЗВРАТ фокуса на него (перечитка: слово пишется второй раз → возврат сам
 //     ложится в дорожку; повтор помечается rep=True в экспорте)
-//   ↑/↓ скорость (до 1× / до 0.1×)          Space пауза аудио
+//   ↑/↓ скорость (до 1× / до 0.25×)          Space пауза аудио
 // Мышь-HOVER игнорируется полностью (нет каши от случайных задеваний). Пишем С НУЛЯ по слуху →
 // эталон возвратов/синхрона для сверки алгоритмов (±100-200мс не важны, важны сами возвраты/порядок).
 // «↻ из прогона» заливает привязку прогона как старт; «Очистить» — пустой лист. «💾 Сохранить в бэк»
@@ -131,7 +130,7 @@ let userScrollUntil = 0;         // после ручного колеса/св�
 let scrollCoolUntil = 0;         // антидребезг программного скролла
 let lastT = 0;                   // audio.currentTime на прошлом кадре (для шва перемотки)
 const MIN_LEN = 0.05;            // короче — дребезг, не пишем
-const SPEEDS = [0.1, 0.25, 0.5, 0.75, 1];   // ↑ ускоряет до 1× (норма, не 2×), ↓ замедляет до 0.1×
+const SPEEDS = [0.25, 0.5, 0.75, 1];   // ↑ ускоряет до 1× (норма, не 2×), ↓ замедляет до 0.25× (0.1 убран — не проигрывает)
 const BAND_TOP = 0.30, BAND_BOT = 0.55, BAND_AIM = 0.38;  // держим фокус в этой вертикальной полосе окна
 
 const fmt = t => { t=Math.max(0,t|0); return (t/60|0)+':'+String(t%60).padStart(2,'0'); };
@@ -188,7 +187,7 @@ function initSpeed(){
   sp.onchange = () => applySpeed(parseFloat(sp.value) || 1);
 }
 function applySpeed(v){
-  v = Math.max(0.1, Math.min(1, v));      // ↑ до 1× (норма, не 2×), ↓ до 0.1×
+  v = Math.max(0.25, Math.min(1, v));      // ↑ до 1× (норма, не 2×), ↓ до 0.25× (0.1 убран — не проигрывает)
   audio.playbackRate = v;
   localStorage.setItem('sync.manualspeed', String(v));
   const sp = document.getElementById('spd'); if(sp) sp.value = String(v);
@@ -255,10 +254,11 @@ function renderText(){
 function wireKeyboard(){
   document.addEventListener('keydown', e => {
     if(e.code === 'Space'){ e.preventDefault(); audio.paused ? audio.play() : audio.pause(); return; }
-    if(e.code === 'ArrowRight'){ e.preventDefault(); advance(+1); return; }   // след. слово (вперёд)
-    if(e.code === 'ArrowLeft'){  e.preventDefault(); advance(-1); return; }   // назад на одно слово (мелкая коррекция)
+    // арабский RTL: следующее слово — СЛЕВА, возврат — СПРАВА
+    if(e.code === 'ArrowLeft'){  e.preventDefault(); advance(+1); return; }   // след. слово (вперёд по чтению)
+    if(e.code === 'ArrowRight'){ e.preventDefault(); advance(-1); return; }   // назад на одно слово (мелкая коррекция)
     if(e.code === 'ArrowUp'){    e.preventDefault(); changeSpeed(+1); return; } // быстрее (до 1×)
-    if(e.code === 'ArrowDown'){  e.preventDefault(); changeSpeed(-1); return; } // медленнее (до 0.1×)
+    if(e.code === 'ArrowDown'){  e.preventDefault(); changeSpeed(-1); return; } // медленнее (до 0.25×)
     if(e.key === '['){ e.preventDefault(); changeSpeed(-1); return; }
     if(e.key === ']'){ e.preventDefault(); changeSpeed(+1); return; }
   });
