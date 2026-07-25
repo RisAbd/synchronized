@@ -76,12 +76,15 @@
   <div class="bar">
     <span><kbd>Space</kbd> пауза</span>
     <span><kbd>←</kbd> след. слово · <kbd>→</kbd> назад на слово</span>
-    <span><kbd>Ctrl</kbd>+<kbd>←→</kbd> откат 1.5с + стереть хвост</span>
+    <span><kbd>Ctrl</kbd>+<kbd>←→</kbd> откат (аудио −3с, запись −2с, 1с грейс)</span>
     <span><kbd>↑</kbd><kbd>↓</kbd> скорость</span>
     <label>скорость <select class="spd" id="spd" title="замедлить чтеца — легче успевать вести фокус">
       <option value="1" selected>1×</option><option value="0.75">0.75×</option>
       <option value="0.5">0.5×</option><option value="0.25">0.25×</option></select></label>
+    <span>шрифт <button class="btn" id="btnSzDn" title="меньше">A−</button>
+      <button class="btn" id="btnSzUp" title="больше">A+</button></span>
     <button class="btn tgl on" id="btnAuto" title="автоскролл текста за фокусом">⭯ автоскролл</button>
+    <button class="btn tgl on" id="btnGuide" title="жёлтый маркер-гид: где АЛГОРИТМ считает чтеца (для сверки на слух). Мешает — выключи">◎ гид-прогон</button>
     <span>клик по слову = возврат фокуса (перечитка) · hover не пишется</span>
     <span class="rec off" id="recState">⏸ пауза</span>
     <span id="stats">интервалов: 0 · покрыто слов: 0</span>
@@ -102,8 +105,9 @@
 //   клик по слову = ВОЗВРАТ фокуса на него (перечитка: слово пишется второй раз → возврат сам
 //     ложится в дорожку; повтор помечается rep=True в экспорте)
 //   ↑/↓ скорость (до 1× / до 0.25×)          Space пауза аудио
-//   Ctrl+←/→ = откат аудио на 1.5с назад + СТЕРЕТЬ всё записанное после этого момента, фокус
-//     возвращается на слово, что звучало в этот момент (по моей же записи) → переписываю с него
+//   Ctrl+←/→ = ВОЗВРАТ: аудио отматывается на 3с, запись сохраняется до 2с назад (всё позже —
+//     стереть), 1с грейс (не пишем — успеть подвести фокус под уехавшее аудио), фокус на слово,
+//     звучавшее в точке 2с-назад. Клик по ПЛЕЕРУ (перемотка) = то же на указанную метку + 1с грейс.
 // Мышь-HOVER игнорируется полностью (нет каши от случайных задеваний). Пишем С НУЛЯ по слуху →
 // эталон возвратов/синхрона для сверки алгоритмов (±100-200мс не важны, важны сами возвраты/порядок).
 // «↻ из прогона» заливает привязку прогона как старт; «Очистить» — пустой лист. «💾 Сохранить в бэк»
@@ -132,9 +136,15 @@ let autoScroll = true;           // скроллить текст за фоку�
 let userScrollUntil = 0;         // после ручного колеса/свайпа уважаем его до этого момента
 let scrollCoolUntil = 0;         // антидребезг программного скролла
 let lastT = 0;                   // audio.currentTime на прошлом кадре (для шва перемотки)
-let suppressSeek = false;        // подавить seeking-коммит на время программной перемотки (Ctrl+←/→)
+let suppressSeek = false;        // подавить seek-обработчик на время программной перемотки (Ctrl+←/→)
+let recordFrom = 0;              // грейс: не записывать действия, пока audio.currentTime < recordFrom
+let showGuide = true;            // показывать жёлтый маркер-гид позиции по автопрогону (.at)
 const MIN_LEN = 0.05;            // короче — дребезг, не пишем
-const REWIND_SEC = 1.5;          // Ctrl+стрелка: откат аудио + стереть хвост записи, вернуть фокус на этот момент
+// Откат (Ctrl+←/→): аудио отматываем на REWIND_AUDIO назад, запись оставляем до REWIND_KEEP назад
+// (всё позже — стираем), а зазор между ними = грейс (1с) — успеть подвести фокус, не записывая.
+const REWIND_AUDIO = 3.0;        // на сколько отматывается АУДИО
+const REWIND_KEEP  = 2.0;        // до этого момента запись сохраняется; отсюда же возобновляется
+const SEEK_GRACE   = 1.0;        // клик по плееру (перемотка): столько секунд после метки не пишем
 const SPEEDS = [0.25, 0.5, 0.75, 1];   // ↑ ускоряет до 1× (норма, не 2×), ↓ замедляет до 0.25× (0.1 убран — не проигрывает)
 const BAND_TOP = 0.30, BAND_BOT = 0.55, BAND_AIM = 0.38;  // держим фокус в этой вертикальной полосе окна
 
@@ -159,9 +169,38 @@ async function init(){
   setFocus(0, 0);            // старт-фокус на первом слове
   initSpeed();
   initAutoScroll();
+  initGuide();
+  initFontSize();
+  initVolume();
   wireKeyboard();
   wireButtons();
   requestAnimationFrame(tick);
+}
+
+// тумблер жёлтого маркера-гида (.at) — где АЛГОРИТМ считает чтеца (сверка на слух). Мешает — off.
+function initGuide(){
+  showGuide = localStorage.getItem('sync.manualguide') !== '0';
+  const b = document.getElementById('btnGuide');
+  const paint = () => b.classList.toggle('on', showGuide);
+  paint();
+  b.onclick = () => { showGuide = !showGuide; localStorage.setItem('sync.manualguide', showGuide?'1':'0'); paint(); };
+}
+// размер арабского шрифта (A−/A+) → localStorage
+function initFontSize(){
+  const root = document.documentElement;
+  let sz = parseFloat(localStorage.getItem('sync.manualsize'));
+  if(!(sz > 0)) sz = 2.1;
+  const apply = () => { root.style.setProperty('--ayah-size', sz.toFixed(2)+'rem');
+    localStorage.setItem('sync.manualsize', String(sz)); };
+  apply();
+  document.getElementById('btnSzDn').onclick = () => { sz = Math.max(1.2, sz-0.2); apply(); };
+  document.getElementById('btnSzUp').onclick = () => { sz = Math.min(4.0, sz+0.2); apply(); };
+}
+// громкость аудио → localStorage (после F5 восстановить комфортный уровень)
+function initVolume(){
+  const v = parseFloat(localStorage.getItem('sync.manualvol'));
+  if(v >= 0 && v <= 1) audio.volume = v;
+  audio.addEventListener('volumechange', () => localStorage.setItem('sync.manualvol', String(audio.volume)));
 }
 
 // [{surah,ayah,wi,t,t_end?}] → [{k,a,b}] отсортировано по a; конец приближаем при отсутствии t_end
@@ -262,7 +301,7 @@ function wireKeyboard(){
     // Ctrl+стрелка: перемотать аудио на 1.5с назад, СТЕРЕТЬ всё записанное после этого момента,
     // вернуть фокус на слово, которое было записано в этот момент (переписать заново с него).
     if((e.ctrlKey || e.metaKey) && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')){
-      e.preventDefault(); rewindTruncate(); return; }
+      e.preventDefault(); rewindCtrl(); return; }
     // арабский RTL: следующее слово — СЛЕВА, возврат — СПРАВА
     if(e.code === 'ArrowLeft'){  e.preventDefault(); advance(+1); return; }   // след. слово (вперёд по чтению)
     if(e.code === 'ArrowRight'){ e.preventDefault(); advance(-1); return; }   // назад на одно слово (мелкая коррекция)
@@ -273,27 +312,36 @@ function wireKeyboard(){
   });
   // перемотка нативным ползунком аудио: коммитим открытый интервал по прошлому времени, якорь
   // фокуса пере-ставим на новую позицию (интервал не тянется через шов перемотки).
-  audio.addEventListener('seeking', () => {
-    if(suppressSeek) return;                 // Ctrl+←/→ сам разберётся с интервалами
-    commitFocus(lastT); focusStart = audio.currentTime || 0; });
+  // перемотка нативным ползунком аудио (клик по плееру) = ВОЗВРАТ: стереть запись после метки,
+  // фокус на слово этой метки, 1с грейс (не пишем реакцию), потом запись/игра продолжаются.
+  audio.addEventListener('seeked', () => {
+    if(suppressSeek) return;
+    const T = audio.currentTime || 0;
+    if(T < 0.05) return;                        // старт/загрузка — не возврат
+    applyReturn(T, T, T + SEEK_GRACE, false);
+  });
 }
 
-// Ctrl+←/→: откат аудио на REWIND_SEC назад + стереть ВСЁ записанное после точки отката, фокус —
-// на слово, что звучало в этот момент (по моей же записи). Дальше пишу заново с этого места.
-function rewindTruncate(){
-  const nt = Math.max(0, (audio.currentTime || 0) - REWIND_SEC);
-  suppressSeek = true;
-  audio.currentTime = nt;
-  suppressSeek = false;
-  // стереть хвост: интервалы, начавшиеся ПОСЛЕ nt — убрать; пересекающие nt — обрезать конец до nt
-  events = events.filter(ev => ev.a < nt - 1e-6);
-  for(const ev of events){ if(ev.b > nt) ev.b = nt; }
-  // фокус на слово с последним (по времени старта) интервалом до nt — оно звучало в этот момент
-  let best = null;
-  for(const ev of events){ if(ev.a <= nt && (!best || ev.a > best.a)) best = ev; }
+// Ctrl+←/→: аудио −REWIND_AUDIO, запись сохраняется до −REWIND_KEEP (позже — стереть); зазор
+// между аудио и точкой записи = грейс — успеваю подвести фокус под уехавшее, не записывая.
+function rewindCtrl(){
+  const now = audio.currentTime || 0;
+  const keep = Math.max(0, now - REWIND_KEEP);
+  applyReturn(Math.max(0, now - REWIND_AUDIO), keep, keep, true);
+}
+
+// ВОЗВРАТ (общий для Ctrl+←/→ и клика по плееру): стереть запись после keepUntil, фокус на слово,
+// звучавшее в keepUntil (по моей же записи), аудио → audioPos, запись возобновится с recFrom (грейс),
+// залипшие зелёные метки записи сбросить.
+function applyReturn(audioPos, keepUntil, recFrom, moveAudio){
+  events = events.filter(ev => ev.a < keepUntil - 1e-6);            // хвост записи после метки — стереть
+  for(const ev of events){ if(ev.b > keepUntil) ev.b = keepUntil; } // пересекающий метку — обрезать
+  let best = null;                                                  // слово, звучавшее в момент keepUntil
+  for(const ev of events){ if(ev.a <= keepUntil && (!best || ev.a > best.a)) best = ev; }
   if(best){ const idx = wordOrder.indexOf(best.k); if(idx >= 0) focusIdx = idx; }
-  focusStart = nt; lastT = nt;
-  paintDone(); paintFocus(); updateStats();
+  focusStart = keepUntil; recordFrom = recFrom; lastT = audioPos;
+  if(moveAudio){ suppressSeek = true; audio.currentTime = audioPos; suppressSeek = false; }
+  clearRec(); paintDone(); paintFocus(); updateStats();
 }
 
 // установить фокус на слово idx: сначала ЗАКОММИТИТЬ открытый интервал текущего фокуса до atTime,
@@ -311,13 +359,15 @@ function advance(dir){ setFocus(focusIdx + dir, audio.currentTime || 0); }
 function commitFocus(bTime){
   if(focusIdx < 0) return;
   const k = wordOrder[focusIdx];
-  if(bTime - focusStart >= MIN_LEN){
-    events.push({k, a: focusStart, b: bTime});
+  const a = Math.max(focusStart, recordFrom);   // грейс: раньше recordFrom действия не пишем
+  if(bTime - a >= MIN_LEN){
+    events.push({k, a, b: bTime});
     paintDone(); updateStats();
   }
 }
+function clearRec(){ for(const k in wordEl) wordEl[k].classList.remove('rec'); }
 function paintFocus(){
-  for(const k in wordEl) wordEl[k].classList.remove('focus');
+  for(const k in wordEl){ wordEl[k].classList.remove('focus'); wordEl[k].classList.remove('rec'); }
   const k = wordOrder[focusIdx]; if(k && wordEl[k]) wordEl[k].classList.add('focus');
 }
 
@@ -325,14 +375,15 @@ function paintFocus(){
 // смена фокуса (←/→/клик) его коммитит. Мышь-hover НЕ участвует.
 function tick(){
   const t = audio.currentTime || 0;
-  const recording = !audio.paused && focusIdx >= 0;
+  const recording = !audio.paused && focusIdx >= 0 && t >= recordFrom;
   const k = wordOrder[focusIdx];
   if(k && wordEl[k]) wordEl[k].classList.toggle('rec', recording);
   updateAt(t);        // маркер-гид по прогону + автоскролл за фокусом
   // индикатор состояния
   if(recording){ setRec('on', '● запись: ' + (k||'')); }
   else if(audio.paused){ setRec('off', '⏸ пауза'); }
-  else { setRec('off', '○ жми → или кликни слово'); }
+  else if(t < recordFrom){ setRec('frozen', '❄ грейс — подведи фокус'); }
+  else { setRec('off', '○ жми ← или кликни слово'); }
   lastT = t;
   requestAnimationFrame(tick);
 }
@@ -341,7 +392,9 @@ function tick(){
 // (сравниваешь на слух со своим фокусом). Автоскролл едет за ФОКУСОМ (моя текущая позиция).
 function updateAt(t){
   let k = null;
-  for(let i=posRef.length-1; i>=0; i--){ if(posRef[i].a <= t){ if(t <= posRef[i].b + 0.5) k = posRef[i].k; break; } }
+  if(showGuide){
+    for(let i=posRef.length-1; i>=0; i--){ if(posRef[i].a <= t){ if(t <= posRef[i].b + 0.5) k = posRef[i].k; break; } }
+  }
   if(k !== atKey){
     if(atKey && wordEl[atKey]) wordEl[atKey].classList.remove('at');
     atKey = k;
