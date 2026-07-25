@@ -13,6 +13,7 @@
 """
 import os
 import sys
+import bisect
 import difflib
 
 sys.path.insert(0, "/app/src")
@@ -27,6 +28,30 @@ def visit_seq(run):
     """Последовательность (surah,ayah,wi) по возрастанию t (повторы — дубли)."""
     wt = sorted(run.data.get("word_timeline", []), key=lambda e: e["t"])
     return [(e["surah"], e["ayah"], e["wi"]) for e in wt]
+
+
+def visit_seq_t(run):
+    """То же, но с временем: [((surah,ayah,wi), t), …] по возрастанию t."""
+    wt = sorted(run.data.get("word_timeline", []), key=lambda e: e["t"])
+    return [((e["surah"], e["ayah"], e["wi"]), float(e["t"])) for e in wt]
+
+
+def word_texts(run):
+    """Карта (surah,ayah,wi) → арабское слово из data.sections (для читаемости отчёта).
+    Структура build_data: sections[].{surah, ayat[].{ayah, words[]}}."""
+    m = {}
+    for sec in run.data.get("sections", []) or []:
+        s = sec.get("surah")
+        for ay in sec.get("ayat", []) or []:
+            a = ay.get("ayah")
+            for wi, w in enumerate(ay.get("words", []) or []):
+                if s is not None and a is not None:
+                    m[(s, a, wi)] = w
+    return m
+
+
+def mmss(t):
+    return f"{int(t) // 60}:{int(t) % 60:02d}"
 
 
 def rank_map(*seqs):
@@ -67,8 +92,29 @@ def main():
         return 1
 
     ms, as_ = visit_seq(man), visit_seq(alg)
+    mst, ast = visit_seq_t(man), visit_seq_t(alg)   # с временами — для контекстного отчёта
+    wtext = word_texts(man) or word_texts(alg)
     rank = rank_map(ms, as_)
     m_ret, a_ret = returns(ms, rank), returns(as_, rank)
+
+    def txt(w):
+        return wtext.get(w, "")
+
+    def aligner_at(t):
+        """Слово, подсвеченное алайнером в аудио-момент t (последний визит с t'<=t)."""
+        ts = [tt for _, tt in ast]
+        j = bisect.bisect_right(ts, t) - 1
+        return ast[j] if j >= 0 else (None, None)
+
+    def context(seq_t, pos, span=2):
+        """Строка окружения ±span визитов вокруг позиции pos в последовательности с временами."""
+        lo, hi = max(0, pos - span), min(len(seq_t), pos + span + 1)
+        parts = []
+        for k in range(lo, hi):
+            w, tt = seq_t[k]
+            mark = "»" if k == pos else " "
+            parts.append(f"{mark}{fmt(w)}·{mmss(tt)}{('·'+txt(w)) if txt(w) else ''}")
+        return "  ".join(parts)
 
     # общее совпадение ПОРЯДКА (по reading-rank, времена игнорим)
     m_ranks = [rank[t] for t in ms]
@@ -97,10 +143,25 @@ def main():
     print(f"  {key:7}: {len(a_ret)}  →  " + ", ".join(fmt(w) for _, w in a_ret))
     print(f"  matched {matched} | recall {recall:.2f} (сколько эталонных возвратов поймал {key}) | "
           f"precision {precision:.2f} (сколько {key}-возвратов реальны)")
-    # непойманные эталонные возвраты — что тюнить
-    unmatched = [mw for _, mw in m_ret if not any(near(mw, aw) for _, aw in a_ret)]
+    # непойманные эталонные возвраты — что тюнить (с КОНТЕКСТОМ: где залипла/обогнала подсветка)
+    unmatched = [(i, mw) for i, mw in m_ret if not any(near(mw, aw) for _, aw in a_ret)]
     if unmatched:
-        print(f"\n  ⚠ ПРОПУЩЕНЫ {key}-детектором (тюнинг сюда): " + ", ".join(fmt(w) for w in unmatched))
+        print(f"\n  ⚠ ПРОПУЩЕНО {key}-детектором ({len(unmatched)}) — контекст для тюнинга:")
+        for i, mw in unmatched:
+            t_m = mst[i][1]
+            aw, at = aligner_at(t_m)
+            print(f"\n   • ВОЗВРАТ эталона на {fmt(mw)}{('·'+txt(mw)) if txt(mw) else ''} @ {mmss(t_m)}")
+            print(f"     эталон : {context(mst, i)}")
+            if aw is not None:
+                stuck = "ОБГОН/ЗАЛИПАНИЕ" if rank.get(aw, -1) > rank.get(mw, -1) else "позади"
+                print(f"     {key:6} @ {mmss(t_m)}: подсветка на {fmt(aw)}"
+                      f"{('·'+txt(aw)) if txt(aw) else ''}  [{stuck} vs эталона]")
+    # ложные возвраты алайнера — чтобы поднятие recall не тащило каши (следим за precision)
+    false_ret = [(i, aw) for i, aw in a_ret if not any(near(aw, mw) for _, mw in m_ret)]
+    if false_ret:
+        print(f"\n  ⚠ ЛОЖНЫЕ возвраты {key} ({len(false_ret)}) — которых НЕТ в эталоне (следи за precision):")
+        for i, aw in false_ret:
+            print(f"     • {fmt(aw)}{('·'+txt(aw)) if txt(aw) else ''} @ {mmss(ast[i][1])}   {context(ast, i)}")
     return 0
 
 
