@@ -30,9 +30,12 @@ OUT = "/app/work/ghio-export"
 STATIC = "/app/service/recitations/static"
 
 
-def _no_manual(runs):
-    """Убрать manual-прогоны из списка (владелец: тестовые ручные привязки в выгрузку не тащим)."""
-    return [x for x in (runs or []) if x.get("recognizer") != "manual"]
+def _fetch(rf, rid, key=None):
+    """data.json прогона через живую вьюху (RequestFactory — паритет с бэком). key=None → дефолт."""
+    q = {"asr": key} if key else {}
+    data = json.loads(views.data_json(rf.get("/", q), rid).content)
+    data["audio"] = ""  # источник только YouTube, mp3 не выгружаем
+    return data
 
 
 def main():
@@ -49,19 +52,22 @@ def main():
         if r.get("status") != "ready" or not yt:
             print(f"  rec{rid}: status={r.get('status')} youtube={yt!r} — пропуск")
             continue
-        r["runs"] = _no_manual(r.get("runs"))
-        # forced по умолчанию (prefer=forced) — не даём плееру врубить manual при входе
-        data = json.loads(views.data_json(rf.get("/", {"asr": "forced"}), rid).content)
-        data["runs"] = _no_manual(data.get("runs"))
-        if data.get("active_key") == "manual":  # страховка, если forced вдруг не ready
-            data["active_key"] = data["recognizer"] = "forced"
-        data["audio"] = ""  # источник только YouTube, mp3 не выгружаем
         d = os.path.join(OUT, "r", str(rid))
         os.makedirs(d, exist_ok=True)
+        # data.json = ДЕФОЛТНЫЙ прогон (active_run сам выбирает по приоритету/мин.прыжкам)
+        data = _fetch(rf, rid)
         with open(os.path.join(d, "data.json"), "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
+        # ПОФАЙЛОВО каждый ready-прогон (вкл. manual/test/test2) → r/<id>/<key>.json;
+        # на статике так переключается любой прогон (?asr= там игнорируется).
+        run_keys = [x.get("recognizer") for x in (r.get("runs") or [])
+                    if x.get("status") == "ready" and x.get("recognizer")]
+        for key in run_keys:
+            rd = _fetch(rf, rid, key)
+            with open(os.path.join(d, f"{key}.json"), "w", encoding="utf-8") as f:
+                json.dump(rd, f, ensure_ascii=False)
         kept.append(r)
-        print(f"  rec{rid}: data.json (active={data.get('active_key')}, YouTube {yt})")
+        print(f"  rec{rid}: data.json (active={data.get('active_key')}) + прогоны {run_keys}, YouTube {yt}")
 
     lst["recitations"] = kept
     with open(os.path.join(OUT, "recitations.json"), "w", encoding="utf-8") as f:

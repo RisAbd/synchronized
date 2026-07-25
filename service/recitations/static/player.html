@@ -172,7 +172,18 @@ const API = (QS.get('api') || '').replace(/\/$/, '');
 //                          ОТНОСИТЕЛЬНО документа через ./ (не подразумеваем корень сайта).
 const DATA_BASE = API ? (API + '/')
                       : (location.pathname.includes('/static/') ? '/' : './');
-const DATA_URL = REC_ID ? (DATA_BASE + 'r/' + REC_ID + '/data.json' + (ASR ? '?asr='+encodeURIComponent(ASR) : '')) : null;
+// Кандидаты загрузки данных прогона (пробуем по порядку до первого 200):
+//  1) статичный пофайловый прогон r/<id>/<key>.json — так на GitHub Pages переключается ЛЮБОЙ
+//     прогон (на статике ?asr= игнорируется, поэтому каждый прогон = отдельный файл);
+//  2) динамический data.json?asr=<key> — живой Django-бэк (пофайлового прогона там нет → 404 → сюда).
+function dataCandidates(){
+  if(!REC_ID) return [];
+  const base = DATA_BASE + 'r/' + REC_ID + '/';
+  const out = [];
+  if(ASR) out.push(base + encodeURIComponent(ASR) + '.json');
+  out.push(base + 'data.json' + (ASR ? '?asr='+encodeURIComponent(ASR) : ''));
+  return out;
+}
 let YOUTUBE_ID = '';   // узнаём из data.json (было server-side)
 const audio = document.getElementById('audio');
 const textEl = document.getElementById('text');
@@ -331,11 +342,15 @@ function fallbackToAudio(){
 
 init();
 async function init(){
-  if(!DATA_URL){ fail('не задана запись (?rec=…)'); return; }
-  let d;
-  // ?t=… обходит агрессивный кеш GitHub Pages/браузера
-  try { const r = await fetch(DATA_URL + (DATA_URL.includes('?') ? '&' : '?') + 't=' + Date.now(), { cache: 'no-store' }); if(!r.ok) throw 0; d = await r.json(); }
-  catch(e){ fail('не удалось загрузить данные'); return; }
+  const cands = dataCandidates();
+  if(!cands.length){ fail('не задана запись (?rec=…)'); return; }
+  let d = null;
+  // пробуем кандидаты по порядку; ?t=… обходит агрессивный кеш GitHub Pages/браузера
+  for(const url of cands){
+    try { const r = await fetch(url + (url.includes('?') ? '&' : '?') + 't=' + Date.now(), { cache: 'no-store' }); if(!r.ok) continue; d = await r.json(); break; }
+    catch(e){ /* следующий кандидат */ }
+  }
+  if(!d){ fail('не удалось загрузить данные'); return; }
   DATA = d;
 
   document.title = (d.title || 'запись') + ' · synchronized';
