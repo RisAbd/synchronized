@@ -27,23 +27,19 @@ from pathlib import Path
 
 # Общие кирпичи (DSP + арабские строки) — самодостаточная математика, общая с w2v-источниками.
 # Держим в ОДНОМ модуле (alignbricks) и импортируем, а не копипастим (директива владельца 25.07:
-# «всю эту логику вытащи в один модуль»). Реэкспортим под старыми именами → `falign._sim` и т.п.
-# продолжают работать для внешних вызовов на время перехода.
-from alignbricks import (  # noqa: F401
+# «всю эту логику вытащи в один модуль»). Тянем ТОЛЬКО то, что falign реально зовёт внутри —
+# переходные реэкспорты (_lev, часть _SNAP_*) сняты, w2v-источники импортят alignbricks напрямую.
+from alignbricks import (
     SAMPLE_RATE,
     _HARAKAT,
     _collapse_tandem,
     _frame_db,
-    _lev,
     _sim,
     _snap_bounds,
     _SNAP_FLOOR_PCT,
     _SNAP_FRAME_MS,
     _SNAP_MARGIN_DB,
     _SNAP_MIN_RUN,
-    _SNAP_MIN_SHIFT_SEC,
-    _SNAP_MIN_WORD_SEC,
-    _SNAP_WINDOW_SEC,
 )
 
 
