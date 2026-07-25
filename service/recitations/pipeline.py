@@ -397,6 +397,11 @@ def build_manual_run(run, word_timeline: list[dict]) -> None:
                 item["t_end"] = round(float(w["t_end"]), 3)
             except (TypeError, ValueError):
                 pass
+        # rep=True — точка-перечитка (возврат чтеца, П8). Ручной элайнер v3 помечает ею повторные
+        # проходы по слову; build_data читает флаг из word_timeline (не выводит из дублей), поэтому
+        # протаскиваем — иначе эталонные ВОЗВРАТЫ (главный смысл ручной сверки) потеряют пометку.
+        if w.get("rep"):
+            item["rep"] = True
         wt.append(item)
     wt.sort(key=lambda w: w["t"])
     if not wt:
