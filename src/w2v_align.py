@@ -24,10 +24,10 @@ from __future__ import annotations
 
 import os
 
-import falign          # только за хелперами (_snap_bounds, _HARAKAT); тяжёлые импорты у него ленивы
+import alignbricks     # общие кирпичи (_snap_bounds, _HARAKAT) — связь w2v→falign снята (директива 25.07)
 import quran as quranmod
 
-_HARAKAT = falign._HARAKAT
+_HARAKAT = alignbricks._HARAKAT
 SAMPLE_RATE = 16000
 
 _MODEL_NAME = os.environ.get("SYNC_W2V_MODEL", "") or "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
@@ -237,7 +237,7 @@ def forced_align(E, stride_ms: float, verses, idx2ch: dict, ch2idx: dict,
     if do_snap:
         real_idx = [i for i, f in enumerate(interp_flags) if not f]
         real_bounds = [bounds[i] for i in real_idx]
-        snapped_bounds, snapped = falign._snap_bounds(real_bounds, audio)
+        snapped_bounds, snapped = alignbricks._snap_bounds(real_bounds, audio)
         for k, i in enumerate(real_idx):
             bounds[i] = snapped_bounds[k]
 

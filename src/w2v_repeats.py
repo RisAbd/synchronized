@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import os
 
-import falign  # переиспуем _frame_db/_sim/_collapse_tandem (общие кирпичи, не данные источника)
+import alignbricks  # общие кирпичи _frame_db/_sim/_collapse_tandem (связь w2v→falign снята, директива 25.07)
 
 SAMPLE_RATE = 16000
 
@@ -113,7 +113,7 @@ def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_pa
         import w2v_align
         audio = w2v_align._load_wav(audio_path)
         frame_len = max(1, int(SAMPLE_RATE * _SNAP_FRAME_MS / 1000))
-        db = falign._frame_db(audio, frame_len)
+        db = alignbricks._frame_db(audio, frame_len)
         speech = None
         if db is not None and len(db) >= 3:
             thr = float(np.percentile(db, 15)) + 10.0
@@ -148,11 +148,11 @@ def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_pa
             t0, t1 = spans[i]
             if t1 - t0 < span_thr:
                 continue
-            dec = falign._collapse_tandem(decode(t0, t1))
+            dec = alignbricks._collapse_tandem(decode(t0, t1))
             if len(dec) < _MIN_DECODE or len(dec) < _DEC_LEN_FACTOR * max(1, len(skel[i])):
                 continue
 
-            held = max((falign._sim(dec, skel[i] * k) for k in range(1, 15)), default=0.0)
+            held = max((alignbricks._sim(dec, skel[i] * k) for k in range(1, 15)), default=0.0)
             # вперёд: [i+1..j] × reps
             fbest = (0.0, None)
             for reps in (1, 2, 3):
@@ -160,7 +160,7 @@ def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_pa
                 for j in range(i + 1, min(n, i + 1 + _FWD_SPAN)):
                     cand += skel[j]
                     if cand:
-                        sm = falign._sim(dec, cand * reps)
+                        sm = alignbricks._sim(dec, cand * reps)
                         if sm > fbest[0]:
                             fbest = (sm, j)
             # назад: [ra..i]
@@ -168,7 +168,7 @@ def detect(emissions, stride_ms, idx2ch, ch2idx, word_timeline, verses, audio_pa
             for ra in range(max(0, i - _LOOKBACK), i):
                 cand = "".join(skel[ra:i + 1])
                 if cand:
-                    sm = falign._sim(dec, cand)
+                    sm = alignbricks._sim(dec, cand)
                     if sm > bbest[0]:
                         bbest = (sm, ra)
 
