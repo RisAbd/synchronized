@@ -115,8 +115,15 @@ def run(audio_path, quran, ctx) -> dict:    # audio → своя акустик�
 - **Шаг 1 (w2v свои возвраты, убрать inherit):** ✅ СДЕЛАНО — `w2v_repeats.detect` (span, FWD/BACK,
   пост-гард fj=0); `_inherit_repeats` из пути вызова убран (но код-заглушка `pipeline.py:305-382` ещё
   висит — **удалить в шаге 5**). w2v дефолт на всех 9, диапазоны верны (кейс F закрыт), cov 0.914–0.998.
-- **Шаг 2 (общий `match_align`, буквенный вход):** 🔴 НЕ начат. `src/align.py` — словесное ядро; нужно
-  обобщить на буквы (декод w2v/MMS) и вынести в `src/match_align.py`, импортируемый источниками.
+- **Шаг 2 (общий `match_align`, буквенный вход):** ✅ СДЕЛАНО (сессия 17). Создан `src/match_align.py` —
+  ЕДИНЫЙ модуль матчинга к Корану с двумя входами: СЛОВЕСНЫЙ (`align`/`load_transcript`/`match_stats`/
+  `CorpusIndex`/`Word` — из align.py) и БУКВЕННЫЙ (`find_range`/`build_index`/`greedy_skeleton`/
+  `ayah_start_hints`/`ctc_logprob`/… — из w2v_range.py). `align.py` и `w2v_range.py` теперь тонкие
+  ре-экспортные шимы над ним (pipeline/run/gpu_align/офлайн-пробы НЕ тронуты). Поведение-сохраняюще:
+  OLD==NEW байт-в-байт (сверка find_range на rec7-эмиссиях), словесный align rec11 cov 0.964/rec9
+  вменяем, `find_range` с сохранёнными декодами 9/9 диапазонов (rec7 6:95-103), `manage.py check` чист.
+  NB: свежий greedy-декод кеша rec7_w2v_emis.npy даёт иной диапазон (13:35) — свойство decode-источника,
+  НЕ match_align (идентично старому коду); e2e-путь берёт декод из эмиссий live и даёт верный 6:95-103.
 - **Шаг 3 (MMS/forced независим, свой диапазон):** 🔴 НЕ начат. forced ещё берёт диапазон из ASR
   (`_forced_source`). Дать ему свой range-детект (как `w2v_range`) поверх общего match_align.
 - **Шаг 4 (уплостить модель источников, плагин-пакет):** 🔴 НЕ начат. Создать `sources/` + лоадер,

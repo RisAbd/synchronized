@@ -33,11 +33,17 @@
   `_sim`+`_lev`/`_collapse_tandem` + `SAMPLE_RATE`/`_SNAP_*`) вынесены в `src/alignbricks.py`; falign
   реэкспортит под старыми именами (gpu_align/pipeline/tasks не тронуты), w2v_align/w2v_repeats импортят
   из alignbricks (больше НЕ `import falign`). Поведение-сохраняюще: reps 11/9/7/21/4/20/14/12/8
-  идентичны, `manage.py check` чист. Коммит в main. **ДАЛЬШЕ:** (2) общий `match_align` — обобщить
-  `align.py` на буквенный вход (владелец: матчинг с Кораном = ОДНА универсальная функция) → (4) пакет
-  `sources/` + динамический лоадер (снять `ALIGNERS`/`is_aligner`/`_maybe_*`, `active_run` упростить) →
-  (3) MMS свой диапазон. Удалить мёртвый `pipeline._inherit_repeats`+`_REPEAT_ZONE_MARGIN`. Каждый шаг
-  — рабочее состояние + коммит+пуш; тест `manage.py check` + офлайн `work/test_fwd_trim.py`.
+  идентичны, `manage.py check` чист. ✅ ИНКРЕМЕНТ 2 СДЕЛАН (сессия 17): создан `src/match_align.py` —
+  ЕДИНЫЙ модуль матчинга к Корану, два входа: СЛОВЕСНЫЙ (`align`/`load_transcript`/`match_stats`/
+  `CorpusIndex`/`Word` из align.py) + БУКВЕННЫЙ (`find_range`/`build_index`/`greedy_skeleton`/… из
+  w2v_range.py). `align.py` и `w2v_range.py` теперь тонкие ре-экспортные шимы (pipeline/run/gpu_align/
+  пробы не тронуты). Поведение-сохраняюще: OLD==NEW байт-в-байт на rec7-эмиссиях, словесный align rec11
+  cov 0.964, `find_range` с сохранёнными декодами 9/9 (rec7 6:95-103), `manage.py check` чист. Коммит в
+  main. Инструмент: `work/verify_match_align.py`. **ДАЛЬШЕ:** (4) пакет `sources/` + динамический лоадер
+  (файл-на-источник, контракт `KEY/LABEL/available()/run()`, `importlib`; снять `ALIGNERS`/`is_aligner`/
+  `_maybe_*`, `active_run` упростить) → (3) MMS свой диапазон через `match_align.find_range` (снять
+  `_forced_source`). Удалить мёртвый `pipeline._inherit_repeats`+`_REPEAT_ZONE_MARGIN`. Каждый шаг —
+  рабочее состояние + коммит+пуш; тест `manage.py check` + офлайн `work/verify_match_align.py`.
 - **Сделано 24-25.07 (сессия 15): w2v ПОЛНОСТЬЮ независим — whisperx выкинут, свой CTC-Viterbi +
   точный find_range.** Директива владельца: «Wave2Vec отдельный, зачем ему WhisperX?» + «ничего от
   других ASR/аллайнеров». Сделано: (1) модель грузим напрямую через `transformers`
