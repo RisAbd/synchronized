@@ -110,11 +110,17 @@
      плавный градиент от центра к краям (маскирует неточность привязки слова к таймстемпу) */
   .w.lit { color:var(--hl-fg);
     background:color-mix(in srgb, var(--hot) calc(var(--wi,0) * 62%), transparent); }
-  /* горячее (текущее) слово: karaoke-заливка справа-налево по прогрессу внутри слова
-     (фон задаётся из JS каждый кадр → transition только на цвет, иначе заливка «плывёт»).
-     Заливаем фон, а не режем слово на буквы-спаны — арабская вязь не ломается. */
+  /* горячее (текущее) слово: СПЛОШНАЯ подсветка (без бегущей karaoke-заливки — владелец 25.07:
+     движущийся прогресс = «моргающий светофор», визуальное напряжение). Фон целиком, слово не
+     режем на буквы-спаны (арабская вязь). Буква+харакат внутри — отложено (см. updateHighlight). */
   .w.hot { color:#fff; background:var(--hot); box-shadow:0 1px 10px rgba(46,139,69,.42);
-    transition:color .25s; }
+    transition:color .25s, background .25s; position:relative; }
+  /* прогресс чтения слова — жёлтая полоска ВНУТРИ слова у нижнего края (владелец: не снизу/снаружи,
+     чуть потолще): растёт от 0 до ширины слова к концу звучания, текст не перекрывает.
+     Без бегущей заливки-«светофора». */
+  .w.hot::after { content:''; position:absolute; inset-inline-start:.14em; bottom:2px;
+    height:4px; width:calc(var(--prog,0) * (100% - .28em)); background:#ffd24a;
+    border-radius:2px; box-shadow:0 0 5px rgba(255,210,74,.8); transition:width .09s linear; }
   #badge { position:fixed; z-index:30; bottom:14px; inset-inline-start:14px;
     display:flex; align-items:center; gap:8px; direction:rtl; background:var(--card);
     border:1px solid var(--line); border-radius:999px; padding:6px 14px;
@@ -166,7 +172,18 @@ const API = (QS.get('api') || '').replace(/\/$/, '');
 //                          ОТНОСИТЕЛЬНО документа через ./ (не подразумеваем корень сайта).
 const DATA_BASE = API ? (API + '/')
                       : (location.pathname.includes('/static/') ? '/' : './');
-const DATA_URL = REC_ID ? (DATA_BASE + 'r/' + REC_ID + '/data.json' + (ASR ? '?asr='+encodeURIComponent(ASR) : '')) : null;
+// Кандидаты загрузки данных прогона (пробуем по порядку до первого 200):
+//  1) статичный пофайловый прогон r/<id>/<key>.json — так на GitHub Pages переключается ЛЮБОЙ
+//     прогон (на статике ?asr= игнорируется, поэтому каждый прогон = отдельный файл);
+//  2) динамический data.json?asr=<key> — живой Django-бэк (пофайлового прогона там нет → 404 → сюда).
+function dataCandidates(){
+  if(!REC_ID) return [];
+  const base = DATA_BASE + 'r/' + REC_ID + '/';
+  const out = [];
+  if(ASR) out.push(base + encodeURIComponent(ASR) + '.json');
+  out.push(base + 'data.json' + (ASR ? '?asr='+encodeURIComponent(ASR) : ''));
+  return out;
+}
 let YOUTUBE_ID = '';   // узнаём из data.json (было server-side)
 const audio = document.getElementById('audio');
 const textEl = document.getElementById('text');
@@ -325,11 +342,15 @@ function fallbackToAudio(){
 
 init();
 async function init(){
-  if(!DATA_URL){ fail('не задана запись (?rec=…)'); return; }
-  let d;
-  // ?t=… обходит агрессивный кеш GitHub Pages/браузера
-  try { const r = await fetch(DATA_URL + (DATA_URL.includes('?') ? '&' : '?') + 't=' + Date.now(), { cache: 'no-store' }); if(!r.ok) throw 0; d = await r.json(); }
-  catch(e){ fail('не удалось загрузить данные'); return; }
+  const cands = dataCandidates();
+  if(!cands.length){ fail('не задана запись (?rec=…)'); return; }
+  let d = null;
+  // пробуем кандидаты по порядку; ?t=… обходит агрессивный кеш GitHub Pages/браузера
+  for(const url of cands){
+    try { const r = await fetch(url + (url.includes('?') ? '&' : '?') + 't=' + Date.now(), { cache: 'no-store' }); if(!r.ok) continue; d = await r.json(); break; }
+    catch(e){ /* следующий кандидат */ }
+  }
+  if(!d){ fail('не удалось загрузить данные'); return; }
   DATA = d;
 
   document.title = (d.title || 'запись') + ' · synchronized';
@@ -345,22 +366,23 @@ async function init(){
   renderText();
   initEdition();
   initWordSeek();
-  if(DEBUG) buildAsrbar(d);
+  buildAsrbar(d);
 
   window.addEventListener('wheel', pauseScroll, {passive:true});
   window.addEventListener('touchmove', pauseScroll, {passive:true});
   setupSource();   // решает видео/аудио и запускает тик (видео — по onReady плеера)
 }
 
-// отладочный тумблер прогонов (?debug=1): распознавание (ASR) и выравнивание (forced) — раздельно.
-// Строим из data.runs; клик переоткрывает плеер с ?asr=<key>. Конечному читателю не нужен.
+// тумблер прогонов: распознавание (ASR) и выравнивание (forced/w2v) — раздельно. Строим из
+// data.runs; клик переоткрывает плеер с ?asr=<key>. Видим всегда (владелец хочет сам выбирать/
+// сравнивать выравнивание, w2v визуально бывает хуже forced). ?debug=1 доступ к ручному элайнеру.
 function buildAsrbar(d){
   const runs = d.runs || [];
   if(runs.length < 2) return;
   const bar = document.getElementById('asrbar');
   const pct = m => (m && m.coverage) ? Math.round(m.coverage*100)+'%' : '—';
   const link = (run) => {
-    const q = new URLSearchParams(location.search); q.set('asr', run.recognizer); q.set('debug','1');
+    const q = new URLSearchParams(location.search); q.set('asr', run.recognizer);
     const on = run.recognizer === d.active_key ? ' on' : '';
     if(run.status === 'ready'){
       const a=document.createElement('a'); a.className='asr'+on; a.href='?'+q.toString();
@@ -380,11 +402,13 @@ function buildAsrbar(d){
   const aligners = runs.filter(r=>r.is_aligner);
   if(aligners.length){ bar.appendChild(lbl('· выравнивание:',' lbl-align'));
     aligners.forEach(r=>bar.appendChild(link(r))); }
-  // ссылка на ручной элайнер (П12) — дебаг-тул: правка привязки мышью по словам
-  const man=document.createElement('a'); man.className='asr'; man.textContent='✍ ручной';
-  man.title='ручной элайнер: правка привязки слов мышью';
-  man.href=(API||'')+'/r/'+REC_ID+'/manual'+(ASR?'?asr='+encodeURIComponent(ASR):'');
-  bar.appendChild(man);
+  // ссылка на ручной элайнер (П12) — дебаг-тул: правка привязки мышью по словам (только ?debug=1)
+  if(DEBUG){
+    const man=document.createElement('a'); man.className='asr'; man.textContent='✍ ручной';
+    man.title='ручной элайнер: правка привязки слов мышью';
+    man.href=(API||'')+'/r/'+REC_ID+'/manual'+(ASR?'?asr='+encodeURIComponent(ASR):'');
+    bar.appendChild(man);
+  }
   bar.style.display = '';
 }
 
@@ -522,7 +546,7 @@ function update(t){
     // окно подсветки ±R слов: центр (hot) + соседи с затухающей интенсивностью (градиент) —
     // шире и мягче → маскирует неточность привязки слова к таймстемпу
     hotEls.forEach(x=>{ x.classList.remove('hot','lit'); x.style.removeProperty('--wi');
-      x.style.background=''; }); hotEls=[];
+      x.style.removeProperty('--prog'); x.style.background=''; }); hotEls=[];
     const R=3;
     for(let dwi=-R; dwi<=R; dwi++){
       const el=wordEl[e.surah+':'+e.ayah+':'+(e.wi+dwi)];
@@ -531,20 +555,17 @@ function update(t){
       else { el.style.setProperty('--wi', (1 - Math.abs(dwi)/(R+1)).toFixed(2)); el.classList.add('lit'); }
       hotEls.push(el);
     }
-    // karaoke-заливка текущего слова: прогресс внутри [t_i, t_{i+1}] (ощущение «по буквам»,
-    // маскирует неточность привязки). RTL → льём справа налево; непролитое — приглушённо-зелёное,
-    // чтобы белый текст читался в любой теме.
+    // Текущее слово — СПЛОШНАЯ подсветка (.w.hot из CSS), БЕЗ бегущей karaoke-заливки.
+    // Владелец 25.07 (tg_3604/3627): движущийся прогресс внутри слова = «зелёный моргающий светофор»,
+    // даёт визуальное напряжение (ждёшь переход/остановку) → убрали, светим слово целиком.
+    // Буква+харакат (П5, char_timeline у нас ЕСТЬ) — ОТЛОЖЕНО: спаны могут ломать арабскую вязь;
+    // вернёмся после ручного ввода (проверить порчу рендера, иначе — маркер-оверлей поверх слова).
     const hotEl = wordEl[e.surah+':'+e.ayah+':'+e.wi];
+    // прогресс чтения слова → ширина жёлтой полоски под ним (t_end реальный, иначе онсет следующего)
     if(hotEl){
-      const nx = WT[i+1];
-      // длительность заливки = собственная длина слова (t_end), если есть → на паузе заливка
-      // замирает на 100% (не «ползёт» до следующего слова). Иначе — до следующего слова.
-      const dur = (e.t_end && e.t_end > e.t) ? (e.t_end - e.t)
-                : (nx ? Math.max(0.08, nx.t - e.t) : 0.4);
-      let p = (t - e.t) / dur; p = p < 0 ? 0 : p > 1 ? 1 : p;
-      const pct = (p * 100).toFixed(1);
-      hotEl.style.background = 'linear-gradient(to left, var(--hot) ' + pct +
-        '%, color-mix(in srgb, var(--hot) 42%, var(--card)) ' + pct + '%)';
+      let end=e.t_end; if(end==null){ const nx=WT[i+1]; end = nx ? nx.t : (e.t+0.4); }
+      let p = end>e.t ? (t-e.t)/(end-e.t) : 0;
+      hotEl.style.setProperty('--prog', Math.max(0, Math.min(1, p)).toFixed(3));
     }
     scrollTargetEl = hotEl || scrollTargetEl;
     return;
