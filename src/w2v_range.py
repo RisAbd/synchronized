@@ -338,6 +338,21 @@ def find_range(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
         i0 += 1
     while i1 > i0 and flat_ayahs[i1][0] != flat_ayahs[i1 - 1][0]:
         i1 -= 1
+
+    # (е) РОБАСТНОСТЬ К ПОВТОРЯЮЩИМСЯ СУРАМ. Приближение по префиксам (б) полагается на ОДНО
+    # глобальное difflib-выравнивание декода к региону. Рефрен (Ар-Рахман 55: «فبأي آلاء ربكما
+    # تكذبان» ×31) путает монотонный difflib → cov по суре пика ≈ 0 → префикс-макс уводит в соседа
+    # (rec10: даёт 55:77..56:39 вместо всей суры 55:1-78). Пробуем ВТОРОЙ сид — ЦЕЛУЮ суру пика — и
+    # оставляем окно с бОльшим РЕАЛЬНЫМ difflib-ratio (истинная цель дизайна; проверено: истина
+    # 55:1-78 имеет ratio 0.32 — максимум среди окон). Частичное чтение сид-2 НЕ перебьёт: у целой
+    # суры ratio ниже частичного окна (непрочитанные аяты раздувают знаменатель) — 8/9 не задеты.
+    cur = _difflib_score(dec, "".join(fa_skel[i0:i1 + 1]))
+    ps_lo = next((k for k, fa in enumerate(flat_ayahs) if fa[0] == s_peak), None)
+    ps_hi = next((k for k in range(len(flat_ayahs) - 1, -1, -1) if flat_ayahs[k][0] == s_peak), None)
+    if ps_lo is not None:
+        rj = _difflib_score(dec, "".join(fa_skel[ps_lo:ps_hi + 1]))   # RAW вся сура (без ±B-добора)
+        if rj > cur:
+            i0, i1, cur = ps_lo, ps_hi, rj
     verses = flat_ayahs[i0:i1 + 1]
     if verbose:
         s0, a0 = verses[0]; s1, a1 = verses[-1]
