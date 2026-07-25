@@ -219,66 +219,17 @@ def _fill_meta(rec, path: Path) -> None:
     rec.save(update_fields=fields)
 
 
-def _recognize(audio_path: Path, recognizer: str, rec, out: Path):
-    """Распознать аудио выбранным бэкендом, СОХРАНИТЬ сырой ответ рядом (raw.json),
-    вернуть нормализованные слова для align. Новый распознаватель = ветка здесь + запись
-    в recognizers.REGISTRY."""
-    import align as align_mod
-    out.mkdir(parents=True, exist_ok=True)
-    raw_path = out / "raw.json"
-    tr_path = out / "transcript.json"
-
-    if recognizer == "google":
-        # 1) уже распознавали этот прогон (raw.json есть) — переиспользуем, чтобы не жечь квоту.
-        # 2) иначе кэш ответов из старого проекта (ключ = gstt_key записи или stem аудио) — бесплатно.
-        # 3) иначе живой Google STT API (если задан ключ+бакет) — сохраняем ответ в raw.json.
-        if raw_path.is_file() and "results" in json.loads(raw_path.read_text() or "{}"):
-            src = raw_path
-        else:
-            key = rec.gstt_key or audio_path.stem
-            cache = Path(settings.GSTT_CACHE_DIR) / key / "gstt_response.json"
-            if cache.is_file():
-                raw = json.loads(cache.read_text())
-                raw_path.write_text(json.dumps(raw, ensure_ascii=False))
-            else:
-                import gstt
-                if not (settings.GSTT_LIVE and gstt.is_available()):
-                    raise FileNotFoundError(
-                        f"нет кэша Google STT для '{key}' ({cache}), а живой API выключен "
-                        f"(нужны env GOOGLE_APPLICATION_CREDENTIALS + SYNC_GSTT_BUCKET, "
-                        f"SYNC_GSTT_LIVE≠0).")
-                resp = gstt.recognize(audio_path, bucket_name=settings.GSTT_BUCKET)
-                raw_path.write_text(json.dumps(resp, ensure_ascii=False, indent=2))
-            src = raw_path
-        words = align_mod.load_transcript(src)
-    elif recognizer == "whisper":
-        # уже распознавали (raw.json со словами есть) — переиспользуем, НЕ жжём GPU заново
-        # (симметрично google выше; сырой ответ на то и сохраняем). Иначе — живой whisper.
-        if not (raw_path.is_file() and json.loads(raw_path.read_text() or "{}").get("words")):
-            _ensure_cudnn_path()
-            import asr
-            raw = asr.transcribe(str(audio_path), language="ar")
-            raw_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2))
-        words = align_mod.load_transcript(raw_path)
-    else:
-        raise ValueError(f"неизвестный распознаватель: {recognizer!r}")
-
-    # нормализованный вход align — для дебага (что реально скормили аллайнеру)
-    tr_path.write_text(json.dumps(
-        [{"word": w.word, "start": w.start, "end": w.end, "norm": w.norm} for w in words],
-        ensure_ascii=False, indent=2))
-    return words
-
-
 def _forced_source(rec):
     """Готовый прогон-источник для forced align: из него берём диапазон читаемых аятов.
     Лучший по честному покрытию времени аудио (metrics.coverage), при равенстве —
     google > whisper. Фикс-приоритет google отдавал forced мусор, когда google плох:
-    rec10 google cov 0.591 с ложным диапазоном 16:98 против whisper 0.803 (реальные 55:1→56)."""
+    rec10 google cov 0.591 с ложным диапазоном 16:98 против whisper 0.803 (реальные 55:1→56).
+
+    (Инкремент 3 снимет эту зависимость — forced получит свой find_range через match_align.)"""
     from .models import AsrRun
-    from . import recognizers as rz
+    from . import sources
     ready = [r for r in rec.runs.all()
-             if r.status == AsrRun.Status.READY and r.data and not rz.is_aligner(r.recognizer)]
+             if r.status == AsrRun.Status.READY and r.data and not sources.is_aligned(r.recognizer)]
     prio = {"google": 0, "whisper": 1}
     return max(ready, key=lambda r: ((r.metrics or {}).get("coverage") or 0.0,
                                      -prio.get(r.recognizer, 9)), default=None)
@@ -297,89 +248,6 @@ def _run_aligner_subprocess(rec_id: int, recognizer: str, out: Path) -> None:
         raise RuntimeError(
             f"выравнивание ({recognizer}) в подпроцессе упало (код {proc.returncode}): "
             + " / ".join(tail))
-
-
-_REPEAT_ZONE_MARGIN = 1.0   # с: расхождение forced↔w2v во времени слова, выдающее зону возврата
-
-
-def _inherit_repeats(rec, sync_map: dict) -> int:
-    """Перенести возвраты чтеца (П8) из forced-прогона на дорожку w2v.
-
-    Возвраты детектит ОДИН детектор — `falign._detect_repeats` по MMS-эмиссиям; он уже отработал
-    в forced-прогоне (эмиссии посчитаны, точки `rep=True` лежат в его sync-map.json), так что
-    второй GPU-проход MMS не нужен. Но простой ПЕРЕНОС rep-точек даёт зигзаг: монотонный w2v на
-    записи с возвратом ломает раскладку ВСЕЙ зоны повтора (затолкал следующие слова в окно
-    перечитки, растянул одно на всю зону), а forced через детект выразил её чисто (дыра → перечитка
-    → продолжение). Поэтому замещаем всю ЗОНУ ВОЗВРАТА forced-точками (там forced корректен),
-    остальное аята оставляем w2v (честный coverage/мадд).
-
-    Зона (в пределах затронутого аята) = непрерывный диапазон wi, где forced и w2v расходятся по
-    времени > _REPEAT_ZONE_MARGIN (монотонный w2v сдвинул слова из-за повтора), объединённый со
-    словами самого возврата (rep). Источник — forced/sync-map.json (поле `rep` роняется build_data).
-    Файла/возвратов нет → 0 (w2v без возвратов; forced-прогон с ними в плеере доступен).
-    Возвращает число перенесённых rep-точек."""
-    from . import recognizers as rz
-    fpath = run_dir(rec.id, rz.FORCED) / "sync-map.json"
-    if not fpath.exists():
-        return 0
-    try:
-        forced_wt = (json.loads(fpath.read_text()).get("word_timeline")) or []
-    except (json.JSONDecodeError, OSError):
-        return 0
-    reps = [w for w in forced_wt if w.get("rep")]
-    if not reps:
-        return 0
-    w2v_wt = sync_map.get("word_timeline") or []
-
-    def key_of(w):
-        return (w["surah"], w["ayah"], w["wi"])
-
-    # Времена по каноническому слову (без rep): forced = истина в зоне возврата, w2v = дорожка плеера.
-    f_t = {key_of(w): w["t"] for w in forced_wt if not w.get("rep")}
-    v_t = {key_of(w): w["t"] for w in w2v_wt}
-
-    # Плоский порядок чтения по объединению слов обеих дорожек (кортеж (surah,ayah,wi) монотонен
-    # в пределах непрерывного отрывка, в т.ч. через границы аятов).
-    order = sorted(set(f_t) | set(v_t))
-    pos = {k: i for i, k in enumerate(order)}
-
-    # Слово принадлежит зоне возврата, если это точка возврата (rep) ИЛИ forced↔w2v заметно
-    # разъехались по времени (монотонный w2v сдвинул слово из-за перечитки).
-    rep_keys = {key_of(w) for w in reps}
-    zone = {k for k in order
-            if k in rep_keys
-            or (k in f_t and k in v_t and abs(f_t[k] - v_t[k]) > _REPEAT_ZONE_MARGIN)}
-    if not zone:
-        return 0
-
-    # Разбить на НЕПРЕРЫВНЫЕ кластеры в плоском порядке (соседние по позиции): разные возвраты
-    # (напр. 53:20, 53:36, 53:53) — отдельные зоны; честный w2v между ними не трогаем. Внутри
-    # кластера возврат может пересекать границы аятов (rec11: 53:53→54→55) — заместим весь диапазон.
-    zpos = sorted(pos[k] for k in zone)
-    clusters, cur = [], [zpos[0]]
-    for p in zpos[1:]:
-        if p == cur[-1] + 1:
-            cur.append(p)
-        else:
-            clusters.append((cur[0], cur[-1]))
-            cur = [p]
-    clusters.append((cur[0], cur[-1]))
-
-    forced_by_key = {}
-    for w in forced_wt:
-        forced_by_key.setdefault(key_of(w), []).append(w)   # incl. rep-дубликаты
-
-    for lo_i, hi_i in clusters:
-        lo_key, hi_key = order[lo_i], order[hi_i]
-        # весь плоский диапазон [lo_key..hi_key] замещаем forced-точками (обычные + rep)
-        w2v_wt = [w for w in w2v_wt if not (lo_key <= key_of(w) <= hi_key)]
-        for i in range(lo_i, hi_i + 1):
-            w2v_wt += forced_by_key.get(order[i], [])
-
-    w2v_wt.sort(key=lambda w: (w["t"], w.get("surah", 0), w.get("ayah", 0), w.get("wi", 0)))
-    sync_map["word_timeline"] = w2v_wt
-    sync_map.setdefault("meta", {})["repeats_inherited"] = len(reps)
-    return len(reps)
 
 
 def _flat_index(data: dict) -> dict:
@@ -434,7 +302,7 @@ def run_one(run, on_stage=None) -> None:
     Мутирует/сохраняет run. Аудио должно быть уже получено (ensure_audio). Бросает исключение
     при ошибке — статус/ошибку ведёт вызывающий (tasks)."""
     from .models import AsrRun
-    from . import recognizers as rz
+    from . import sources
 
     rec = run.recitation
 
@@ -455,41 +323,25 @@ def run_one(run, on_stage=None) -> None:
     audio = ensure_audio(rec)
     out = run_dir(rec.id, run.recognizer)
 
-    if rz.is_aligner(run.recognizer):
-        # выравнивание: НЕ распознаём, а выравниваем известный текст аятов к аудио.
-        # диапазон читаемого берём из готового ASR-прогона (align.py уже определил, что читается).
-        import falign
-        src = _forced_source(rec)
-        if src is None:
-            raise RuntimeError(
-                "нет готового прогона (google/whisper) для диапазона аятов — сначала распознайте "
-                "запись каким-нибудь ASR, затем добавьте выравнивание")
-        verses = falign.verses_from_data(src.data)
-        if not verses:
-            raise RuntimeError(f"в прогоне-источнике '{src.recognizer}' нет разделов/аятов")
+    # Единый диспетчер по плоским плагинам-источникам (директива владельца: ни деления
+    # аллайнер/распознаватель, ни ветвления по типу). Каждый источник САМ распознаёт/выравнивает
+    # и зовёт общий матчинг; здесь только различаем способ запуска — ISOLATE-источник в отдельном
+    # GPU-процессе, остальные в процессе воркера.
+    mod = sources.get(run.recognizer)
+    if mod is None:
+        raise ValueError(f"неизвестный источник: {run.recognizer!r}")
+
+    if getattr(mod, "ISOLATE", False):
+        # GPU-изоляция (см. gpu_align): onnxruntime-forced держит липкую CUDA-арену, torch-w2v в том
+        # же процессе → OOM на 6ГБ. Подпроцесс грузит фреймворк, пишет sync-map.json, выходит →
+        # VRAM освобождается целиком. Подпроцесс зовёт ТОТ ЖЕ mod.run().
         stage("align")
         out.mkdir(parents=True, exist_ok=True)
-        # Выравнивание (forced MMS / w2v) — в ОТДЕЛЬНОМ процессе (GPU-изоляция, см. gpu_align):
-        # onnxruntime-forced держит липкую CUDA-арену, torch-w2v в том же процессе → OOM на 6ГБ.
-        # Подпроцесс грузит фреймворк, пишет sync-map.json, выходит → VRAM освобождается целиком.
         _run_aligner_subprocess(rec.id, run.recognizer, out)
         sync_map = json.loads((out / "sync-map.json").read_text())
-        # w2v — ПОЛНОСТЬЮ независимый источник (директива владельца 24.07): диапазон он определяет
-        # сам (w2v_range в gpu_align), возвраты чтеца (П8) — тоже из СВОЕЙ акустики (w2v_repeats,
-        # задача #3). Наследование rep-точек из forced (_inherit_repeats) УБРАНО — никаких данных
-        # от других источников. До реализации нативных возвратов w2v на записях с перечиткой
-        # временно без rep-точек (база выравнивания корректна).
     else:
-        import align as align_mod
-        stage("asr")
-        words = _recognize(audio, run.recognizer, rec, out)
-        stage("align")
-        sync_map = align_mod.align(words, q)
-        # счётчики ASR↔эталон (идея quran-align): hits/subs/ins/dels/wer против текста
-        # найденного диапазона — объективная «каша» распознавания, попадёт в run.metrics
-        sync_map.setdefault("meta", {})["match"] = align_mod.match_stats(
-            [w.norm for w in words], sync_map, q)
-        (out / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
+        # в процессе: источник сам ведёт стадии (asr/align), пишет sync-map.json, возвращает sync_map
+        sync_map = mod.run(rec, audio, q, out, stage=stage)
 
     stage("build")
     data = build_data(sync_map, q, rec.audio_filename)

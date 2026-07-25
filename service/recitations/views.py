@@ -1,7 +1,7 @@
 """Вьюхи сервиса: библиотека, добавление по ссылке, плеер, data.json, аудио (Range), статус.
 
 Каждая запись может иметь несколько прогонов ASR (по распознавателям) — для сравнения точности.
-Активный прогон плеера выбирается по ?asr=<recognizer> либо авто (приоритет в recognizers.PRIORITY).
+Активный прогон плеера выбирается по ?asr=<source_key> либо авто (приоритет — sources.keys()).
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from django.urls import reverse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from . import pipeline, recognizers
+from . import pipeline, sources
 from .models import AsrRun, Recitation
 from .tasks import dispatch, dispatch_run
 
@@ -33,9 +33,10 @@ def index(request):
 
 def _chosen_recognizers(request) -> list[str]:
     """Список распознавателей из формы (чекбоксы), с фолбэком на дефолт.
-    Выравниватели (forced) сюда не берём — они запускаются автоматически пост-шагом."""
+    Берём только SELECTABLE-источники (google/whisper); авто-источники (forced/w2v) — не выбирают."""
     def ok(r):
-        return recognizers.is_valid(r) and not recognizers.is_aligner(r)
+        m = sources.get(r)
+        return m is not None and getattr(m, "SELECTABLE", False)
     chosen = [r for r in request.POST.getlist("recognizers") if ok(r)]
     if not chosen:
         chosen = [r for r in settings.DEFAULT_RECOGNIZERS if ok(r)]
@@ -75,8 +76,9 @@ def run(request, pk):
     """Добавить/пересчитать один распознаватель для существующей записи."""
     rec = get_object_or_404(Recitation, pk=pk)
     rkey = (request.POST.get("recognizer") or "").strip()
-    # forced align — не выбираемый распознаватель, а авто-пост-шаг после ASR (не запускаем вручную)
-    if not recognizers.is_valid(rkey) or recognizers.is_aligner(rkey):
+    # вручную добавляют/пересчитывают только SELECTABLE-источники; авто (forced/w2v) — пост-шагом
+    _m = sources.get(rkey)
+    if _m is None or not getattr(_m, "SELECTABLE", False):
         return HttpResponseRedirect(reverse("player", args=[pk]))
     run_obj, _ = AsrRun.objects.get_or_create(recitation=rec, recognizer=rkey)
     run_obj.status = AsrRun.Status.QUEUED
@@ -193,8 +195,8 @@ def api_recitations(request):
              Recitation.objects.prefetch_related("runs").order_by("-id")]
     return _cors(JsonResponse({
         "recitations": items,
-        "recognizers": [{"key": r.key, "label": r.label, "note": r.note}
-                        for r in recognizers.selectable_recognizers()],
+        "recognizers": [{"key": m.KEY, "label": m.LABEL, "note": getattr(m, "NOTE", "")}
+                        for m in sources.selectable()],
         "default_recognizers": list(settings.DEFAULT_RECOGNIZERS),
     }))
 

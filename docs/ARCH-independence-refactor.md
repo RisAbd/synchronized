@@ -25,12 +25,12 @@
 
 ## Что сейчас нарушает (карта зависимостей)
 
-- `pipeline._inherit_repeats` — **w2v тянет возвраты (rep-точки) из MMS sync-map.** ❌ убрать.
-- `pipeline._forced_source` + `gpu_align.py` — **forced/w2v берут ДИАПАЗОН аятов из готового
-  google/whisper.** ❌ источник должен определять диапазон сам (из своей акустики через match_align).
-- `recognizers.ALIGNERS`/`is_aligner` + `tasks._maybe_forced`/`_maybe_w2v` — деление на типы и
-  авто-пост-шаги «после ASR». ❌ уплостить: просто набор источников, каждый запускается сам.
-- `models.active_run` — выбор по типам/приоритету. Упростить под плоский массив.
+- ✅ `pipeline._inherit_repeats` — w2v тянул возвраты из MMS. **УДАЛЕНО** (сессия 17).
+- 🔴 `pipeline._forced_source` — **forced берёт ДИАПАЗОН аятов из готового google/whisper** (w2v уже
+  сам через match_align.find_range). Осталось на шаг 3: дать forced свой range-детект.
+- ✅ `recognizers.ALIGNERS`/`is_aligner` + `tasks._maybe_forced`/`_maybe_w2v` — деление на типы и
+  авто-пост-шаги. **УДАЛЕНО** (сессия 17): плоский пакет `sources/`, каждый источник запускается сам.
+- ✅ `models.active_run` — было по типам/множеству ALIGNERS. Переведено на `sources.keys()`/`is_aligned`.
 
 ## Что УЖЕ хорошо (переиспользовать, не ломать)
 
@@ -113,8 +113,8 @@ def run(audio_path, quran, ctx) -> dict:    # audio → своя акустик�
 ### Статус плана (обновлено 25.07)
 
 - **Шаг 1 (w2v свои возвраты, убрать inherit):** ✅ СДЕЛАНО — `w2v_repeats.detect` (span, FWD/BACK,
-  пост-гард fj=0); `_inherit_repeats` из пути вызова убран (но код-заглушка `pipeline.py:305-382` ещё
-  висит — **удалить в шаге 5**). w2v дефолт на всех 9, диапазоны верны (кейс F закрыт), cov 0.914–0.998.
+  пост-гард fj=0); `_inherit_repeats` убран из пути вызова, а код-заглушка удалена в шаге 4/5 (сессия
+  17). w2v дефолт на всех 9, диапазоны верны (кейс F закрыт), cov 0.914–0.998.
 - **Шаг 2 (общий `match_align`, буквенный вход):** ✅ СДЕЛАНО (сессия 17). Создан `src/match_align.py` —
   ЕДИНЫЙ модуль матчинга к Корану с двумя входами: СЛОВЕСНЫЙ (`align`/`load_transcript`/`match_stats`/
   `CorpusIndex`/`Word` — из align.py) и БУКВЕННЫЙ (`find_range`/`build_index`/`greedy_skeleton`/
@@ -124,16 +124,31 @@ def run(audio_path, quran, ctx) -> dict:    # audio → своя акустик�
   вменяем, `find_range` с сохранёнными декодами 9/9 диапазонов (rec7 6:95-103), `manage.py check` чист.
   NB: свежий greedy-декод кеша rec7_w2v_emis.npy даёт иной диапазон (13:35) — свойство decode-источника,
   НЕ match_align (идентично старому коду); e2e-путь берёт декод из эмиссий live и даёт верный 6:95-103.
+- **Шаг 4 (уплостить модель источников, плагин-пакет):** ✅ СДЕЛАНО (сессия 17). Создан пакет
+  `service/recitations/sources/` — плоские независимые плагины (файл-на-источник), лоадер
+  `sources/__init__.py` (`pkgutil.iter_modules`+`importlib`, реестр по PRIORITY). Пять источников:
+  `manual`(P5)/`w2v`(P10)/`forced`(P20)/`google`(P30)/`whisper`(P40), каждый объявляет
+  `KEY/LABEL/NOTE/SELECTABLE/AUTO/ISOLATE/ALIGNED/PRIORITY` + `available()/ready()/run(rec,audio,quran,
+  out,stage)`. **Снято:** `recognizers.py` целиком удалён (REGISTRY/ALIGNERS/is_aligner/PRIORITY/
+  selectable_recognizers); `tasks._maybe_forced`/`_maybe_w2v` → обобщённый `_ensure_auto` (перебор
+  `sources.auto()`); `pipeline._recognize` (google/whisper-ветки → `sources/google.py`,`whisper.py`);
+  ветвление `run_one` по `is_aligner` → единый диспетчер (ISOLATE→подпроцесс gpu_align, иначе in-proc);
+  `gpu_align.py` обобщён (грузит модуль по ключу, зовёт `mod.run()`, без W2V/else-веток). `active_run`
+  через `sources.keys()`/`is_aligned` (логика та же: manual > min-fj среди ALIGNED > PRIORITY-ASR).
+  views/models переведены на `sources`. **Поведение-сохраняюще (e2e на rec5):** google (in-proc)
+  cov 0.977 fj0, w2v (ISOLATE-подпроцесс) cov 0.914 fj0, forced cov 0.478 fj0 — word_timeline
+  байт-в-байт идентичен старому; `run_single`→`_ensure_auto` гонит w2v+forced, VRAM освобождается
+  (15 MiB), 0 осиротевших gpu_align; `manage.py check` чист; реестр 5/5. Инструмент — `work/verify_match_align.py`.
 - **Шаг 3 (MMS/forced независим, свой диапазон):** 🔴 НЕ начат. forced ещё берёт диапазон из ASR
-  (`_forced_source`). Дать ему свой range-детект (как `w2v_range`) поверх общего match_align.
-- **Шаг 4 (уплостить модель источников, плагин-пакет):** 🔴 НЕ начат. Создать `sources/` + лоадер,
-  снять `ALIGNERS`/типы, `active_run` упростить (min forward_jumps + coverage).
-- **Шаг 5 (чистка):** 🔴 удалить мёртвый `_inherit_repeats`+`_REPEAT_ZONE_MARGIN`, разорвать
-  импорт-связь `w2v_*`→`falign` (общие DSP/арабские кирпичи `_HARAKAT`/`_snap_bounds`/`_frame_db`/
-  `_sim`/`_collapse_tandem`/`_skeleton`/`_uroman_word` → общий `src/arabic.py`).
+  (`_forced_source` в `pipeline.py` + `sources/forced.py::ready/run`). Дать ему свой range-детект
+  (`match_align.find_range`, как w2v), снять `_forced_source`. Тогда forced.AUTO без гейта `ready()`.
+- **Шаг 5 (чистка):** ✅ `_inherit_repeats`+`_REPEAT_ZONE_MARGIN` УДАЛЕНЫ (сессия 17, вместе с шагом 4).
+  🔴 осталось: разорвать импорт-связь `w2v_*`→`falign` (общие DSP/арабские кирпичи `_HARAKAT`/
+  `_snap_bounds`/`_frame_db`/`_sim`/`_collapse_tandem`/`_skeleton`/`_uroman_word` → общий `src/arabic.py`;
+  часть уже в `src/alignbricks.py` из инкремента 1).
 
 **Порядок исполнения (безопасный, каждый шаг — рабочее состояние + коммит+пуш):** 5-DSP-кирпичи →
-2-match_align → 4-плагин-пакет+лоадер → 3-MMS-свой-диапазон. Кейс rec7 (SPEC-alignment §4 E) чинить
+2-match_align → 4-плагин-пакет+лоадер (✅) → 3-MMS-свой-диапазон. Кейс rec7 (SPEC-alignment §4 E) чинить
 параллельно по спеке — он про качество w2v-возвратов, не про структуру.
 
 **Общие шаги:** матчинг к тексту Корана, возможно и выравнивание — скорее ОБЩИЕ для всех (модуль

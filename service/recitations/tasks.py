@@ -32,70 +32,32 @@ def _aggregate(rec) -> None:
     rec.save(update_fields=["status", "stage", "updated_at"])
 
 
-def _maybe_forced(rec, refresh: bool = False) -> None:
-    """Авто-пост-шаг: forced align поверх готового ASR-прогона (уточняет границы слов/аятов
-    по ground-truth тексту аятов). forced — НЕ выбираемый распознаватель, а автоматическое
-    уточнение после ASR. В окружении без зависимостей (CPU-докер без ctc-forced-aligner) —
-    ТИХО пропускаем: не заводим ERROR-прогон, запись остаётся READY по ASR.
-    refresh=True — пересчитать даже готовый forced (после пересчёта ASR диапазон-источник
-    мог измениться; без этого forced залипал на старом расчёте)."""
+def _ensure_auto(rec, refresh: bool = False) -> None:
+    """Авто-источники (AUTO=True: w2v, forced) — пост-шаг на каждой записи. Обобщён над плоскими
+    плагинами: не хардкодит forced/w2v, а перебирает sources.auto() в порядке PRIORITY. Каждый:
+      • пропускаем тихо, если зависимостей нет (source.available()) или не выполнено предусловие
+        (source.ready(rec) — forced ждёт готовый ASR-источник диапазона) — без ERROR-прогона;
+      • иначе заводим/освежаем прогон и гоним.
+    refresh=True — пересчитать даже готовый (после пересчёта ASR диапазон-источник мог смениться;
+    без этого forced залипал на старом расчёте). w2v ПОЛНОСТЬЮ независим (свой диапазон из акустики),
+    forced берёт диапазон у ASR — оба идут ПОСЛЕ ASR-фазы (см. run_pipeline)."""
     from .models import AsrRun, Status
-    from . import pipeline, recognizers as rz
+    from . import sources
 
-    key = rz.FORCED  # авто-пост-шаг — ВСЕГДА 'forced' (не iter(ALIGNERS): порядок set'а
-                     # зависит от хеш-сида процесса → мог отдать 'manual' и мислейблить прогон)
-    if pipeline._forced_source(rec) is None:
-        return  # нет готового ASR-источника с диапазоном аятов — нечего выравнивать
-    try:
-        import falign
-        if not falign.available():
-            return  # зависимостей нет — тихо пропускаем
-    except Exception:
-        return
-
-    run = rec.runs.filter(recognizer=key).first()
-    if run and run.status == Status.READY and not refresh:
-        return  # уже посчитан
-    if run is None:
-        run = AsrRun.objects.create(recitation=rec, recognizer=key, status=Status.QUEUED)
-    else:
-        run.status = Status.QUEUED
-        run.error = ""
-        run.save(update_fields=["status", "error", "updated_at"])
-    _run_safe(run)
-
-
-def _maybe_w2v(rec, refresh: bool = False) -> None:
-    """wav2vec2-источник (transformers + СВОЙ CTC-Viterbi, без whisperx) — ПОЛНОСТЬЮ независим
-    (директива владельца): audio → своя акустика (эмиссии) → сам находит диапазон (w2v_range) →
-    свой forced-align → свои возвраты. НЕ поверх ASR, ASR ему не нужен (в отличие от forced/
-    `_maybe_forced`, который берёт диапазон у ASR). Держит мадд → честный coverage; дефолтный
-    выравниватель в плеере (REGISTRY: w2v выше forced). torch(cu124)+transformers в docker-воркере →
-    заводится автоматически на каждую запись. Без transformers/torch — ТИХО пропускаем.
-    refresh=True — пересчитать даже готовый."""
-    from .models import AsrRun, Status
-    from . import recognizers as rz
-
-    key = rz.W2V
-    # w2v ПОЛНОСТЬЮ независим (директива владельца): диапазон определяет своей акустикой
-    # (w2v_range) — ASR-источник ему НЕ нужен. Никакого гейта на _forced_source.
-    try:
-        import w2v_align
-        if not w2v_align.available():
-            return  # нет whisperx/torch — тихо пропускаем
-    except Exception:
-        return
-
-    run = rec.runs.filter(recognizer=key).first()
-    if run and run.status == Status.READY and not refresh:
-        return  # уже посчитан
-    if run is None:
-        run = AsrRun.objects.create(recitation=rec, recognizer=key, status=Status.QUEUED)
-    else:
-        run.status = Status.QUEUED
-        run.error = ""
-        run.save(update_fields=["status", "error", "updated_at"])
-    _run_safe(run)
+    for mod in sources.auto():
+        if not sources.available(mod) or not sources.ready(mod, rec):
+            continue
+        key = mod.KEY
+        run = rec.runs.filter(recognizer=key).first()
+        if run and run.status == Status.READY and not refresh:
+            continue  # уже посчитан
+        if run is None:
+            run = AsrRun.objects.create(recitation=rec, recognizer=key, status=Status.QUEUED)
+        else:
+            run.status = Status.QUEUED
+            run.error = ""
+            run.save(update_fields=["status", "error", "updated_at"])
+        _run_safe(run)
 
 
 def _run_safe(run) -> None:
@@ -168,18 +130,16 @@ def run_pipeline(rec_id: int) -> None:
     # GPU-потребитель на своём шаге (пересечения по VRAM нет). Между записями celery --concurrency 1
     # → две записи параллельно НЕ идут (иначе 2 whisper/forced на 6ГБ GPU = OOM; масштабирование
     # через GPU-лок — в BACKLOG).
-    from . import recognizers
+    from . import sources
     todo = list(rec.runs.filter(status__in=[Status.QUEUED, Status.ERROR]))
-    asr_runs = [r for r in todo if not recognizers.is_aligner(r.recognizer)]
-    aligner_runs = [r for r in todo if recognizers.is_aligner(r.recognizer)]
-    _run_parallel(asr_runs)
-    for run in aligner_runs:
-        _run_safe(run)
-    # авто-уточнение границ поверх готового ASR (тихо пропустится без deps);
-    # если только что перемололи ASR — освежаем выравниватели (источник диапазона мог смениться).
-    # forced (MMS) нужен и сам по себе, и как движок детекции возвратов П8; w2v — дефолт в плеере.
-    _maybe_forced(rec, refresh=bool(asr_runs))
-    _maybe_w2v(rec, refresh=bool(asr_runs))
+    # источники в процессе (не ISOLATE: google/whisper) — ПАРАЛЛЕЛЬНО в потоках; GPU-источники
+    # (ISOLATE: w2v/forced) — строго ПОСЛЕ (forced берёт диапазон у готового ASR, оба GPU-подпроцесс).
+    parallel_runs = [r for r in todo if not sources.is_isolated(r.recognizer)]
+    _run_parallel(parallel_runs)
+    # авто-источники (w2v/forced) — обобщённый пост-шаг: заводит недостающие + гонит явно
+    # добавленные (queued/error) ISOLATE-прогоны из todo, тихо пропускает без deps/предусловия.
+    # refresh, если только что перемололи ASR (диапазон-источник forced мог смениться).
+    _ensure_auto(rec, refresh=bool(parallel_runs))
     _aggregate(rec)
 
 
@@ -191,11 +151,10 @@ def run_single(run_id: int) -> None:
     except AsrRun.DoesNotExist:
         return
     _run_safe(run)
-    from . import recognizers as rz
-    if not rz.is_aligner(run.recognizer):
-        # пересчитали ASR → обновим выравниватели поверх него (диапазон-источник мог смениться)
-        _maybe_forced(run.recitation, refresh=True)
-        _maybe_w2v(run.recitation, refresh=True)
+    from . import sources
+    if not sources.is_aligned(run.recognizer):
+        # пересчитали сырой ASR → обновим авто-источники поверх него (диапазон forced мог смениться)
+        _ensure_auto(run.recitation, refresh=True)
     _aggregate(run.recitation)
 
 

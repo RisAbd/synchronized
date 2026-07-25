@@ -14,7 +14,7 @@ def _ar_norm(s: str) -> str:
         s = s.replace(a, "ا")
     return s.replace("ى", "ي").replace("ة", "ه").lower()
 
-from . import recognizers
+from . import sources
 
 # id видео из youtube.com/watch?v=…, youtu.be/…, youtube.com/embed/… (11 символов)
 _YT_ID_RE = re.compile(r"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|shorts/)|youtu\.be/)([\w-]{11})")
@@ -99,22 +99,26 @@ class Recitation(models.Model):
     def active_run(self, prefer: str | None = None):
         """Активный прогон для плеера: явно запрошенный (если готов), иначе авто-выбор.
 
-        Авто: ручной (manual) — всегда высший (человек = истина). Среди выравнивателей (w2v/forced)
-        — тот, у кого МЕНЬШЕ прыжков подсветки вперёд (`metrics.forward_jumps` — нарушение инварианта
-        чтеца), при равенстве порядок PRIORITY (w2v выше forced: честный coverage/мадд на чистых
-        записях). На записях с возвратами forced обычно чище (fj=0 против зигзага w2v-наследования) →
-        выберется он. Иначе — первый готовый ASR по PRIORITY."""
+        Авто: ручной (manual) — всегда высший (человек = истина). Среди выравнивателей (ALIGNED:
+        w2v/forced) — тот, у кого МЕНЬШЕ прыжков подсветки вперёд (`metrics.forward_jumps` —
+        нарушение инварианта чтеца), при равенстве порядок PRIORITY источников (w2v выше forced:
+        честный coverage/мадд на чистых записях). На записях с возвратами forced обычно чище (fj=0)
+        → выберется он. Иначе — первый готовый сырой ASR по PRIORITY."""
         ready = {r.recognizer: r for r in self.ready_runs()}
         if prefer and prefer in ready:
             return ready[prefer]
-        if recognizers.MANUAL in ready:
-            return ready[recognizers.MANUAL]
-        aligners = [k for k in ready if k in recognizers.ALIGNERS and k != recognizers.MANUAL]
-        if aligners:
+        order = sources.keys()   # ключи в порядке PRIORITY (меньше = выше)
+        if "manual" in ready:
+            return ready["manual"]
+        aligned = [k for k in ready if sources.is_aligned(k) and k != "manual"]
+        if aligned:
             def jumps(k):
                 return (ready[k].metrics or {}).get("forward_jumps", 0) or 0
-            return ready[min(aligners, key=lambda k: (jumps(k), recognizers.PRIORITY.index(k)))]
-        for key in recognizers.PRIORITY:
+
+            def idx(k):
+                return order.index(k) if k in order else len(order)
+            return ready[min(aligned, key=lambda k: (jumps(k), idx(k)))]
+        for key in order:
             if key in ready:
                 return ready[key]
         return next(iter(ready.values()), None)
@@ -186,7 +190,7 @@ class AsrRun(models.Model):
     Status = Status
 
     recitation = models.ForeignKey(Recitation, related_name="runs", on_delete=models.CASCADE)
-    recognizer = models.CharField(max_length=32)   # ключ из recognizers.REGISTRY
+    recognizer = models.CharField(max_length=32)   # ключ источника (sources.KEY)
 
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.QUEUED)
     stage = models.CharField(max_length=64, blank=True)
@@ -214,10 +218,12 @@ class AsrRun(models.Model):
 
     @property
     def label(self):
-        return recognizers.label_of(self.recognizer)
+        return sources.label_of(self.recognizer)
 
     @property
     def is_aligner(self):
-        """forced align — не распознаватель, а выравниватель известного текста.
-        В UI показываем отдельно от «распознавание:» (см. player.html)."""
-        return recognizers.is_aligner(self.recognizer)
+        """Источник выравнивает к известному тексту аятов (ALIGNED: forced/w2v/manual) — точные
+        границы. В UI показываем отдельно от «распознавание:» (см. player.html). Не глобальный
+        тип-тест, а объявленное свойство источника (sources.is_aligned); имя поля сохранено ради
+        контракта фронта (player.html/JSON)."""
+        return sources.is_aligned(self.recognizer)

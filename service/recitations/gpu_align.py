@@ -1,31 +1,34 @@
-"""Выравнивание (forced MMS / wav2vec2) в ОТДЕЛЬНОМ короткоживущем процессе — GPU-изоляция.
+"""Запуск GPU-источника (ISOLATE) в ОТДЕЛЬНОМ короткоживущем процессе — GPU-изоляция.
 
 Зачем отдельный процесс. Карта 6ГБ, а на шаге выравнивания сталкиваются два фреймворка:
 onnxruntime-gpu (MMS forced) держит ЛИПКУЮ CUDA-арену — не отдаёт VRAM в пределах процесса даже
-после удаления сессии; torch (w2v/whisperx) в том же процессе → CUDA OutOfMemory. Плюс до этого
-в процессе воркера мог остаться резидентный ct2-whisper. Решение: каждый выравниватель гоняем
-как подпроцесс — загрузил фреймворк → выровнял → записал sync-map.json → вышел, и ОС освобождает
-всю VRAM. Родитель (celery-воркер) на этом шаге GPU-фреймворки сам не грузит.
+после удаления сессии; torch (w2v) в том же процессе → CUDA OutOfMemory. Плюс до этого в процессе
+воркера мог остаться резидентный ct2-whisper. Решение: gpu-источник гоняем как подпроцесс —
+загрузил фреймворк → выровнял → записал sync-map.json → вышел, и ОС освобождает всю VRAM. Родитель
+(celery-воркер) на этом шаге GPU-фреймворки сам не грузит.
 
-Запуск: python -m recitations.gpu_align <rec_id> <recognizer> <out_dir>
+Обобщён (директива владельца: плоские плагины) — не ветвится по типу источника: динамически берёт
+модуль-источник из пакета `sources` по ключу и зовёт его единый `run()`.
+
+Запуск: python -m recitations.gpu_align <rec_id> <source_key> <out_dir>
 Результат: <out_dir>/sync-map.json (код возврата 0). Ошибку печатаем в stderr, код != 0.
 """
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
 
 def main() -> int:
     if len(sys.argv) != 4:
-        print("usage: python -m recitations.gpu_align <rec_id> <recognizer> <out_dir>", file=sys.stderr)
+        print("usage: python -m recitations.gpu_align <rec_id> <source_key> <out_dir>", file=sys.stderr)
         return 2
     rec_id = int(sys.argv[1])
-    recognizer = sys.argv[2]
+    key = sys.argv[2]
     out_dir = Path(sys.argv[3])
 
+    import os
     sys.path.insert(0, "/app/src")
     sys.path.insert(0, "/app/service")
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "synchronized.settings")
@@ -33,54 +36,26 @@ def main() -> int:
     django.setup()
 
     from recitations.models import Recitation
-    from recitations import pipeline, recognizers as rz
-    import falign
+    from recitations import pipeline, sources
+    from quran import Quran
+
+    mod = sources.get(key)
+    if mod is None:
+        print(f"неизвестный источник: {key!r}", file=sys.stderr)
+        return 2
 
     rec = Recitation.objects.get(pk=rec_id)
     audio = pipeline.ensure_audio(rec)
+    try:
+        sync_map = mod.run(rec, Path(audio), Quran.load(), out_dir)
+    except Exception as e:  # noqa: BLE001
+        print(f"{key}: {type(e).__name__}: {e}", file=sys.stderr)
+        return 3
 
-    if recognizer == rz.W2V:
-        # ПОЛНАЯ независимость (директива владельца 24.07): w2v НЕ берёт диапазон/окна у ASR и НЕ
-        # использует whisperx. Своя акустика: эмиссии (transformers) → find_range (какие аяты) →
-        # СВОЙ CTC-Viterbi force-align этого диапазона по тем же эмиссиям → sync_map. Один GPU-проход.
-        import w2v_align
-        import w2v_range
-        from quran import Quran
-        E, stride, idx2ch, ch2idx = w2v_align.emissions(str(audio))
-        q = Quran.load()
-        index = w2v_range.build_index(q)
-        rng = w2v_range.find_range(E, q, idx2ch, ch2idx, index=index)   # [(surah, ayah), ...]
-        if not rng:
-            print("w2v: не удалось определить диапазон из акустики", file=sys.stderr)
-            return 3
-        verses = [(s, a, q.surah(s).verses[a - 1].text) for s, a in rng]
-        # свой монотонный CTC-Viterbi по УЖЕ посчитанным эмиссиям (окна не нужны — путь глобален)
-        sync_map = w2v_align.forced_align(E, stride, verses, idx2ch, ch2idx, str(audio))
-        # возвраты/перечитки чтеца (П8) из СВОЕЙ акустики w2v (не наследуем у forced) — вклейка
-        # rep-точек в word_timeline, как в falign.align. Эмиссии переиспользуем (посчитаны выше).
-        import w2v_repeats
-        reps = w2v_repeats.detect(E, stride, idx2ch, ch2idx,
-                                  sync_map["word_timeline"], verses, str(audio))
-        if reps:
-            sync_map["word_timeline"].extend(reps)
-            sync_map["word_timeline"].sort(key=lambda w: (w["t"], w["surah"], w["ayah"], w["wi"]))
-        meta = sync_map.setdefault("meta", {})
-        meta["range_source"] = "w2v-self"
-        meta["range"] = f"{rng[0][0]}:{rng[0][1]}..{rng[-1][0]}:{rng[-1][1]}"
-        meta["repeats_inserted"] = len(reps)
-    else:
-        src = pipeline._forced_source(rec)
-        if src is None:
-            print("нет готового ASR-прогона (google/whisper) для диапазона аятов", file=sys.stderr)
-            return 3
-        verses = falign.verses_from_data(src.data)
-        if not verses:
-            print(f"в прогоне-источнике '{src.recognizer}' нет разделов/аятов", file=sys.stderr)
-            return 4
-        sync_map = falign.align(str(audio), verses)
-
+    # run() уже записал sync-map.json; на всякий случай гарантируем файл из возвращённого dict
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
+    if not (out_dir / "sync-map.json").exists():
+        (out_dir / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
     return 0
 
 
