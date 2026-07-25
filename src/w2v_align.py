@@ -512,34 +512,6 @@ def repeat_align(E, stride_ms: float, verses, idx2ch: dict, ch2idx: dict,
             "word_timeline": word_timeline, "char_timeline": char_timeline}
 
 
-def slots_from_verses(verses, ch2idx):
-    """Плоский slot-список (surah, ayah, wi, word, rep=False) из verses — базовый эталон без повторов.
-    Тот же токенайзинг, что forced_align (безвакфовые wi). Отправная точка для дополнения повторами."""
-    slots = []
-    for s, a, txt in verses:
-        for wi, w in enumerate(quranmod.word_tokens(txt)):
-            slots.append((s, a, wi, w, False))
-    return slots
-
-
-def align_score(E, slots, ch2idx) -> float:
-    """ДЕШЁВАЯ оценка: только total path score Viterbi для данного slot-эталона (без снапа/аудио/
-    char_timeline). Для валидации кандидатов-повторов: сравниваем score дополненного эталона vs
-    базового на ТЕХ ЖЕ эмиссиях — дубликат принимаем, только если score вырос (иначе лишние метки
-    тянутся по не-своим кадрам → score падает; замазка невозможна). Возвращает -inf при вырожденном."""
-    blank = ch2idx.get("<pad>", 0)
-    labels = []
-    for _s, _a, _wi, w, _rep in slots:
-        for ch in w:
-            j = ch2idx.get(ch)
-            if j is not None and j != blank:
-                labels.append(j)
-    if not labels or int(E.shape[0]) == 0 or int(E.shape[0]) < len(labels):
-        return float("-inf")
-    _path, _ext, score = _ctc_viterbi(E, labels, blank)
-    return score
-
-
 def _empty(ref) -> dict:
     """Вырожденный результат (нет меток/кадров) — пустые дорожки, чтобы пайплайн не падал."""
     return {"meta": {"aligner": "wav2vec2-ctc-viterbi", "ref_words": len(ref),
