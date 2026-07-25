@@ -76,6 +76,7 @@
   <div class="bar">
     <span><kbd>Space</kbd> пауза</span>
     <span><kbd>←</kbd> след. слово · <kbd>→</kbd> назад на слово</span>
+    <span><kbd>Ctrl</kbd>+<kbd>←→</kbd> откат 1.5с + стереть хвост</span>
     <span><kbd>↑</kbd><kbd>↓</kbd> скорость</span>
     <label>скорость <select class="spd" id="spd" title="замедлить чтеца — легче успевать вести фокус">
       <option value="1" selected>1×</option><option value="0.75">0.75×</option>
@@ -101,6 +102,8 @@
 //   клик по слову = ВОЗВРАТ фокуса на него (перечитка: слово пишется второй раз → возврат сам
 //     ложится в дорожку; повтор помечается rep=True в экспорте)
 //   ↑/↓ скорость (до 1× / до 0.25×)          Space пауза аудио
+//   Ctrl+←/→ = откат аудио на 1.5с назад + СТЕРЕТЬ всё записанное после этого момента, фокус
+//     возвращается на слово, что звучало в этот момент (по моей же записи) → переписываю с него
 // Мышь-HOVER игнорируется полностью (нет каши от случайных задеваний). Пишем С НУЛЯ по слуху →
 // эталон возвратов/синхрона для сверки алгоритмов (±100-200мс не важны, важны сами возвраты/порядок).
 // «↻ из прогона» заливает привязку прогона как старт; «Очистить» — пустой лист. «💾 Сохранить в бэк»
@@ -129,7 +132,9 @@ let autoScroll = true;           // скроллить текст за фоку�
 let userScrollUntil = 0;         // после ручного колеса/свайпа уважаем его до этого момента
 let scrollCoolUntil = 0;         // антидребезг программного скролла
 let lastT = 0;                   // audio.currentTime на прошлом кадре (для шва перемотки)
+let suppressSeek = false;        // подавить seeking-коммит на время программной перемотки (Ctrl+←/→)
 const MIN_LEN = 0.05;            // короче — дребезг, не пишем
+const REWIND_SEC = 1.5;          // Ctrl+стрелка: откат аудио + стереть хвост записи, вернуть фокус на этот момент
 const SPEEDS = [0.25, 0.5, 0.75, 1];   // ↑ ускоряет до 1× (норма, не 2×), ↓ замедляет до 0.25× (0.1 убран — не проигрывает)
 const BAND_TOP = 0.30, BAND_BOT = 0.55, BAND_AIM = 0.38;  // держим фокус в этой вертикальной полосе окна
 
@@ -254,6 +259,10 @@ function renderText(){
 function wireKeyboard(){
   document.addEventListener('keydown', e => {
     if(e.code === 'Space'){ e.preventDefault(); audio.paused ? audio.play() : audio.pause(); return; }
+    // Ctrl+стрелка: перемотать аудио на 1.5с назад, СТЕРЕТЬ всё записанное после этого момента,
+    // вернуть фокус на слово, которое было записано в этот момент (переписать заново с него).
+    if((e.ctrlKey || e.metaKey) && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')){
+      e.preventDefault(); rewindTruncate(); return; }
     // арабский RTL: следующее слово — СЛЕВА, возврат — СПРАВА
     if(e.code === 'ArrowLeft'){  e.preventDefault(); advance(+1); return; }   // след. слово (вперёд по чтению)
     if(e.code === 'ArrowRight'){ e.preventDefault(); advance(-1); return; }   // назад на одно слово (мелкая коррекция)
@@ -264,7 +273,27 @@ function wireKeyboard(){
   });
   // перемотка нативным ползунком аудио: коммитим открытый интервал по прошлому времени, якорь
   // фокуса пере-ставим на новую позицию (интервал не тянется через шов перемотки).
-  audio.addEventListener('seeking', () => { commitFocus(lastT); focusStart = audio.currentTime || 0; });
+  audio.addEventListener('seeking', () => {
+    if(suppressSeek) return;                 // Ctrl+←/→ сам разберётся с интервалами
+    commitFocus(lastT); focusStart = audio.currentTime || 0; });
+}
+
+// Ctrl+←/→: откат аудио на REWIND_SEC назад + стереть ВСЁ записанное после точки отката, фокус —
+// на слово, что звучало в этот момент (по моей же записи). Дальше пишу заново с этого места.
+function rewindTruncate(){
+  const nt = Math.max(0, (audio.currentTime || 0) - REWIND_SEC);
+  suppressSeek = true;
+  audio.currentTime = nt;
+  suppressSeek = false;
+  // стереть хвост: интервалы, начавшиеся ПОСЛЕ nt — убрать; пересекающие nt — обрезать конец до nt
+  events = events.filter(ev => ev.a < nt - 1e-6);
+  for(const ev of events){ if(ev.b > nt) ev.b = nt; }
+  // фокус на слово с последним (по времени старта) интервалом до nt — оно звучало в этот момент
+  let best = null;
+  for(const ev of events){ if(ev.a <= nt && (!best || ev.a > best.a)) best = ev; }
+  if(best){ const idx = wordOrder.indexOf(best.k); if(idx >= 0) focusIdx = idx; }
+  focusStart = nt; lastT = nt;
+  paintDone(); paintFocus(); updateStats();
 }
 
 // установить фокус на слово idx: сначала ЗАКОММИТИТЬ открытый интервал текущего фокуса до atTime,
