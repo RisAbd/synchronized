@@ -54,7 +54,11 @@
   .ayah .num { font:600 .6em system-ui; color:var(--muted); margin:0 .4em; opacity:.8; white-space:nowrap; }
   .w { border-radius:8px; padding:.02em .14em; transition:background .12s, color .12s; }
   .w.done { background:color-mix(in srgb, var(--done) 26%, transparent); }  /* уже записано */
+  .w.at   { box-shadow:inset 0 -.12em 0 var(--accent); }                    /* позиция воспроизведения (телепромптер) */
   .w.rec  { color:#fff; background:var(--hot); box-shadow:0 1px 10px rgba(46,139,69,.42); } /* пишется сейчас */
+  .bar select.spd { font:600 11px system-ui; background:var(--chip); color:var(--fg);
+    border:1px solid var(--line); border-radius:8px; padding:3px 6px; }
+  .bar .btn.tgl.on { color:var(--hot); border-color:color-mix(in srgb, var(--hot) 50%, var(--line)); }
   #loading,#err { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
     text-align:center; color:var(--muted); font:15px system-ui; padding:20px; }
 </style>
@@ -70,7 +74,13 @@
   <div class="bar">
     <span><kbd>Space</kbd> пауза</span>
     <span><kbd>←</kbd><kbd>→</kbd> ±5с · <kbd>Shift</kbd>+ ±10с</span>
-    <span>мышь по словам = запись</span>
+    <span><kbd>[</kbd><kbd>]</kbd> скорость</span>
+    <label>скорость <select class="spd" id="spd" title="замедлить чтеца — легче попадать мышью">
+      <option value="0.5">0.5×</option><option value="0.6">0.6×</option>
+      <option value="0.75">0.75×</option><option value="0.85">0.85×</option>
+      <option value="1" selected>1×</option></select></label>
+    <button class="btn tgl on" id="btnAuto" title="автоскролл текста за позицией воспроизведения (телепромптер)">⭯ автоскролл</button>
+    <span>мышь по словам = запись · задержись на слове (задевания не пишутся)</span>
     <span class="rec off" id="recState">⏸ пауза</span>
     <span id="stats">интервалов: 0 · покрыто слов: 0</span>
     <button class="btn" id="btnSeed" title="залить текущую привязку прогона как отправную точку для правки">↻ из прогона</button>
@@ -92,6 +102,12 @@
 // а не размечаешь с нуля («↻ из прогона» перезаливает, «Очистить» даёт пустой лист). v2:
 // «💾 Сохранить в бэк» → POST /r/<id>/manual/save → прогон «manual» (выбираемый в плеере, приоритет
 // авто-выбора). Выбор диапазона аятов с нуля (без ASR) — ещё дальше.
+// v2.1 (tg_2544 — текст сплошняком, мышь при переводе с конца строки задевала пол-суры → каша):
+//   (1) DWELL-фильтр — интервал пишется, только если курсор ОТДОХНУЛ на слове ≥ DWELL_MS;
+//       быстрые задевания при переводе руки не набирают dwell и отбрасываются;
+//   (2) регулятор скорости ([ ] / select, localStorage) — замедляет чтеца, легче попадать;
+//   (3) автоскролл-телепромптер: маркер .at = позиция чтеца по прогону, текст едет за ним
+//       (только в паузах записи — не дёргает текст из-под активного курсора; ручной скролл уважается).
 const QS = new URLSearchParams(location.search);
 const REC_ID = QS.get('rec');
 const ASR = QS.get('asr');
@@ -108,9 +124,19 @@ let wordEl = {};                 // "surah:ayah:wi" -> span (канон Tanzil)
 let events = [];                 // [{k, a, b}] отсортировано по a — записанные интервалы
 let pending = null;              // открытый интервал {k, a}
 let hoveredKey = null;           // ключ слова под курсором (обновляют mouseover/out)
+let hoverWall = 0;               // performance.now(), когда курсор встал на hoveredKey (для dwell-фильтра)
+let hoverAudio = 0;              // audio.currentTime в тот же момент (бэкдейтим старт интервала)
 let freezeUntil = 0;             // performance.now(): до этого момента мышь игнорится (после перемотки)
+let posRef = [];                 // [{k,a,b}] позиция чтеца по исходному прогону — гид/телепромптер (иммунен к Очистке)
+let atKey = null;                // слово текущей позиции воспроизведения (маркер .at)
+let autoScroll = true;           // скроллить текст за позицией
+let userScrollUntil = 0;         // после ручного колеса/свайпа уважаем его до этого момента
+let scrollCoolUntil = 0;         // антидребезг программного скролла
 const FREEZE_MS = 1000;
 const MIN_LEN = 0.05;            // короче — дребезг, не пишем
+const DWELL_MS = 130;            // курсор должен ОТДОХНУТЬ на слове ≥ этого (wall-clock), иначе это задевание — не пишем
+const SPEEDS = [0.5, 0.6, 0.75, 0.85, 1];
+const BAND_TOP = 0.30, BAND_BOT = 0.55, BAND_AIM = 0.38;  // держим маркер в этой вертикальной полосе окна
 
 const fmt = t => { t=Math.max(0,t|0); return (t/60|0)+':'+String(t%60).padStart(2,'0'); };
 const toArabic = n => String(n).replace(/[0-9]/g, d => '٠١٢٣٤٥٦٧٨٩'[d]);
@@ -127,11 +153,65 @@ async function init(){
   document.getElementById('sub').textContent = (d.reciter ? d.reciter+' · ' : '') + fmt(d.duration||0);
   audio.src = API + DATA.audio;
   renderText();
+  posRef = computeIntervals(DATA.word_timeline);   // гид позиции (стабилен, не зависит от Очистки)
   seedFromData();            // отправная точка = существующая привязка прогона (правим, не с нуля)
+  initSpeed();
+  initAutoScroll();
   wireKeyboard();
   wireMouse();
   wireButtons();
   requestAnimationFrame(tick);
+}
+
+// [{surah,ayah,wi,t,t_end?}] → [{k,a,b}] отсортировано по a; конец приближаем при отсутствии t_end
+function computeIntervals(wt){
+  if(!wt || !wt.length) return [];
+  const src = wt.slice().sort((x,y)=>x.t - y.t);
+  const out = [];
+  for(let i=0; i<src.length; i++){
+    const e = src[i];
+    const k = e.surah+':'+e.ayah+':'+e.wi;
+    if(!(k in wordEl)) continue;                       // слова нет в тексте (иная редакция) → пропуск
+    const a = +e.t || 0;
+    let b = (typeof e.t_end === 'number') ? e.t_end : null;
+    if(b === null){ const nx = src[i+1]; b = nx ? Math.min(nx.t, a + _SPAN_CAP) : a + _SPAN_CAP; }
+    if(b - a >= MIN_LEN) out.push({k, a, b});
+  }
+  out.sort((x,y)=>x.a - y.a);
+  return out;
+}
+
+// скорость воспроизведения — замедление чтеца, чтобы успевать вести мышью (времена пишутся в
+// АУДИО-шкале и от playbackRate не зависят). Хранится в localStorage.
+function initSpeed(){
+  const sp = document.getElementById('spd');
+  let v = parseFloat(localStorage.getItem('sync.manualspeed'));
+  if(!(v > 0)) v = 1;
+  applySpeed(v); sp.value = String(v);
+  sp.onchange = () => applySpeed(parseFloat(sp.value) || 1);
+}
+function applySpeed(v){
+  v = Math.max(0.25, Math.min(2, v));
+  audio.playbackRate = v;
+  localStorage.setItem('sync.manualspeed', String(v));
+  const sp = document.getElementById('spd'); if(sp) sp.value = String(v);
+}
+function changeSpeed(dir){
+  let i = SPEEDS.indexOf(audio.playbackRate);
+  if(i < 0){ i = SPEEDS.reduce((bi,s,idx)=> Math.abs(s-audio.playbackRate)<Math.abs(SPEEDS[bi]-audio.playbackRate)?idx:bi, 0); }
+  i = Math.max(0, Math.min(SPEEDS.length-1, i + dir));
+  applySpeed(SPEEDS[i]);
+}
+function initAutoScroll(){
+  autoScroll = localStorage.getItem('sync.manualauto') !== '0';
+  const b = document.getElementById('btnAuto');
+  const paint = () => b.classList.toggle('on', autoScroll);
+  paint();
+  b.onclick = () => { autoScroll = !autoScroll; localStorage.setItem('sync.manualauto', autoScroll?'1':'0'); paint(); };
+  // ручной скролл (колесо/свайп) уважаем — приостанавливает автоскролл на время
+  const hold = () => { userScrollUntil = performance.now() + 2500; };
+  addEventListener('wheel', hold, {passive:true});
+  addEventListener('touchmove', hold, {passive:true});
 }
 
 // Предзагрузка: word_timeline прогона (forced/asr) → готовые интервалы, которые можно ПРАВИТЬ
@@ -140,27 +220,10 @@ async function init(){
 // до следующего слова (потолок _SPAN_CAP, как на беке), чтобы интервал был осмысленной длины.
 const _SPAN_CAP = 0.6;
 function seedFromData(){
-  const wt = (DATA && DATA.word_timeline) || [];
-  if(!wt.length){ return 0; }
-  const src = wt.slice().sort((x,y)=>x.t - y.t);
-  const seeded = [];
-  for(let i=0; i<src.length; i++){
-    const e = src[i];
-    const k = e.surah+':'+e.ayah+':'+e.wi;
-    if(!(k in wordEl)) continue;                       // слова нет в тексте (иная редакция) → пропуск
-    const a = +e.t || 0;
-    let b = (typeof e.t_end === 'number') ? e.t_end : null;
-    if(b === null){                                    // нет конца → зазор до следующей точки, но не больше _SPAN_CAP
-      const nx = src[i+1];
-      b = nx ? Math.min(nx.t, a + _SPAN_CAP) : a + _SPAN_CAP;
-    }
-    if(b - a >= MIN_LEN) seeded.push({k, a, b});
-  }
-  seeded.sort((x,y)=>x.a - y.a);
-  events = seeded;
+  events = computeIntervals((DATA && DATA.word_timeline) || []);
   pending = null;
   paintDone(); updateStats();
-  return seeded.length;
+  return events.length;
 }
 
 // рендер слов (только Tanzil-редакция — по ней канон wi). Клика по слову НЕ вешаем: мышь = ввод.
@@ -189,48 +252,88 @@ function renderText(){
 function wireKeyboard(){
   document.addEventListener('keydown', e => {
     if(e.code === 'Space'){ e.preventDefault(); audio.paused ? audio.play() : audio.pause(); return; }
+    if(e.key === '['){ e.preventDefault(); changeSpeed(-1); return; }
+    if(e.key === ']'){ e.preventDefault(); changeSpeed(+1); return; }
     let dt = 0;
     if(e.code === 'ArrowLeft')  dt = e.shiftKey ? -10 : -5;
     if(e.code === 'ArrowRight') dt = e.shiftKey ?  10 :  5;
     if(dt){ e.preventDefault(); doSeek((audio.currentTime||0) + dt); }
   });
   // перемотка нативным контролом аудио — тоже заморозка (пользователь мог тащить ползунок)
-  audio.addEventListener('seeking', () => { closePending(audio.currentTime||0); freeze(); });
+  audio.addEventListener('seeking', () => { closePending(audio.currentTime||0); reArmHover(); freeze(); });
 }
 function doSeek(t){
   t = Math.max(0, Math.min(audio.duration||1e9, t));
   closePending(audio.currentTime||0);   // закрыть текущий интервал ДО перемотки
   audio.currentTime = t;
-  freeze();
+  reArmHover(); freeze();
 }
 function freeze(){ freezeUntil = performance.now() + FREEZE_MS; }
+// после перемотки якорь dwell устарел (audio-время скакнуло) → пере-взводим на новую позицию,
+// чтобы следующий открытый интервал не растянулся через шов перемотки
+function reArmHover(){ if(hoveredKey){ hoverWall = performance.now(); hoverAudio = audio.currentTime || 0; } }
 
 // --- мышь: какое слово под курсором (запись привязывается к аудио-времени в tick) ---
+// Уход со слова закрывает его интервал ТОЧНО в этот момент; приход на новое взводит dwell-таймер
+// (интервал откроется в tick лишь если курсор ОТДОХНЁТ ≥ DWELL_MS — иначе это случайное задевание).
 function wireMouse(){
   textEl.addEventListener('mouseover', e => {
-    const w = e.target.closest('.w'); hoveredKey = (w && w.dataset.k) || null;
+    const w = e.target.closest('.w'); const k = (w && w.dataset.k) || null;
+    if(k === hoveredKey) return;
+    if(pending && k !== pending.k) closePending(audio.currentTime || 0);   // ушли со слова → зафиксировать конец
+    hoveredKey = k;
+    hoverWall = performance.now();
+    hoverAudio = audio.currentTime || 0;
   });
-  textEl.addEventListener('mouseleave', () => { hoveredKey = null; });
+  textEl.addEventListener('mouseleave', () => {
+    if(pending) closePending(audio.currentTime || 0);
+    hoveredKey = null;
+  });
 }
 
-// главный цикл: сопоставляет слово-под-курсором аудио-времени, ведёт открытый интервал
+// главный цикл: сопоставляет слово-под-курсором аудио-времени, ведёт открытый интервал.
+// «settled» = курсор отдохнул на слове ≥ DWELL_MS → намеренная запись; быстрые задевания при
+// переводе руки с конца строки не набирают dwell и НЕ пишутся. Смену слова закрывает mouseover.
 function tick(){
   const t = audio.currentTime || 0;
-  const frozen = performance.now() < freezeUntil;
-  const active = !audio.paused && !frozen && hoveredKey;
+  const wall = performance.now();
+  const frozen = wall < freezeUntil;
+  const settled = hoveredKey && (wall - hoverWall >= DWELL_MS);
+  const active = !audio.paused && !frozen && settled;
   if(active){
-    if(!pending){ openPending(hoveredKey, t); }
-    else if(pending.k !== hoveredKey){ closePending(t); openPending(hoveredKey, t); }
+    if(!pending) openPending(hoveredKey, hoverAudio);   // старт бэкдейтим на момент прихода курсора
+    // pending.k === hoveredKey гарантированно: смена ключа закрывает pending в mouseover
   } else {
-    // пауза / заморозка / курсор вне слова → закрыть открытый интервал
-    if(pending) closePending(t);
+    if(pending) closePending(t);   // пауза / заморозка / курсор вне слова / ещё не отдохнул
   }
+  updateAt(t);        // маркер позиции воспроизведения + автоскролл-телепромптер
   // индикатор состояния
   if(frozen){ setRec('frozen', '❄ заморозка'); }
   else if(active){ setRec('on', '● запись'); }
+  else if(hoveredKey && !audio.paused){ setRec('off', '… задержись на слове'); }
   else if(audio.paused){ setRec('off', '⏸ пауза'); }
   else { setRec('off', '○ веди мышью по слову'); }
   requestAnimationFrame(tick);
+}
+
+// маркер позиции чтеца (по исходному прогону posRef, иначе по своим events) + мягкий автоскролл.
+// Скроллим только в паузах записи (pending нет) — не дёргаем текст из-под активного курсора.
+function updateAt(t){
+  const ref = posRef.length ? posRef : events;
+  let k = null;
+  for(let i=ref.length-1; i>=0; i--){ if(ref[i].a <= t){ if(t <= ref[i].b + 0.5) k = ref[i].k; break; } }
+  if(k !== atKey){
+    if(atKey && wordEl[atKey]) wordEl[atKey].classList.remove('at');
+    atKey = k;
+    if(atKey && wordEl[atKey]) wordEl[atKey].classList.add('at');
+  }
+  if(!autoScroll || !atKey || pending || audio.paused) return;
+  const now = performance.now();
+  if(now < userScrollUntil || now < scrollCoolUntil) return;
+  const el = wordEl[atKey]; const r = el.getBoundingClientRect(); const vh = innerHeight;
+  if(r.top >= vh*BAND_TOP && r.top <= vh*BAND_BOT) return;   // уже в комфортной полосе
+  scrollTo({top: scrollY + r.top - vh*BAND_AIM, behavior:'smooth'});
+  scrollCoolUntil = now + 500;
 }
 
 let lastRec = '';
