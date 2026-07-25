@@ -39,11 +39,23 @@
   w2v_range.py). `align.py` и `w2v_range.py` теперь тонкие ре-экспортные шимы (pipeline/run/gpu_align/
   пробы не тронуты). Поведение-сохраняюще: OLD==NEW байт-в-байт на rec7-эмиссиях, словесный align rec11
   cov 0.964, `find_range` с сохранёнными декодами 9/9 (rec7 6:95-103), `manage.py check` чист. Коммит в
-  main. Инструмент: `work/verify_match_align.py`. **ДАЛЬШЕ:** (4) пакет `sources/` + динамический лоадер
-  (файл-на-источник, контракт `KEY/LABEL/available()/run()`, `importlib`; снять `ALIGNERS`/`is_aligner`/
-  `_maybe_*`, `active_run` упростить) → (3) MMS свой диапазон через `match_align.find_range` (снять
-  `_forced_source`). Удалить мёртвый `pipeline._inherit_repeats`+`_REPEAT_ZONE_MARGIN`. Каждый шаг —
-  рабочее состояние + коммит+пуш; тест `manage.py check` + офлайн `work/verify_match_align.py`.
+  main. Инструмент: `work/verify_match_align.py`. ✅ ИНКРЕМЕНТ 4 СДЕЛАН (сессия 17, коммит `93cbddf`):
+  **плоские плагины-источники.** Создан пакет `service/recitations/sources/` (файл-на-источник + лоадер
+  `__init__.py` через `pkgutil.iter_modules`+`importlib`, реестр по PRIORITY). 5 источников
+  manual(P5)/w2v(P10)/forced(P20)/google(P30)/whisper(P40), контракт `KEY/LABEL/NOTE/SELECTABLE/AUTO/
+  ISOLATE/ALIGNED/PRIORITY` + `available()/ready()/run(rec,audio,quran,out,stage)`. **Удалено:**
+  `recognizers.py` целиком (REGISTRY/ALIGNERS/is_aligner/PRIORITY/selectable), `pipeline._recognize`+
+  `_inherit_repeats`+`_REPEAT_ZONE_MARGIN`, `tasks._maybe_forced`/`_maybe_w2v` (→ обобщённый
+  `_ensure_auto` по `sources.auto()`), ветвление `run_one`/`gpu_align` по типу. Единый диспетчер:
+  `run_one`→`sources.get(k).run()` (ISOLATE→подпроцесс gpu_align, иначе in-proc), `gpu_align` грузит
+  модуль по ключу. `active_run`→`sources.keys()`/`is_aligned` (логика та же). views/models на `sources`.
+  Поведение-сохраняюще e2e rec5: google/w2v/forced word_timeline байт-в-байт идентичны (cov 0.977/0.914/
+  0.478, fj0), `run_single`→`_ensure_auto` гонит w2v+forced, VRAM свободна, 0 осиротевших gpu_align,
+  `manage.py check` чист. **ДАЛЬШЕ:** (3) MMS/forced свой диапазон через `match_align.find_range` (снять
+  `pipeline._forced_source` + гейт `sources/forced.py::ready()`; forced станет полностью независим как
+  w2v) → (5-чистка) разорвать импорт `w2v_*`→`falign` (кирпичи в общий `src/arabic.py`, часть уже в
+  `alignbricks.py`). Каждый шаг — рабочее состояние + коммит+пуш; тест `manage.py check` + офлайн
+  `work/verify_match_align.py` + e2e через `pipeline.run_one`/`run_single` на 1 записи (GPU по одному).
 - **Сделано 24-25.07 (сессия 15): w2v ПОЛНОСТЬЮ независим — whisperx выкинут, свой CTC-Viterbi +
   точный find_range.** Директива владельца: «Wave2Vec отдельный, зачем ему WhisperX?» + «ничего от
   других ASR/аллайнеров». Сделано: (1) модель грузим напрямую через `transformers`
