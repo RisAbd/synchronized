@@ -341,6 +341,14 @@ _NEG = -1e9
 _REGION_MARGIN = 6        # ± аятов запаса вокруг плотного кластера (CTC добьёт точную границу)
 _REFINE_BAND = 4          # ± аятов точного difflib-добора вокруг приближённой (по префиксам) границы
 _SEED_SURAS = 8           # сколько top-плотностных сур пробовать целиком как сид (шаг е) — робастность
+# --- мульти-сегмент (find_segments): аудио звучит в РАЗНЫХ местах Корана (Фатиха + сура + …) ---
+_SEG_MINBLOCK = 8         # мин. длина СУЩЕСТВЕННОГО совпадения (симв.), чтобы считать «телом» сегмента
+_SEG_MIN_DEC = 25         # короче хвост декода не ищем как отдельный сегмент (шум/такбир/пауза)
+_SEG_RATIO_MIN = 0.20     # мин. difflib-ratio сегмента к своему куску декода (иначе не текст Корана)
+_SEG_MAX_DEPTH = 4        # предел рекурсии отшелушивания
+_SEG_MIN_MATCHED = 45     # ВТОРИЧНЫЙ (peeled) сегмент: мин. совпавших символов. Отсекает интро-истиаза
+                          # (16:98 matched≈30), басмалу, такбиры, шум по краям — они дают КОРОТКОЕ
+                          # совпадение; истинная Фатиха ~79 matched. Primary (доминирующий) — без порога.
                           # к ложному пику (рефрен/истиаза-интро) без регресса частичных чтений
 
 
@@ -733,4 +741,78 @@ def find_range(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
     if verbose:
         s0, a0 = verses[0]; s1, a1 = verses[-1]
         print(f"диапазон: {s0}:{a0}..{s1}:{a1}  difflib-ratio={cur:.3f}")
+    return verses
+
+
+def find_segments(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
+                  index=None, k: int = _K, dec: str | None = None,
+                  verbose: bool = False) -> list[tuple[int, int]]:
+    """МУЛЬТИ-СЕГМЕНТНЫЙ поиск (директива владельца 26.07): аудио НИКОГДА не один непрерывный кусок
+    Корана — бывает Фатиха + основная сура + такбиры, разные суры/аяты вперемешку (записи с намаза).
+    Один общий алгоритм должен находить ВСЕ читаемые места по похожести текста. Возвращает плоский
+    список (surah, ayah) В ПОРЯДКЕ ЧТЕНИЯ (сегменты стыкуются; несмежные суры — норма).
+
+    Как: `find_range` находит ДОМИНИРУЮЩИЙ непрерывный сегмент; выравниваем декод к его тексту, берём
+    первый/последний СУЩЕСТВЕННЫЙ блок совпадения (≥_SEG_MINBLOCK — не размазанный шум) → это границы
+    «тела» сегмента в декоде; непокрытые ПРЕФИКС/СУФФИКС декода рекурсивно ищем тем же find_range.
+    Так Фатиха-голова (её difflib размазывается по основной суре) отделяется как свой сегмент.
+    Гард: сегмент принимаем только если его difflib-ratio к своему куску декода ≥_SEG_RATIO_MIN
+    (короткие такбиры «الله أكبر» / вдохи / шум не дотягивают) — порог мягкий, не режет реальный Коран."""
+    special = {ch2idx.get(t) for t in ("<pad>", "<s>", "</s>", "<unk>", "|", "-", "ـ")} - {None}
+    idx = index or build_index(quran)
+    Cs, char2fa, kidx, flat_ayahs, fa_skel = idx
+    sa2flat = {sa: i for i, sa in enumerate(flat_ayahs)}
+    if dec is None:
+        dec = greedy_skeleton(emissions, idx2ch, special)
+
+    def _seg_text(seg):
+        return "".join(fa_skel[sa2flat[sa]] for sa in seg if sa in sa2flat)
+
+    import difflib
+    accepted: list[dict] = []            # {lo,hi (плоские инд.), pos (позиция тела в декоде), seg}
+
+    def _overlaps(lo, hi):
+        return any(not (hi < a["lo"] or lo > a["hi"]) for a in accepted)
+
+    def _recurse(sub, off, depth):
+        if len(sub) < max(k, _SEG_MIN_DEC) or depth > _SEG_MAX_DEPTH:
+            return
+        seg = find_range(emissions, quran, idx2ch, ch2idx, index=idx, k=k, dec=sub)
+        if not seg:
+            return
+        seg = list(seg)
+        lo, hi = sa2flat.get(seg[0], -1), sa2flat.get(seg[-1], -1)
+        if lo < 0 or _overlaps(lo, hi):     # уже покрыто другим сегментом → не дублируем
+            return
+        st = _seg_text(seg)
+        sm = difflib.SequenceMatcher(None, sub, st, autojunk=False)
+        blocks = sm.get_matching_blocks()
+        matched = sum(b.size for b in blocks)
+        big = [b for b in blocks if b.size >= _SEG_MINBLOCK]
+        # ВТОРИЧНЫЙ (peeled) сегмент — строгий гард (PRIMARY depth==0 всегда принимаем, он доминирует):
+        #   • matched ≥ _SEG_MIN_MATCHED — отсекает короткий матч истиазы/басмалы/такбира (16:98 matched≈30);
+        #   • big ≥ 1 — истинное чтение даёт хотя бы один НЕПРЕРЫВНЫЙ прогон ≥8 симв.; ложный матч
+        #     (закрывающая дуа / обрывок чужой суры: 10:43-45, 4:81-82) размазан мелочью, big=0.
+        # Истинная Фатиха: matched≈79, big≥1 → проходит.
+        if sm.ratio() < _SEG_RATIO_MIN:
+            return                          # слабый матч → не сегмент Корана
+        if depth > 0 and (matched < _SEG_MIN_MATCHED or not big):
+            return                          # вторичный слаб/размазан → интро/дуа/шум, не отдельное чтение
+        d0 = big[0].a if big else 0
+        d1 = (big[-1].a + big[-1].size) if big else len(sub)
+        accepted.append({"lo": lo, "hi": hi, "pos": off + d0, "seg": seg})
+        if d0 >= _SEG_MIN_DEC:              # непокрытый ПРЕФИКС декода → отдельный сегмент (Фатиха)
+            _recurse(sub[:d0], off, depth + 1)
+        if len(sub) - d1 >= _SEG_MIN_DEC:  # непокрытый СУФФИКС
+            _recurse(sub[d1:], off + d1, depth + 1)
+
+    _recurse(dec, 0, 0)
+    accepted.sort(key=lambda a: a["pos"])   # порядок ЧТЕНИЯ (по позиции в декоде)
+    verses: list[tuple[int, int]] = []
+    for a in accepted:
+        verses.extend(a["seg"])
+    if verbose:
+        parts = [f"{a['seg'][0][0]}:{a['seg'][0][1]}..{a['seg'][-1][0]}:{a['seg'][-1][1]}@{a['pos']}"
+                 for a in accepted]
+        print(f"сегменты ({len(accepted)}): " + " | ".join(parts))
     return verses
