@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
@@ -816,3 +817,93 @@ def find_segments(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
                  for a in accepted]
         print(f"сегменты ({len(accepted)}): " + " | ".join(parts))
     return verses
+
+
+# ── LIVE-локатор: быстрый КОНТЕКСТНО-зависимый поиск места (WI, владелец tg_4810) ──────────────
+# Медленный путь (find_range/find_segments) = difflib над всем декодом × сурами → секунды-десятки
+# (rec9 ~20с). Для live НЕПРИГОДНО. Здесь — O(длины окна) локатор поверх ТОГО ЖЕ инвертированного
+# k-грамм-индекса (index.kidx): IDF-голосование по аятам (_ayah_density) + континуитет-приор. ~0.2мс
+# на вызов (в ~100000× быстрее). Приор = «где читаем СЕЙЧАС» биасит выбор среди неоднозначных мест
+# (рефрены, повторяющиеся формулы) — не «тупо первый кандидат», а с учётом контекста (директива WI).
+_LOC_BACK = int(os.environ.get("SYNC_LOC_BACK", "2") or 2)      # аятов назад разрешаем (возврат чтеца)
+_LOC_AHEAD = int(os.environ.get("SYNC_LOC_AHEAD", "8") or 8)    # аятов вперёд ищем в band-режиме
+_LOC_SIGMA = float(os.environ.get("SYNC_LOC_SIGMA", "3") or 3)  # ширина мягкого bump внутри band
+_LOC_PSTR = float(os.environ.get("SYNC_LOC_PSTR", "8") or 8)    # сила bump
+_LOC_CONF_LOCK = float(os.environ.get("SYNC_LOC_CONF", "0.55") or 0.55)  # порог уверенной привязки
+_LOC_LOST_MAX = int(os.environ.get("SYNC_LOC_LOST", "2") or 2)  # окон без сигнала до сброса lock
+
+
+def locate(dec_window: str, index, prior_fa: int | None = None,
+           back: int = _LOC_BACK, ahead: int = _LOC_AHEAD, k: int = _K) -> dict | None:
+    """Быстрый локатор плоского аята из ОКНА декода (буквенный скелет «недавно услышанного»).
+    IDF-голосование k-грамм по аятам (O(окна)). `prior_fa` — текущая позиция (плоский индекс): при
+    заданном ищем в ЖЁСТКОМ band'е [prior-back, prior+ahead] (монотонное движение вперёд + разрешён
+    малый возврат чтеца), внутри — мягкий bump на «чуть впереди». Возвращает
+    {fa, surah, ayah, confidence} или None (нет сигнала). confidence = пик/(пик+2-й) — насколько
+    доминирует победитель (для решения «залочиться / это неоднозначно»)."""
+    Cs, char2fa, kidx, flat_ayahs, fa_skel = index
+    n = len(flat_ayahs)
+    dens = _ayah_density(dec_window, char2fa, kidx, n, k=k)
+    if dens.sum() == 0:
+        return None
+    if prior_fa is not None:
+        lo = max(0, prior_fa - back)
+        hi = min(n - 1, prior_fa + ahead)
+        mask = np.zeros(n)
+        mask[lo:hi + 1] = 1.0
+        idx = np.arange(n)
+        bump = np.exp(-((idx - (prior_fa + 1)) ** 2) / (2 * _LOC_SIGMA ** 2))
+        dens = dens * mask * (1.0 + _LOC_PSTR * bump)
+        if dens.sum() == 0:
+            return None
+    peak = int(dens.argmax())
+    srt = np.sort(dens)[::-1]
+    conf = float(srt[0] / (srt[0] + srt[1] + 1e-9)) if len(srt) > 1 else 1.0
+    s, a = flat_ayahs[peak]
+    return {"fa": peak, "surah": s, "ayah": a, "confidence": round(conf, 3)}
+
+
+class StreamLocator:
+    """Онлайн-трекер позиции чтения для live (WI). Кормишь окном декода → текущее место в Коране.
+
+    Lock-state: пока НЕ залочен — глобальный поиск до уверенной привязки (conf≥conf_lock); залочен —
+    band-трекинг вокруг позиции (быстро + монотонно, рефрен матчит СЛЕДУЮЩИЙ экземпляр); потерял
+    сигнал lost_max окон подряд — сброс в глобальный ре-поиск. Тайминги здесь вторичны (директива
+    владельца) — важны скорость и устойчивая позиция. Валидировано офлайн: rec7/5/6/9 точность ±1 аят
+    0.70-0.91; рефрен-суры (rec10 Ар-Рахман) — открытая проблема (нужен CTC-рескоринг кандидатов)."""
+
+    def __init__(self, index, conf_lock: float = _LOC_CONF_LOCK, lost_max: int = _LOC_LOST_MAX,
+                 back: int = _LOC_BACK, ahead: int = _LOC_AHEAD):
+        self.index = index
+        self.conf_lock = conf_lock
+        self.lost_max = lost_max
+        self.back = back
+        self.ahead = ahead
+        self.prior = None
+        self.locked = False
+        self._lost = 0
+
+    def feed(self, dec_window: str) -> dict | None:
+        """Обработать окно; вернуть {surah, ayah, confidence, locked} или None (пока нет позиции)."""
+        if self.locked:
+            r = locate(dec_window, self.index, prior_fa=self.prior, back=self.back, ahead=self.ahead)
+            if r is None:
+                self._lost += 1
+                if self._lost > self.lost_max:
+                    self.locked = False
+                    self.prior = None
+                    return None
+                r = {"fa": self.prior, "surah": self.index[3][self.prior][0],
+                     "ayah": self.index[3][self.prior][1], "confidence": 0.0}
+            else:
+                self._lost = 0
+                self.prior = r["fa"]
+        else:
+            r = locate(dec_window, self.index, prior_fa=None)
+            if r is None or r["confidence"] < self.conf_lock:
+                return {**r, "locked": False} if r else None
+            self.locked = True
+            self.prior = r["fa"]
+            self._lost = 0
+        return {"surah": r["surah"], "ayah": r["ayah"],
+                "confidence": r["confidence"], "locked": self.locked}
