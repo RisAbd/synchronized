@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import difflib
 import json
 import os
 from collections import Counter, defaultdict
@@ -831,6 +832,10 @@ _LOC_SIGMA = float(os.environ.get("SYNC_LOC_SIGMA", "3") or 3)  # ширина �
 _LOC_PSTR = float(os.environ.get("SYNC_LOC_PSTR", "8") or 8)    # сила bump
 _LOC_CONF_LOCK = float(os.environ.get("SYNC_LOC_CONF", "0.55") or 0.55)  # порог уверенной привязки
 _LOC_LOST_MAX = int(os.environ.get("SYNC_LOC_LOST", "2") or 2)  # окон без сигнала до сброса lock
+# SegmentTracker (онлайн-указатель по известному пассажу) — параметры символьного окна
+_TRK_BACK = int(os.environ.get("SYNC_TRK_BACK", "40") or 40)      # корпус-окно назад от указателя (симв.)
+_TRK_AHEAD = int(os.environ.get("SYNC_TRK_AHEAD", "180") or 180)  # корпус-окно вперёд
+_TRK_MINBLK = int(os.environ.get("SYNC_TRK_MINBLK", "6") or 6)    # мин. matching-блок, чтобы двигать указатель
 
 
 def locate(dec_window: str, index, prior_fa: int | None = None,
@@ -907,3 +912,55 @@ class StreamLocator:
             self._lost = 0
         return {"surah": r["surah"], "ayah": r["ayah"],
                 "confidence": r["confidence"], "locked": self.locked}
+
+
+class SegmentTracker:
+    """Онлайн-трекер позиции ВНУТРИ известного пассажа (WI). Реалистичный live-дизайн: `find_segments`
+    задаёт пассаж (Фатиха+сура+…, разово ~сек), а этот трекер быстро (~0.2мс/тик) ведёт позицию по
+    мере поступления декода — локальным difflib-выравниванием хвоста декода к УЗКОМУ окну корпуса
+    вокруг указателя. Указатель монотонно ползёт вперёд по мини-корпусу прочитанного:
+    несмежные сегменты (Фатиха→Исра) становятся СМЕЖНЫМИ → мульти-сегмент решён; узкое окно = только
+    текущий контекст → повторяющиеся формулы не телепортируют позицию.
+
+    Валидировано офлайн (симуляция live, `work/proto_online.py`, точность ±1 аят): rec5/7=1.00,
+    rec12=0.99, rec11=0.97, rec13=0.96, rec6/9=0.90-0.91 (7 из 9 в 0.90-1.00; резко лучше k-грамм-
+    StreamLocator на короткоаятных сурах). Открытая проблема: рефрен-суры (rec10 Ар-Рахман «فبأي
+    آلاء ربكما تكذبان» ×31 → 0.07; отчасти rec14 0.49) — плотный рефрен + мелодичный декод.
+
+    Использование: `trk = SegmentTracker(index, verses); trk.feed(dec_tail)` каждый тик, где
+    `dec_tail` — хвост греди-декода эмиссий (последние ~40 символов). verses — [(surah,ayah), …] от
+    find_segments (в порядке чтения)."""
+
+    def __init__(self, index, verses, back: int = _TRK_BACK, ahead: int = _TRK_AHEAD,
+                 minblk: int = _TRK_MINBLK):
+        Cs, char2fa, kidx, flat_ayahs, fa_skel = index
+        fa2i = {fa: i for i, fa in enumerate(flat_ayahs)}
+        skels, sa = [], []
+        for v in verses:
+            key = (v[0], v[1])
+            i = fa2i.get(key)
+            if i is None:
+                continue
+            sk = fa_skel[i]
+            skels.append(sk)
+            sa.extend([key] * len(sk))
+        self.M = "".join(skels)
+        self.sa = sa                    # позиция в M → (surah, ayah)
+        self.back = back
+        self.ahead = ahead
+        self.minblk = minblk
+        self.p = 0
+
+    def feed(self, dec_tail: str) -> dict | None:
+        """Обработать хвост декода; вернуть текущее {surah, ayah} (или None, если пассаж пуст)."""
+        if not self.sa:
+            return None
+        lo = max(0, self.p - self.back)
+        hi = min(len(self.M), self.p + self.ahead)
+        sm = difflib.SequenceMatcher(None, dec_tail, self.M[lo:hi], autojunk=False)
+        blocks = [b for b in sm.get_matching_blocks() if b.size >= self.minblk]
+        if blocks:
+            last = blocks[-1]
+            self.p = lo + last.b + last.size    # указатель на конец последнего matching-блока
+        s, a = self.sa[min(self.p, len(self.sa) - 1)]
+        return {"surah": s, "ayah": a}
