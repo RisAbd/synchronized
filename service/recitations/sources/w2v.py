@@ -9,6 +9,7 @@ ISOLATE=True: гоняется в отдельном процессе (gpu_align
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 KEY = "w2v"
@@ -31,12 +32,26 @@ def available() -> bool:
 
 
 def _align_with_repeats(E, stride, verses, idx2ch, ch2idx, audio_path):
-    """Выравнивание С ВОЗВРАТАМИ за ОДИН проход (подход владельца, tg_4053/4059): repeat-aware
-    CTC-Viterbi сам ходит назад по акустике (см. w2v_align.repeat_align). Ни пред-детекта, ни
-    дублирования эталона, ни жёстких порогов — только окно R и штраф P (по умолч. 0: возврат
-    бесплатен, акустика держит чистоту; прыжки вперёд через слова структурно невозможны). Возврат
-    чтеца = сегмент пути с убывающим индексом слова → rep=True. Возвращает (sync_map, rep_info)."""
+    """Возвраты чтеца двумя режимами (env `SYNC_W2V_REPEATS`):
+
+    • `viterbi` (по умолчанию) — ОДИН проход repeat-aware CTC-Viterbi: аллайнер сам ходит назад по
+      акустике (см. w2v_align.repeat_align). Ни пред-детекта, ни порогов — только окно R и штраф P=0.
+      Ловит длинно-span'овые возвраты, но фразы-перечитки, где модель путает буквы (بديع: ب→ق), теряет.
+
+    • `oracle` — авто-структура повторов через ОРАКУЛ правдоподобия (WG, план владельца tg_4539):
+      greedy_repeat_slots судит по локальному CTC path_score H0(×m) vs H1(×m+1), генерит расширенный
+      текст повторов → forced_align(slots=) монотонно раскладывает КАЖДОЕ звучание на свою копию. Берёт
+      фразы-перечитки, которые Viterbi-режим теряет (السماوات والأرض, لا إله إلا هو). Порогов «сколько
+      повторов» нет — решает модель. Требует валидации слухом на каждой реке (rep-точность — только ухо).
+
+    Возвращает (sync_map, rep_info)."""
     import w2v_align
+    mode = (os.environ.get("SYNC_W2V_REPEATS", "viterbi") or "viterbi").lower()
+    if mode == "oracle":
+        slots = w2v_align.greedy_repeat_slots(E, verses, ch2idx, stride)
+        sync = w2v_align.forced_align(E, stride, verses, idx2ch, ch2idx, audio_path, slots=slots)
+        return sync, {"repeats_mode": "oracle-greedy-forced",
+                      "repeats_inserted": sum(1 for s in slots if s[4])}
     sync = w2v_align.repeat_align(E, stride, verses, idx2ch, ch2idx, audio_path)
     meta = sync.get("meta") or {}
     return sync, {"repeats_mode": "1pass-repeat-viterbi",

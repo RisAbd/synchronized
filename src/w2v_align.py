@@ -323,10 +323,10 @@ def forced_align(E, stride_ms: float, verses, idx2ch: dict, ch2idx: dict,
 
     # снап к тишине (RMS): поджать границы ТОЛЬКО внутрь к речи. Мадд = речь → держится; реальная
     # пауза → триммится (заливка замирает на 100%, подсветка ждёт след. слово). Опт-аут SYNC_W2V_SNAP=0.
-    audio = _load_wav(audio_path)
     snapped = 0
     do_snap = (os.environ.get("SYNC_W2V_SNAP", "1") != "0") if snap is None else snap
     if do_snap:
+        audio = _load_wav(audio_path)
         real_idx = [i for i, f in enumerate(interp_flags) if not f]
         real_bounds = [bounds[i] for i in real_idx]
         snapped_bounds, snapped = alignbricks._snap_bounds(real_bounds, audio)
@@ -383,6 +383,192 @@ def forced_align(E, stride_ms: float, verses, idx2ch: dict, ch2idx: dict,
     }
     return {"meta": meta, "timeline": timeline,
             "word_timeline": word_timeline, "char_timeline": char_timeline}
+
+
+# ── Оракул правдоподобия: авто-структура повторов (WG, план владельца tg_4539) ────────────────
+# Идея: forced_align(slots=) по РАСШИРЕННОМУ тексту повторов даёт почти идеал (эталон test2), но
+# нужен сам расширенный текст. Генерим его сам: для фразы-кандидата в «переросшем» аяте сравниваем
+# ЛОКАЛЬНЫЙ CTC path_score H0(фраза×m) vs H1(фраза×m+1) на кадрах окна вокруг неё; ΔH>margin ⟺
+# лишняя копия реально легла на свои кадры (иначе метки тянутся по не-своим → score падает). Порогов
+# «сколько повторов» нет — судит модель. Чистая функция от эмиссий (GPU/аудио не нужны).
+_GREEDY_MARGIN = float(os.environ.get("SYNC_W2V_GREEDY_MARGIN", "3") or 3)   # мин. ΔH принятия копии
+_GREEDY_MAXLEN = int(os.environ.get("SYNC_W2V_GREEDY_MAXLEN", "5") or 5)     # макс. длина фразы (слов)
+_GREEDY_SPANK = float(os.environ.get("SYNC_W2V_GREEDY_SPANK", "2.8") or 2.8)  # порог спан/букву к медиане
+_GREEDY_CTX = int(os.environ.get("SYNC_W2V_GREEDY_CTX", "2") or 2)           # контекст окна (слов)
+_GREEDY_MAXMUL = int(os.environ.get("SYNC_W2V_GREEDY_MAXMUL", "3") or 3)     # макс. доп. копий фразы
+
+
+def _labels_of(words, ch2idx, blank):
+    lab = []
+    for w in words:
+        for ch in w:
+            j = ch2idx.get(ch)
+            if j is not None and j != blank:
+                lab.append(j)
+    return lab
+
+
+def _canon_mono(E, canon, ch2idx):
+    """Монотонная раскладка канона → (w_first, w_last, known) в КАДРАХ (для окон/спанов)."""
+    blank = ch2idx.get("<pad>", 0)
+    labels, lab_word = [], []
+    for gi, c in enumerate(canon):
+        for ch in c[3]:
+            j = ch2idx.get(ch)
+            if j is None or j == blank:
+                continue
+            labels.append(j)
+            lab_word.append(gi)
+    if not labels:
+        return {}, {}, []
+    path, _ext, _sc = _ctc_viterbi(E, labels, blank)
+    T = int(E.shape[0])
+    L = len(labels)
+    first = [-1] * L
+    last = [-1] * L
+    for t in range(T):
+        s = int(path[t])
+        if s & 1:
+            li = (s - 1) // 2
+            if first[li] < 0:
+                first[li] = t
+            last[li] = t
+    w_first, w_last = {}, {}
+    for li, gi in enumerate(lab_word):
+        if first[li] < 0:
+            continue
+        if gi not in w_first:
+            w_first[gi] = first[li]
+        w_last[gi] = last[li]
+    return w_first, w_last, sorted(w_first)
+
+
+def greedy_repeat_slots(E, verses, ch2idx, stride_ms, margin=None, maxlen=None,
+                        span_k=None, ctx=None, maxmul=None, verbose=False):
+    """Авто-структура повторов (WG). Возвращает slots [(surah, ayah, wi, word, rep_bool)] для
+    forced_align(slots=). Порогов на число повторов нет — оракул правдоподобия судит каждую копию."""
+    import statistics
+    margin = _GREEDY_MARGIN if margin is None else margin
+    maxlen = _GREEDY_MAXLEN if maxlen is None else maxlen
+    span_k = _GREEDY_SPANK if span_k is None else span_k
+    ctx = _GREEDY_CTX if ctx is None else ctx
+    maxmul = _GREEDY_MAXMUL if maxmul is None else maxmul
+    blank = ch2idx.get("<pad>", 0)
+    sec = stride_ms / 1000.0
+
+    verses = [(s, a, " ".join(quranmod.word_tokens(t))) for s, a, t in verses]
+    canon = []
+    for s, a, txt in verses:
+        for wi, w in enumerate(txt.split()):
+            canon.append((s, a, wi, w, False))
+    if not canon:
+        return canon
+
+    w_first, w_last, known = _canon_mono(E, canon, ch2idx)
+    if not known:
+        return canon
+    T = int(E.shape[0])
+
+    def onset_frame(gi, default):
+        for gj in range(gi, -1, -1):
+            if gj in w_first:
+                return w_first[gj]
+        for gj in range(gi, len(canon)):
+            if gj in w_first:
+                return w_first[gj]
+        return default
+
+    # «переросшие» аяты — по АНОМАЛЬНО ДЛИННОМУ СЛОВУ: перечитка фразы всегда оставляет кадры лишнего
+    # звучания, которые монотонный канон-Viterbi вынужден кому-то отдать → спан/букву у слова в зоне
+    # повтора резко выше глобального темпа (rec7: ×5-8 против ×1-2 в спокойных). Гейт нужен для СКОРОСТИ
+    # и локализации; истину внутри флаг-аята решает оракул (мадд-раздутое слово он отвергнет — ΔH<0).
+    def _nbase(w):
+        return max(1, len([c for c in w if c not in _HARAKAT]))
+
+    word_rate = {}
+    for idx, gi in enumerate(known):
+        f0 = w_first[gi]
+        f1 = w_first[known[idx + 1]] if idx + 1 < len(known) else (w_last[gi] + 1)
+        word_rate[gi] = max(1, f1 - f0) / _nbase(canon[gi][3])
+    med = statistics.median(word_rate.values()) if word_rate else 1.0
+
+    ayah_gis = {}
+    for gi in known:
+        ayah_gis.setdefault((canon[gi][0], canon[gi][1]), []).append(gi)
+    flagged = set()
+    for (s, a), gis in ayah_gis.items():
+        if med > 0 and any(word_rate[gi] / med > span_k for gi in gis):
+            flagged.add((s, a))
+    if verbose:
+        print(f"переросшие аяты ({len(flagged)}/{len(ayah_gis)}): "
+              f"{sorted(a for _, a in flagged)}; med={med:.1f} кадр/букву")
+
+    by_ayah = {}
+    for k, c in enumerate(canon):
+        by_ayah.setdefault((c[0], c[1]), []).append(k)
+
+    def dH_extra(i, j, extra):
+        """ΔH добавления (extra+1)-й копии фразы canon[i..j] к extra уже имеющимся (сверх канона)."""
+        lo = max(0, i - ctx)
+        hi = min(len(canon) - 1, j + ctx)
+        f0 = onset_frame(lo, 0)
+        f1 = onset_frame(hi + 1, T) if hi + 1 < len(canon) else (w_last.get(hi, T - 1) + 1)
+        f0 = max(0, min(int(f0), T - 1))
+        f1 = max(f0 + 1, min(int(f1), T))
+        Ew = E[f0:f1]
+        pre = [canon[k][3] for k in range(lo, j + 1)]
+        phrase = [canon[k][3] for k in range(i, j + 1)]
+        post = [canon[k][3] for k in range(j + 1, hi + 1)]
+        lab0 = _labels_of(pre + phrase * extra + post, ch2idx, blank)
+        lab1 = _labels_of(pre + phrase * (extra + 1) + post, ch2idx, blank)
+        if not lab0 or not lab1:
+            return -1e30
+        _, _, s0 = _ctc_viterbi(Ew, lab0, blank)
+        _, _, s1 = _ctc_viterbi(Ew, lab1, blank)
+        return s1 - s0
+
+    # кандидаты-фразы в флаг-аятах; для каждой — ΔH первой доп-копии
+    scored = []
+    for (s, a) in flagged:
+        idxs = by_ayah.get((s, a), [])
+        for i in idxs:
+            for j in idxs:
+                if 0 <= j - i < maxlen:
+                    d = dH_extra(i, j, 0)
+                    if d > margin:
+                        scored.append((d, i, j))
+    scored.sort(reverse=True)   # больший ΔH раньше — жадно
+
+    # принять без пересечений (одна канон-позиция участвует в ≤1 повторе); нарастить кратность
+    used = set()
+    accepted = []
+    for d0, i, j in scored:
+        span_set = set(range(i, j + 1))
+        if span_set & used:
+            continue
+        extra = 1
+        while extra < maxmul and dH_extra(i, j, extra) > margin:
+            extra += 1
+        used |= span_set
+        accepted.append((i, j, extra, d0))
+        if verbose:
+            name = " ".join(canon[k][3] for k in range(i, j + 1))
+            print(f"  +повтор [{canon[i][1]}:{canon[i][2]}-{canon[j][2]}] «{name}» ×{extra + 1} ΔH={d0:+.1f}")
+
+    # вставить дубли после forward-вхождения фразы (по канон-позиции j); с конца — индексы не съезжают
+    slots = list(canon)
+    for i, j, extra, _d in sorted(accepted, key=lambda x: x[1], reverse=True):
+        phrase = [(canon[k][0], canon[k][1], canon[k][2], canon[k][3], True) for k in range(i, j + 1)]
+        keyj = (canon[j][0], canon[j][1], canon[j][2])
+        pos = None
+        for p, sl in enumerate(slots):
+            if (sl[0], sl[1], sl[2]) == keyj and not sl[4]:
+                pos = p
+        if pos is None:
+            continue
+        ins = phrase * extra
+        slots = slots[:pos + 1] + ins + slots[pos + 1:]
+    return slots
 
 
 _REPEAT_R = int(os.environ.get("SYNC_W2V_REPEAT_R", "9") or 9)
