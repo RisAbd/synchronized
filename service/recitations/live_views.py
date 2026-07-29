@@ -121,6 +121,17 @@ _SR = 16000
 _BUF_CAP = float(os.environ.get("SYNC_LIVE_BUFCAP", "20"))        # роллинг-буфер PCM (владелец: ~20с, не 48)
 _COLD_MIN = float(os.environ.get("SYNC_LIVE_COLDMIN", "10"))      # накопить перед 1-й попыткой лока
 _COLD_WIN = float(os.environ.get("SYNC_LIVE_COLDWIN", "20"))      # окно декода для лока/перелока (≤буфера)
+# РАСТУЩИЙ cold-аккумулятор для ПЕРВОГО (холодного) лока: роллинг-буфер капнут на _BUF_CAP=20с, но
+# find_segments по буферу от НАЧАЛА 30-45с лочит суру НАДЁЖНЕЕ (мусорная сура не держит match на длинном
+# окне → её ratio падает, верный пассаж растёт). Копим ВСЁ аудио с начала до _COLD_GROW с ТОЛЬКО в scan;
+# на лок используем его вместо роллинга; при переходе в track — освобождаем. 0 → выкл (роллинг как раньше).
+_COLD_GROW = float(os.environ.get("SYNC_LIVE_COLDGROW", "45"))
+# ⚠️ COLD-CONFIRM (лок при ratio≥floor, если суру подтвердили N раз подряд) ПРОБОВАЛСЯ и ОТВЕРГНУТ:
+# устойчивый мусор в окне <20с (rec9 сура 27 «An-Naml» держит ratio 0.43 три лок-попытки подряд, ДО того
+# как растущий буфер её давит на n=141) → confirm floor 0.40 лочил суру 27 на t=18с (мислок). Сура-мусор
+# rec9 (0.43) сидит в ТОЙ ЖЕ ratio-полосе, что верные пассажи rec5/12 (0.40-0.43) — ratio их не разделяет,
+# понижение порога небезопасно. Ускорения холодного лока rec9 нет: узкое место = ratio-гейт + разбавление
+# басмалой (короткая Фатиха), не длина буфера. Оставлен только растущий буфер (робастность, см. выше).
 _TRACK_WIN = float(os.environ.get("SYNC_LIVE_TRACKWIN", "8"))     # окно декода для трекинга (латентность!)
 _FWD_AYAT = int(os.environ.get("SYNC_LIVE_FWD", "120"))           # аятов вперёд в корпусе трекера
 _RELOC_STALL = int(os.environ.get("SYNC_LIVE_RELOC", "10"))       # тиков застоя → перелокализация (реже!)
@@ -222,7 +233,8 @@ def _session(sid, reset=False):
     import numpy as np
     st = _STREAM.get(sid)
     if st is None or reset:
-        st = _STREAM[sid] = {"buf": np.zeros(0, dtype="float32"), "phase": "scan", "n": 0,
+        st = _STREAM[sid] = {"buf": np.zeros(0, dtype="float32"),
+                             "cold_buf": np.zeros(0, dtype="float32"), "phase": "scan", "n": 0,
                              "verses": None, "trk": None, "votes": None,
                              "last_pos": None, "last_ctx": []}
     return st
@@ -267,6 +279,11 @@ def _append_pcm(st, pcm):
     """Дёшево (в event-loop): дописать pcm-float в роллинг-буфер + n++. Тяжёлого НЕТ."""
     import numpy as np
     st["buf"] = np.concatenate([st["buf"], pcm])[-int(_BUF_CAP * _SR):]
+    # растущий cold-аккумулятор: копим ВСЁ с начала до _COLD_GROW с, ТОЛЬКО пока в scan (до 1-го лока)
+    if _COLD_GROW > 0 and st.get("phase") == "scan":
+        cb = st.get("cold_buf")
+        if cb is not None and len(cb) < int(_COLD_GROW * _SR):
+            st["cold_buf"] = np.concatenate([cb, pcm])[-int(_COLD_GROW * _SR):]
     st["n"] += 1
 
 
@@ -299,7 +316,11 @@ def _analyze(st):
             cand_out = [{"surah": c["surah"], "ayah": c["ayah"], "confidence": c["confidence"],
                          "text": _trunc(_ayah_text(q, c["surah"], c["ayah"]))} for c in cands]
             if conf >= _LOCK_CONF and len(st["buf"]) >= int(_LOCK_MIN * _SR):
-                E2, dec2 = _decode_window(st["buf"], _COLD_WIN, idx2ch, ch2idx)
+                # растущий аккумулятор (от начала, до 45с) на холодный лок — длинное окно давит мусорную
+                # суру и растит ratio верного пассажа; фолбэк на роллинг, если аккумулятор выкл/короче.
+                cb = st.get("cold_buf")
+                lock_buf = cb if (_COLD_GROW > 0 and cb is not None and len(cb) >= len(st["buf"])) else st["buf"]
+                E2, dec2 = _decode_window(lock_buf, max(_COLD_WIN, _COLD_GROW), idx2ch, ch2idx)
                 verses = find_segments(E2, q, idx2ch, ch2idx, index=index) if E2 is not None else None
                 # ГЕЙТ КАЧЕСТВА ЛОКА: лочимся ТОЛЬКО если пассаж реально объясняет декод (ratio≥порога).
                 # Ранний декод (басмала-интро/мелодика) шумный → find_segments даёт МУСОРНУЮ суру с
@@ -314,6 +335,7 @@ def _analyze(st):
                     st["verses"] = _build_corpus(index, verses)
                     st["trk"] = SegmentTracker(index, st["verses"])
                     st["phase"] = "track"; st["stall_reloc"] = 0
+                    st["cold_buf"] = None           # больше не нужен — освобождаем VRAM/RAM
                     st["lock_n"] = st["n"]          # тик первого лока — окно для кросс-перелока (см. track)
                     _track(st, dec2)
                     return _build_reply(st, {"locked": True, "candidates": cand_out})
