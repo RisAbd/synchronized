@@ -165,6 +165,23 @@ _RELOC_RATIO_MIN = float(os.environ.get("SYNC_LIVE_RELOCRATIO", "0.45"))
 # _RELOC_CONFIRM релок-попыток подряд. Заодно снят блок `len(v2)>=2`: на переходе верная сура приходит
 # ОДНОАЯТНЫМ коротким пассажом (len<2) и раньше отвергалась до t=222с.
 _RELOC_CONFIRM = int(os.environ.get("SYNC_LIVE_RELOCCONFIRM", "2"))   # релок-попыток подряд той же новой суры
+# РЕЖИМ ЗАУЧИВАНИЯ (WI killer-фича, владелец tg_4810): читаешь по памяти, отклонился от текста →
+# подсветка КРАСНЫМ. Сигнал = trk.quality (доля свежего декода, покрытая ОЖИДАЕМЫМ окном корпуса
+# вокруг указателя). На ВЕРНОМ чтении (даже мелодичном) держится выше _MEM_LOW; при отклонении
+# (читают не тот текст) декод перестаёт совпадать с ожиданием → падает. Гистерезис: deviation
+# взводится после _MEM_HOLD подряд тиков ниже _MEM_LOW, снимается при quality ≥ _MEM_OK. Работает
+# ТОЛЬКО когда клиент включил режим (memorize:1) — в обычном live низкое quality на мелодике/шуме
+# = не ошибка чтеца, красным не мигаем.
+# ⚠️ КАЛИБРОВКА + ПРЕДЕЛ (work/probe_memorize.py, 6 мелодичных рек): на ВЕРНОМ МЕЛОДИЧНОМ чтении
+# сигнал слаб (quality медиана 0.18-0.41, coverage minblk=3), декод беден — тот же акустический
+# предел, что рефрены/дрейф оси B. При СТРОГОМ пороге (LOW=0.06, HOLD=5, OK=0.25) верное мелодичное
+# чтение всё равно 4-9% времени ложно «краснит» (rec9 15 эпизодов, rec10 6). Поэтому режим ОПТ-ИН
+# (по умолчанию выкл) и порог строгий. ВАЖНО: мелодика = ХУДШИЙ случай декода; сценарий заучивания —
+# ПРОСТОЕ чтение по памяти, декодится чище → ложных меньше. Валидация true-positive и финальная
+# калибровка LOW/HOLD ждут теста владельца на ЕГО простом чтении с телефона (офлайн нет такой записи).
+_MEM_LOW = float(os.environ.get("SYNC_LIVE_MEMLOW", "0.06"))   # ниже → тик «мимо ожидания» (строго)
+_MEM_OK = float(os.environ.get("SYNC_LIVE_MEMOK", "0.25"))     # ≥ → снять deviation (гистерезис)
+_MEM_HOLD = int(os.environ.get("SYNC_LIVE_MEMHOLD", "5"))      # подряд тиков ниже _MEM_LOW → красный
 
 
 def _trunc(s):
@@ -236,7 +253,8 @@ def _session(sid, reset=False):
         st = _STREAM[sid] = {"buf": np.zeros(0, dtype="float32"),
                              "cold_buf": np.zeros(0, dtype="float32"), "phase": "scan", "n": 0,
                              "verses": None, "trk": None, "votes": None,
-                             "last_pos": None, "last_ctx": []}
+                             "last_pos": None, "last_ctx": [],
+                             "memorize": False, "dev_low_n": 0, "deviation": False}
     return st
 
 
@@ -249,6 +267,9 @@ def _build_reply(st, extra):
         base["current_text"] = _ayah_text(q, loc[0], loc[1])
         base["ayat"] = st.get("last_ctx", [])
         base["word_frac"] = st.get("word_frac")
+    if st.get("memorize"):
+        base["memorize"] = True
+        base["deviation"] = bool(st.get("deviation"))
     base.update(extra)
     return base
 
@@ -345,6 +366,23 @@ def _analyze(st):
         E, dec = _decode_window(st["buf"], _TRACK_WIN, idx2ch, ch2idx)
         moved = _track(st, dec) if dec else False
         cur_surah = st["last_pos"][0] if st.get("last_pos") else None
+
+        # РЕЖИМ ЗАУЧИВАНИЯ: качество совпадения свежего декода с ожидаемым окном корпуса (trk.quality).
+        # Падает подряд _MEM_HOLD тиков ниже _MEM_LOW → отклонение (красный); поднимается ≥ _MEM_OK →
+        # снимаем (гистерезис). Считаем ВСЕГДА (дёшево), но в reply попадает лишь при memorize:1.
+        if st.get("memorize"):
+            trk = st.get("trk")
+            qy = getattr(trk, "quality", None) if trk is not None else None
+            if qy is not None:
+                if qy < _MEM_LOW:
+                    st["dev_low_n"] = st.get("dev_low_n", 0) + 1
+                    if st["dev_low_n"] >= _MEM_HOLD:
+                        st["deviation"] = True
+                elif qy >= _MEM_OK:
+                    st["dev_low_n"] = 0
+                    st["deviation"] = False
+                if os.environ.get("SYNC_LIVE_DBG"):
+                    print(f"MEM n={st['n']} q={qy:.2f} low_n={st['dev_low_n']} dev={st['deviation']}", flush=True)
 
         # Фоновый scan во время track (по УЖЕ декодированному окну — без доп. GPU): ловим ХОЛОДНЫЙ
         # мимо-лок (встали не в ту суру, а трекер фейкает движение по чужому корпусу → застоя нет).
@@ -639,6 +677,10 @@ async def live_ws(scope, receive, send):
                 msg = ev["text"].strip()
                 if msg == "reset":
                     st = _session(sid, reset=True)
+                elif msg.startswith("memorize:"):     # режим заучивания вкл/выкл (красное отклонение)
+                    st["memorize"] = msg.endswith("1")
+                    if not st["memorize"]:
+                        st["deviation"] = False; st["dev_low_n"] = 0
                 elif msg.startswith("boost:"):
                     res = await loop.run_in_executor(None, _apply_boost, st, msg[6:])
                     await send({"type": "websocket.send", "text": _json.dumps(res)})

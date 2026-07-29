@@ -133,6 +133,10 @@
       <button type="button" id="liveBtn" class="add-btn">▶ Слушать</button>
       <span id="liveState" style="color:#9aa">микрофон выключен</span>
     </div>
+    <label style="display:inline-flex;align-items:center;gap:.45em;margin-top:.7em;cursor:pointer;font-size:.92em;color:#9aa">
+      <input type="checkbox" id="liveMemorize"> 🧠 режим заучивания
+      <span style="opacity:.6;font-size:.85em">— отклонишься от текста, подсветится красным</span>
+    </label>
     <div id="liveFound" style="margin-top:1em;font-size:1.05em"></div>
     <div id="liveText" dir="rtl" lang="ar"
          style="margin-top:.8em;line-height:2.2;font-size:1.6em;font-family:'Amiri','Scheherazade New',serif"></div>
@@ -365,7 +369,24 @@ const liveFound = document.getElementById('liveFound');
 const liveText = document.getElementById('liveText');
 const liveDbg = document.getElementById('liveDbg');
 const liveDbg2 = document.getElementById('liveDbg2');
+const liveMemorize = document.getElementById('liveMemorize');
 let liveOn = false, liveWs = null;
+let devOn = false;                                      // текущее состояние отклонения (для сигнала по фронту)
+
+function sendMemorize() {                                // синхронизировать режим с сервером (после reset/реконнекта)
+  if (liveWs && liveWs.readyState === 1) liveWs.send('memorize:' + (liveMemorize.checked ? '1' : '0'));
+}
+liveMemorize.onchange = () => { devOn = false; sendMemorize(); };
+
+function beep() {                                        // короткий сигнал при отклонении (звук по просьбе владельца)
+  try {
+    const ctx = liveCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'square'; o.frequency.value = 330;
+    g.gain.value = 0.06; o.connect(g); g.connect(ctx.destination);
+    o.start(); o.stop(ctx.currentTime + 0.18);
+  } catch (e) {}
+}
 let liveStream = null, liveCtx = null, liveSrc = null, liveProc = null, liveTimer = null;
 let pcmParts = [], pcmLen = 0;
 const SEND_MS = 150;                                     // как часто шлём кадр PCM в вебсокет
@@ -421,7 +442,8 @@ function openWs(reset) {
   liveWs = new WebSocket(wsURL() + (reset ? '&reset=1' : ''));  // реконнект БЕЗ reset → позиция цела
   liveWs.binaryType = 'arraybuffer';
   liveWs.onopen = () => {
-    liveMode = ''; candSig = '';
+    liveMode = ''; candSig = ''; devOn = false;
+    sendMemorize();                                      // сессия свежая после reset → сообщить режим
     liveState.textContent = 'слушаю… (набираю первые секунды)';
     if (!liveTimer) liveTimer = setInterval(flushPcm, SEND_MS);
   };
@@ -469,6 +491,9 @@ function applyLiveFont() {
 
 function renderPlace(d, provisional) {
   applyLiveFont();
+  const dev = !!d.deviation;                             // режим заучивания: отклонение → красным
+  liveText.style.transition = 'background .2s';
+  liveText.style.background = dev ? 'rgba(210,40,40,.12)' : 'transparent';
   // СПЛОШНОЙ поток как в плеере (мусхаф): аяты идут подряд одним justify-текстом, НЕ разрываются по
   // окончанию аята; после каждого — маркер номера ۝, текущий аят выделяется цветом/подсветкой слова.
   liveFound.innerHTML = '<b>' + d.current.surah + ':' + d.current.ayah + '</b>';
@@ -480,11 +505,12 @@ function renderPlace(d, provisional) {
     if (a.current && wf >= 0) {
       const words = a.text.split(/\s+/).filter(Boolean);
       const wi = Math.max(0, Math.min(words.length - 1, Math.floor(wf * words.length)));
+      const hl = dev ? 'background:#c22;color:#fff' : 'background:#3a5;color:#fff';
       body = words.map((w, i) =>
-        '<span style="' + (i === wi ? 'background:#3a5;color:#fff;border-radius:6px;padding:0 .1em' : '') + '">' + w + '</span>'
+        '<span style="' + (i === wi ? hl + ';border-radius:6px;padding:0 .1em' : '') + '">' + w + '</span>'
       ).join(' ');
     }
-    const style = a.current ? 'color:var(--accent);font-weight:700' : 'opacity:.55';
+    const style = a.current ? ('color:' + (dev ? '#e24' : 'var(--accent)') + ';font-weight:700') : 'opacity:.55';
     return '<span style="' + style + '">' + body + '</span>'
       + '<span style="opacity:.4;font-size:.7em"> ۝' + arNum(a.ayah) + ' </span>';
   });
@@ -535,7 +561,13 @@ function handleMsg(d) {
     if (liveMode !== 'scan') { liveText.innerHTML = ''; liveFound.innerHTML = ''; liveMode = 'scan'; }
     if (cands.length) renderCandidates(cands, cands[0].surah + ':' + cands[0].ayah);  // пусто → НЕ чистим (без мигания)
   } else if (d.phase === 'track' && d.current) {
-    liveState.textContent = 'веду за тобой';
+    if (d.memorize && d.deviation) {
+      liveState.textContent = '🔴 отклонение от текста';
+      if (!devOn) { devOn = true; beep(); }             // сигнал только на ФРОНТЕ отклонения (не каждый тик)
+    } else {
+      liveState.textContent = d.memorize ? '🟢 читаешь верно' : 'веду за тобой';
+      devOn = false;
+    }
     if (liveMode !== 'track') { liveDbg2.innerHTML = ''; liveMode = 'track'; }        // список кандидатов убрать один раз
     renderPlace(d, false);
   }

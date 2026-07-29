@@ -985,11 +985,23 @@ class SegmentTracker:
         self.widefwd = widefwd
         self.p = 0
         self._stall = 0
+        self.quality = None            # доля хвоста декода, покрытая ОЖИДАЕМЫМ окном (для режима заучивания)
 
     def _match_end(self, dec_tail, lo, hi):
         sm = difflib.SequenceMatcher(None, dec_tail, self.M[lo:hi], autojunk=False)
         blocks = [b for b in sm.get_matching_blocks() if b.size >= self.minblk]
         return (lo + blocks[-1].b + blocks[-1].size) if blocks else None
+
+    def _coverage(self, dec_tail, lo, hi):
+        """Какую долю хвоста декода объясняет ожидаемое окно корпуса [lo:hi] — сумма matching-блоков
+        (≥3 симв., короткий скелет слова) / длину декода. Высокая при верном чтении, падает при
+        отклонении (читают не то). minblk трекера (6) для ДВИЖЕНИЯ указателя слишком строг для
+        ГРАДУИРОВАННОГО сигнала на мелодичном декоде (даёт ~0) — для качества берём порог 3."""
+        if not dec_tail:
+            return None
+        sm = difflib.SequenceMatcher(None, dec_tail, self.M[lo:hi], autojunk=False)
+        matched = sum(b.size for b in sm.get_matching_blocks() if b.size >= 3)
+        return matched / len(dec_tail)
 
     def feed(self, dec_tail: str) -> dict | None:
         """Обработать хвост декода; вернуть текущее {surah, ayah} (или None, если пассаж пуст)."""
@@ -997,6 +1009,7 @@ class SegmentTracker:
             return None
         lo = max(0, self.p - self.back)
         hi = min(len(self.M), self.p + self.ahead)
+        self.quality = self._coverage(dec_tail, lo, hi)
         newp = self._match_end(dec_tail, lo, hi)
         if newp is not None and newp > self.p:
             self.p = newp
