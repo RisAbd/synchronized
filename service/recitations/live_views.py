@@ -123,7 +123,20 @@ _COLD_MIN = float(os.environ.get("SYNC_LIVE_COLDMIN", "22"))      # накопи
 _COLD_WIN = float(os.environ.get("SYNC_LIVE_COLDWIN", "45"))      # окно декода для холодного лока
 _TRACK_WIN = float(os.environ.get("SYNC_LIVE_TRACKWIN", "14"))    # окно декода для трекинга
 _FWD_AYAT = int(os.environ.get("SYNC_LIVE_FWD", "120"))           # аятов вперёд в корпусе трекера
+_RELOC_STALL = int(os.environ.get("SYNC_LIVE_RELOC", "4"))        # чанков застоя → перелокализация
 _STREAM_MINCHUNK = int(os.environ.get("SYNC_LIVE_MINCHUNK", "800"))
+
+
+def _build_corpus(index, verses):
+    """Корпус трекера = пассаж find_segments + продолжение вперёд по Корану (чтение линейно)."""
+    flat = index[3]
+    fa2i = {fa: i for i, fa in enumerate(flat)}
+    corpus = [(s, a) for (s, a) in verses]
+    fa_end = fa2i.get((verses[-1][0], verses[-1][1]))
+    if fa_end is not None:
+        for i in range(fa_end + 1, min(len(flat), fa_end + 1 + _FWD_AYAT)):
+            corpus.append((flat[i][0], flat[i][1]))
+    return corpus
 
 
 def _ctx_ayat(q, verses, cur, before=1, after=4):
@@ -227,23 +240,32 @@ def live_stream(request):
             if st["cold_hits"] < 2:
                 return _reply({"cold": True, "seg": len(verses), "cand": f"{surah0}:{verses[0][1]}"})
             # ЛОК: корпус трекера = пассаж find_segments + продолжение вперёд по Корану
-            fa2i = {fa: i for i, fa in enumerate(flat)}
-            fa_end = fa2i.get((verses[-1][0], verses[-1][1]))
-            corpus = [(s, a) for (s, a) in verses]
-            if fa_end is not None:
-                for i in range(fa_end + 1, min(len(flat), fa_end + 1 + _FWD_AYAT)):
-                    corpus.append((flat[i][0], flat[i][1]))
-            st["verses"] = corpus
-            st["trk"] = SegmentTracker(index, corpus)
+            st["verses"] = _build_corpus(index, verses)
+            st["trk"] = SegmentTracker(index, st["verses"])
             st["phase"] = "track"
-            # сразу протрекать по уже накопленному декоду
-            _track(st, dec)
+            st["stall_reloc"] = 0
+            _track(st, dec)                                 # сразу протрекать по накопленному декоду
             return _reply({"locked": True, "seg": len(verses)})
 
         # phase == track: декодим последние _TRACK_WIN с → ведём позицию по хвосту
         E, dec = _decode_window(st["buf"], _TRACK_WIN, idx2ch, ch2idx)
-        if dec:
-            _track(st, dec)
+        moved = _track(st, dec) if dec else False
+        # ПЕРЕЛОКАЛИЗАЦИЯ по застреванию: трекер не двигается _RELOC_STALL чанков → корпус неверен
+        # (сменился пассаж / мульти-сегмент Фатиха→Исра / ошибочный первичный лок). find_segments по
+        # роллинг-буферу надёжен (не мелодичное окно) → пересобираем корпус и переискиваем позицию.
+        if moved:
+            st["stall_reloc"] = 0
+        else:
+            st["stall_reloc"] = st.get("stall_reloc", 0) + 1
+            if st["stall_reloc"] >= _RELOC_STALL and len(st["buf"]) >= int(_COLD_MIN * _SR):
+                Er, decr = _decode_window(st["buf"], _COLD_WIN, idx2ch, ch2idx)
+                if Er is not None:
+                    v2 = find_segments(Er, q, idx2ch, ch2idx, index=index)
+                    if v2 and len(v2) >= 2:
+                        st["verses"] = _build_corpus(index, v2)
+                        st["trk"] = SegmentTracker(index, st["verses"])
+                        _track(st, decr)                    # переискать текущую позицию
+                st["stall_reloc"] = 0
         return _reply({})
     except Exception as e:
         import traceback
@@ -253,9 +275,10 @@ def live_stream(request):
 
 
 def _track(st, dec):
-    """Скормить декод трекеру окнами; обновить last_pos/last_ctx."""
+    """Скормить декод трекеру окнами; обновить last_pos/last_ctx. Вернуть True, если позиция сдвинулась."""
     q = _quran()
     trk = st["trk"]
+    prev = st.get("last_pos")
     cur = None
     W = 40
     for end in range(min(W, len(dec)), len(dec) + 1, 20):
@@ -265,6 +288,7 @@ def _track(st, dec):
     if cur:
         st["last_pos"] = (cur["surah"], cur["ayah"])
         st["last_ctx"] = _ctx_ayat(q, st["verses"], (cur["surah"], cur["ayah"]))
+    return st.get("last_pos") != prev
 
 
 def _do_locate(raw: bytes):
