@@ -117,8 +117,11 @@ def _do_locate(raw: bytes):
 
     special = {ch2idx.get(t) for t in ("<pad>", "<s>", "</s>", "<unk>", "|", "-", "ـ")} - {None}
     dec = greedy_skeleton(E, idx2ch, special, stride_ms=stride)
-    if len(dec) < 5:
-        return JsonResponse({"ok": True, "empty": True, "decode": dec})
+    # слишком мало букв (2-3с зачина/муqаттаʿат) → локализация шаткая (даёт ложный الر и т.п.);
+    # ждём накопления контекста, чтобы не давать неверную ПЕРВУЮ привязку (её потом держит липкость)
+    _MIN_DEC = int(os.environ.get("SYNC_LIVE_MINDEC", "35"))
+    if len(dec) < _MIN_DEC:
+        return JsonResponse({"ok": True, "empty": True, "warmup": True, "decode": dec})
 
     verses = find_segments(E, q, idx2ch, ch2idx, index=index)
     if not verses:

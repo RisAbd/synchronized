@@ -409,6 +409,7 @@ async function sendLive() {
     const d = await r.json();
     const ms = Math.round(performance.now() - t0);
     if (d.error) { liveState.textContent = 'ошибка сервера: ' + d.error; liveDbg.textContent = (d.trace || ''); }
+    else if (d.warmup && !d.found) { liveState.textContent = 'слушаю… (набираю контекст, читай дальше)'; }
     else if (d.empty && !d.found) { liveState.textContent = 'слушаю… (пока тихо)'; }
     else if (d.found) {
       liveState.textContent = 'слушаю…  ' + (d.stale ? '(держу прошлое) ' : 'найдено за ' + ms + 'мс');
