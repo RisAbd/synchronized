@@ -870,6 +870,34 @@ def locate(dec_window: str, index, prior_fa: int | None = None,
     return {"fa": peak, "surah": s, "ayah": a, "confidence": round(conf, 3)}
 
 
+def ayah_density(dec_window: str, index, k: int = _K) -> np.ndarray:
+    """Плотность k-грамм декода по всем плоским аятам (обёртка над _ayah_density для live-накопления)."""
+    Cs, char2fa, kidx, flat_ayahs, fa_skel = index
+    return _ayah_density(dec_window, char2fa, kidx, len(flat_ayahs), k=k)
+
+
+def topk_from_votes(votes: np.ndarray, index, k_top: int = 5) -> list[dict]:
+    """Топ-K аятов по вектору голосов (накопленная плотность) → [{fa,surah,ayah,score,confidence}].
+    Мульти-гипотеза для live (директива владельца: показывать несколько мест сразу, уверенность растёт
+    по нарастающей). confidence = доля голосов лидера среди топ-K (насколько доминирует)."""
+    flat = index[3]
+    if votes is None or votes.sum() <= 0:
+        return []
+    kk = min(k_top, len(flat))
+    top = np.argpartition(votes, -kk)[-kk:]
+    top = top[np.argsort(votes[top])[::-1]]
+    tot = float(votes[top].sum()) + 1e-9
+    out = []
+    for fa in top:
+        v = float(votes[fa])
+        if v <= 0:
+            continue
+        s, a = flat[fa]
+        out.append({"fa": int(fa), "surah": int(s), "ayah": int(a),
+                    "score": round(v, 3), "confidence": round(v / tot, 3)})
+    return out
+
+
 class StreamLocator:
     """Онлайн-трекер позиции чтения для live (WI). Кормишь окном декода → текущее место в Коране.
 

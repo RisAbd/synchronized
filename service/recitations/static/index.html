@@ -132,6 +132,7 @@
     <div id="liveFound" style="margin-top:1em;font-size:1.05em"></div>
     <div id="liveText" dir="rtl" lang="ar"
          style="margin-top:.8em;line-height:2.2;font-size:1.6em;font-family:'Amiri','Scheherazade New',serif"></div>
+    <div id="liveDbg2" style="margin-top:.6em"></div>
     <div id="liveDbg" style="margin-top:.8em;color:#889;font-size:.8em;direction:ltr"></div>
   </div>
 </div>
@@ -359,10 +360,11 @@ const liveState = document.getElementById('liveState');
 const liveFound = document.getElementById('liveFound');
 const liveText = document.getElementById('liveText');
 const liveDbg = document.getElementById('liveDbg');
+const liveDbg2 = document.getElementById('liveDbg2');
 let liveOn = false, liveBusy = false, liveFirst = true;
 let liveStream = null, liveCtx = null, liveSrc = null, liveProc = null, liveTimer = null;
 let pcmParts = [], pcmLen = 0;
-const SEND_MS = 500;                                     // как часто шлём накопленный PCM
+const SEND_MS = 200;                                     // как часто шлём накопленный PCM
 const TARGET_SR = 16000;
 const LIVE_SID = Math.random().toString(36).slice(2);
 
@@ -427,15 +429,13 @@ function toInt16_16k(f32, srcSr) {                       // даунсемпл s
 
 function renderPlace(d, provisional) {
   // текущий аят КРУПНО с пословной подсветкой (word_frac), контекст — мелко и бледно.
-  liveFound.innerHTML = (provisional ? 'предположительно ' : '') + '<b>' + d.current.surah + ':' + d.current.ayah + '</b>';
-  const cur = d.current;
+  // TRACK: prev/cur/next (3 аята), текущий крупно + пословная подсветка
+  liveFound.innerHTML = '<b>' + d.current.surah + ':' + d.current.ayah + '</b>';
   const wf = (d.word_frac == null) ? -1 : d.word_frac;
   const parts = (d.ayat || []).map(a => {
-    const isCur = a.current;
-    if (!isCur) {
-      return '<div style="opacity:.45;font-size:.62em;margin:.15em 0">' + a.surah + ':' + a.ayah + '  ' + a.text + '</div>';
+    if (!a.current) {
+      return '<div style="opacity:.4;font-size:.6em;line-height:1.6;margin:.1em 0">' + a.text + '</div>';
     }
-    // текущий: крупно, слово по word_frac подсвечено
     let inner = a.text;
     if (wf >= 0) {
       const words = a.text.split(/\s+/).filter(Boolean);
@@ -444,11 +444,32 @@ function renderPlace(d, provisional) {
         '<span style="' + (i === wi ? 'background:#3a5;color:#fff;border-radius:6px;padding:0 .15em' : '') + '">' + w + '</span>'
       ).join(' ');
     }
-    return '<div style="font-size:1.15em;line-height:1.9;margin:.25em 0;' + (provisional ? 'opacity:.6' : '') + '">'
-      + inner + '</div>';
+    return '<div style="font-size:1.2em;line-height:2;margin:.2em 0">' + inner + '</div>';
   });
   liveText.style.textAlign = 'center';
   liveText.innerHTML = parts.join('');
+}
+
+function renderCandidates(cands, leaderLabel) {
+  // список мест-кандидатов (владелец tg_5516: всегда список, тап повышает confidence)
+  if (!cands || !cands.length) { liveDbg2.innerHTML = ''; return; }
+  liveDbg2.innerHTML = '<div style="font-size:.72em;opacity:.7;margin:.5em 0 .2em">кандидаты (тапни, если знаешь верное):</div>'
+    + cands.map((c, i) => {
+      const key = c.surah + ':' + c.ayah;
+      const lead = (leaderLabel === key);
+      const pct = Math.round((c.confidence || 0) * 100);
+      return '<div class="lcand" data-k="' + key + '" style="cursor:pointer;padding:.35em .5em;margin:.2em 0;border-radius:8px;'
+        + 'border:1px solid ' + (lead ? '#3a5' : 'var(--line)') + ';background:' + (lead ? 'rgba(51,170,85,.12)' : 'transparent') + '">'
+        + '<div style="display:flex;justify-content:space-between;font-size:.8em;opacity:.8"><b>' + key + '</b><span>' + pct + '%</span></div>'
+        + '<div dir="rtl" lang="ar" style="font-size:1.05em;line-height:1.7;font-family:\'Amiri\',serif">' + c.text + '</div>'
+        + '</div>';
+    }).join('');
+  liveDbg2.querySelectorAll('.lcand').forEach(el => el.onclick = () => boostCand(el.dataset.k));
+}
+
+async function boostCand(key) {
+  try { await fetch(API + '/live/stream?boost=' + key + '&sid=' + LIVE_SID, { method: 'POST', body: new Uint8Array(0) }); }
+  catch (e) {}
 }
 
 async function flushPcm() {
@@ -466,21 +487,18 @@ async function flushPcm() {
     const d = await r.json();
     const ms = Math.round(performance.now() - t0);
     if (d.error) { liveState.textContent = 'ошибка сервера: ' + d.error; liveDbg.textContent = (d.trace || ''); }
-    else if (d.phase === 'cold' && d.current) {           // провизорный кандидат — показываем сразу (бледно)
-      liveState.textContent = 'определяю отрывок…' + (d.cand ? ' похоже на ' + d.cand : '');
-      renderPlace(d, true);
-    }
-    else if (d.phase === 'cold') {
-      liveState.textContent = d.warmup
-        ? ('слушаю… (набираю контекст ' + (d.buf_sec || 0) + 'с, читай дальше)')
-        : ('определяю отрывок…' + (d.cand ? ' похоже на ' + d.cand : ''));
+    else if (d.phase === 'scan') {                         // мульти-кандидат: показываем список мест сразу
+      const cands = d.candidates || [];
+      liveState.textContent = cands.length ? 'ищу место… (уточняется по мере чтения)' : 'слушаю… читай дальше';
+      liveText.innerHTML = ''; liveFound.innerHTML = '';
+      renderCandidates(cands, cands.length ? (cands[0].surah + ':' + cands[0].ayah) : '');
     }
     else if (d.phase === 'track' && d.current) {
       liveState.textContent = 'веду за тобой  (' + ms + 'мс)';
       renderPlace(d, false);
+      renderCandidates(d.candidates || [], d.current.surah + ':' + d.current.ayah);
     }
-    liveDbg.textContent = 'фаза ' + (d.phase || '?') + ' · буфер ' + (d.buf_sec || 0) + 'с · тик#' + (d.n || 0)
-      + (d.skip ? ' (накопление)' : '');
+    if (!d.skip) liveDbg.textContent = 'фаза ' + (d.phase || '?') + ' · буфер ' + (d.buf_sec || 0) + 'с · тик#' + (d.n || 0);
   } catch (e) { liveState.textContent = 'ошибка связи: ' + e.message; }
   finally { liveBusy = false; }
 }

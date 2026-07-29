@@ -121,11 +121,22 @@ _SR = 16000
 _BUF_CAP = float(os.environ.get("SYNC_LIVE_BUFCAP", "48"))        # сколько с PCM держим
 _COLD_MIN = float(os.environ.get("SYNC_LIVE_COLDMIN", "10"))      # накопить перед 1-й попыткой лока
 _COLD_WIN = float(os.environ.get("SYNC_LIVE_COLDWIN", "45"))      # окно декода для холодного лока
-_TRACK_WIN = float(os.environ.get("SYNC_LIVE_TRACKWIN", "14"))    # окно декода для трекинга
+_TRACK_WIN = float(os.environ.get("SYNC_LIVE_TRACKWIN", "8"))     # окно декода для трекинга (латентность!)
 _FWD_AYAT = int(os.environ.get("SYNC_LIVE_FWD", "120"))           # аятов вперёд в корпусе трекера
 _RELOC_STALL = int(os.environ.get("SYNC_LIVE_RELOC", "4"))        # обработок застоя → перелокализация
-_PROC_STEP = float(os.environ.get("SYNC_LIVE_PROCSTEP", "1.0"))   # с нового аудио между тяж. обработками
+_PROC_STEP = float(os.environ.get("SYNC_LIVE_PROCSTEP", "0.5"))   # с нового аудио между тяж. обработками
 _STREAM_MINCHUNK = int(os.environ.get("SYNC_LIVE_MINCHUNK", "800"))
+# фаза scan (мульти-гипотеза, растущая уверенность)
+_DECAY = float(os.environ.get("SYNC_LIVE_DECAY", "0.6"))          # затухание голосов (недавнее весит больше)
+_KTOP = int(os.environ.get("SYNC_LIVE_KTOP", "4"))               # сколько кандидатов показывать
+_LOCK_CONF = float(os.environ.get("SYNC_LIVE_LOCKCONF", "0.45")) # доля голосов лидера → точный лок
+_LOCK_MIN = float(os.environ.get("SYNC_LIVE_LOCKMIN", "6"))       # мин. буфера перед локом (с)
+_SCAN_WIN_CH = int(os.environ.get("SYNC_LIVE_SCANWIN", "50"))     # символов декода для голосования
+_TRUNC = int(os.environ.get("SYNC_LIVE_TRUNC", "120"))           # обрезка длинного текста аята (симв)
+
+
+def _trunc(s):
+    return s if len(s) <= _TRUNC else s[:_TRUNC].rstrip() + "…"
 
 
 def _build_corpus(index, verses):
@@ -140,16 +151,18 @@ def _build_corpus(index, verses):
     return corpus
 
 
-def _ctx_ayat(q, verses, cur, before=1, after=4):
-    """Соседние аяты вокруг текущего в ПАССАЖЕ чтения (контекст «память рядом»), с пометкой current."""
+def _ctx_ayat(q, verses, cur, before=1, after=1):
+    """Только предыдущий/текущий/следующий аят (владелец tg_5511: не 5-6, а prev/cur/next), длинные
+    обрезаем. current помечаем по позиции в пассаже."""
     ci = next((i for i, v in enumerate(verses) if (v[0], v[1]) == cur), None)
     if ci is None:
         return []
     out = []
     for i in range(max(0, ci - before), min(len(verses), ci + after + 1)):
         s, a = verses[i][0], verses[i][1]
-        # текущий = cur — если чтец перечитывает, cur может совпасть с несколькими; помечаем по позиции
-        out.append({"surah": s, "ayah": a, "text": _ayah_text(q, s, a), "current": (i == ci)})
+        cur_i = (i == ci)
+        txt = _ayah_text(q, s, a)
+        out.append({"surah": s, "ayah": a, "text": txt if cur_i else _trunc(txt), "current": cur_i})
     return out
 
 
@@ -190,8 +203,8 @@ def live_stream(request):
 
     st = _STREAM.get(sid)
     if st is None or request.GET.get("reset"):
-        st = _STREAM[sid] = {"buf": np.zeros(0, dtype="float32"), "phase": "cold", "n": 0,
-                             "verses": None, "trk": None, "cold_surah": None, "cold_hits": 0,
+        st = _STREAM[sid] = {"buf": np.zeros(0, dtype="float32"), "phase": "scan", "n": 0,
+                             "verses": None, "trk": None, "votes": None,
                              "last_pos": None, "last_ctx": []}
 
     def _reply(extra):
@@ -205,6 +218,24 @@ def live_stream(request):
             base["word_frac"] = st.get("word_frac")
         base.update(extra)
         return JsonResponse(base)
+
+    # тап по кандидату (владелец tg_5516): поднять его голоса. Boost тоже затухает со временем (общий
+    # _DECAY на каждом тике) → если аудио идёт про другое место, лидер всё равно сместится на верное.
+    boost = request.GET.get("boost")
+    if boost:
+        try:
+            bs, ba = boost.split(":")
+            fa2i = {fa: i for i, fa in enumerate(flat)}
+            fi = fa2i.get((int(bs), int(ba)))
+            if fi is not None:
+                if st["votes"] is None:
+                    st["votes"] = np.zeros(len(flat), dtype="float64")
+                st["votes"][fi] += float(os.environ.get("SYNC_LIVE_BOOST", "3.0"))
+        except Exception:
+            pass
+        cands = match_align.topk_from_votes(st["votes"], index, _KTOP) if st["votes"] is not None else []
+        return _reply({"candidates": [{"surah": c["surah"], "ayah": c["ayah"], "confidence": c["confidence"],
+                       "text": _trunc(_ayah_text(q, c["surah"], c["ayah"]))} for c in cands]})
 
     raw = request.body
     is_pcm = bool(request.GET.get("pcm")) or "octet" in (request.content_type or "")
@@ -238,44 +269,39 @@ def live_stream(request):
             return _reply({"skip": True})
         st["last_proc"] = len(st["buf"])
 
-        if st["phase"] == "cold":
-            if len(st["buf"]) < int(_COLD_MIN * _SR):
-                return _reply({"warmup": True, "buf_need": _COLD_MIN})
-            E, dec = _decode_window(st["buf"], _COLD_WIN, idx2ch, ch2idx)
-            if E is None:
-                return _reply({"warmup": True})
-            verses = find_segments(E, q, idx2ch, ch2idx, index=index)
-            if not verses:
-                return _reply({"cold": True, "seg": 0})
-            surah0 = verses[0][0]
-            # континуитет: та же сура 2 попытки подряд → лочим (защита от разового ложного окна)
-            if st["cold_surah"] == surah0:
-                st["cold_hits"] += 1
-            else:
-                st["cold_surah"] = surah0; st["cold_hits"] = 1
-            # лочим только при ≥2 аятах И подтверждении; иначе провизорно показываем кандидата (раньше)
-            if st["cold_hits"] < 2 or len(verses) < 2:
-                # провизорно показать кандидата СРАЗУ (быстрая первая подсветка ~_COLD_MIN с, не ждём
-                # 2-е подтверждение) — владелец: «поначалу распознаёт очень долго»
-                st["verses"] = _build_corpus(index, verses)
-                st["last_pos"] = (verses[0][0], verses[0][1])
-                st["last_ctx"] = _ctx_ayat(q, st["verses"], st["last_pos"])
-                return _reply({"cold": True, "provisional": True, "seg": len(verses),
-                               "cand": f"{surah0}:{verses[0][1]}"})
-            # ЛОК: корпус трекера = пассаж find_segments + продолжение вперёд по Корану
-            st["verses"] = _build_corpus(index, verses)
-            st["trk"] = SegmentTracker(index, st["verses"])
-            st["phase"] = "track"
-            st["stall_reloc"] = 0
-            _track(st, dec)                                 # сразу протрекать по накопленному декоду
-            return _reply({"locked": True, "seg": len(verses)})
+        # ── ФАЗА SCAN (мульти-гипотеза, растущая уверенность — директива владельца tg_5498) ──
+        # Не ждём «набора уверенности»: с первых секунд декодим и показываем НЕСКОЛЬКО кандидатов-мест
+        # по накопленным k-грамм-голосам (с затуханием → недавнее весит больше). Уверенность лидера
+        # растёт по нарастающей; лишние сами тонут. Как только лидер уверенно доминирует → точный лок.
+        if st["phase"] == "scan":
+            E, dec = _decode_window(st["buf"], _TRACK_WIN, idx2ch, ch2idx)
+            if dec:
+                dens = match_align.ayah_density(dec[-_SCAN_WIN_CH:], index)
+                st["votes"] = dens if st["votes"] is None else st["votes"] * _DECAY + dens
+            cands = match_align.topk_from_votes(st["votes"], index, _KTOP) if st["votes"] is not None else []
+            if not cands:
+                return _reply({"scan": True, "candidates": []})
+            conf = cands[0]["confidence"]
+            cand_out = [{"surah": c["surah"], "ayah": c["ayah"], "confidence": c["confidence"],
+                         "text": _trunc(_ayah_text(q, c["surah"], c["ayah"]))} for c in cands]
+            # лидер уверенно доминирует и есть контекст → точный лок трекером
+            if conf >= _LOCK_CONF and len(st["buf"]) >= int(_LOCK_MIN * _SR):
+                E2, dec2 = _decode_window(st["buf"], _COLD_WIN, idx2ch, ch2idx)
+                verses = find_segments(E2, q, idx2ch, ch2idx, index=index) if E2 is not None else None
+                if verses:
+                    st["verses"] = _build_corpus(index, verses)
+                    st["trk"] = SegmentTracker(index, st["verses"])
+                    st["phase"] = "track"; st["stall_reloc"] = 0
+                    _track(st, dec2)
+                    return _reply({"locked": True, "candidates": cand_out})
+            return _reply({"scan": True, "candidates": cand_out, "conf": conf})
 
         # phase == track: декодим последние _TRACK_WIN с → ведём позицию по хвосту
         E, dec = _decode_window(st["buf"], _TRACK_WIN, idx2ch, ch2idx)
         moved = _track(st, dec) if dec else False
-        # ПЕРЕЛОКАЛИЗАЦИЯ по застреванию: трекер не двигается _RELOC_STALL чанков → корпус неверен
-        # (сменился пассаж / мульти-сегмент Фатиха→Исра / ошибочный первичный лок). find_segments по
-        # роллинг-буферу надёжен (не мелодичное окно) → пересобираем корпус и переискиваем позицию.
+        # ПЕРЕЛОКАЛИЗАЦИЯ по застреванию: трекер не двигается _RELOC_STALL тиков (сменился пассаж /
+        # мульти-сегмент / чтец переключился) → find_segments по буферу заново + пересбор корпуса.
+        # (k-грамм-голоса в track на мелодике шумят → как триггер НЕ используем, только застой трекера.)
         if moved:
             st["stall_reloc"] = 0
         else:
