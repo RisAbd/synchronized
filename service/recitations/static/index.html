@@ -364,7 +364,7 @@ const liveDbg2 = document.getElementById('liveDbg2');
 let liveOn = false, liveBusy = false, liveFirst = true;
 let liveStream = null, liveCtx = null, liveSrc = null, liveProc = null, liveTimer = null;
 let pcmParts = [], pcmLen = 0;
-const SEND_MS = 200;                                     // как часто шлём накопленный PCM
+const SEND_MS = 100;                                     // как часто шлём накопленный PCM
 const TARGET_SR = 16000;
 const LIVE_SID = Math.random().toString(36).slice(2);
 
@@ -393,6 +393,9 @@ async function startLive() {
       if (!liveOn) return;
       pcmParts.push(new Float32Array(e.inputBuffer.getChannelData(0)));  // копия сэмплов
       pcmLen += e.inputBuffer.length;
+      // кап бэклога: если сервер притормозил, не копим гигантский догоняющий кусок — держим ~последние 3с
+      const cap = liveCtx.sampleRate * 3;
+      while (pcmLen > cap && pcmParts.length > 1) { pcmLen -= pcmParts.shift().length; }
     };
     liveSrc.connect(liveProc); liveProc.connect(liveCtx.destination);
     liveOn = true; liveFirst = true;

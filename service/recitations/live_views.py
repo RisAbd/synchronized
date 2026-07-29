@@ -118,12 +118,13 @@ def _continuity(sid, cur):
 # лока вперёд по Корану (чтение последовательно). Цена константна (окно фиксировано), не растёт.
 _STREAM = {}
 _SR = 16000
-_BUF_CAP = float(os.environ.get("SYNC_LIVE_BUFCAP", "48"))        # сколько с PCM держим
+_BUF_CAP = float(os.environ.get("SYNC_LIVE_BUFCAP", "20"))        # роллинг-буфер PCM (владелец: ~20с, не 48)
 _COLD_MIN = float(os.environ.get("SYNC_LIVE_COLDMIN", "10"))      # накопить перед 1-й попыткой лока
-_COLD_WIN = float(os.environ.get("SYNC_LIVE_COLDWIN", "45"))      # окно декода для холодного лока
+_COLD_WIN = float(os.environ.get("SYNC_LIVE_COLDWIN", "20"))      # окно декода для лока/перелока (≤буфера)
 _TRACK_WIN = float(os.environ.get("SYNC_LIVE_TRACKWIN", "8"))     # окно декода для трекинга (латентность!)
 _FWD_AYAT = int(os.environ.get("SYNC_LIVE_FWD", "120"))           # аятов вперёд в корпусе трекера
-_RELOC_STALL = int(os.environ.get("SYNC_LIVE_RELOC", "4"))        # обработок застоя → перелокализация
+_RELOC_STALL = int(os.environ.get("SYNC_LIVE_RELOC", "10"))       # тиков застоя → перелокализация (реже!)
+_RELOC_COOLDOWN = int(os.environ.get("SYNC_LIVE_RELOCCD", "20"))  # мин. тиков между перелокализациями
 _PROC_STEP = float(os.environ.get("SYNC_LIVE_PROCSTEP", "0.5"))   # с нового аудио между тяж. обработками
 _STREAM_MINCHUNK = int(os.environ.get("SYNC_LIVE_MINCHUNK", "800"))
 # фаза scan (мульти-гипотеза, растущая уверенность)
@@ -306,7 +307,10 @@ def live_stream(request):
             st["stall_reloc"] = 0
         else:
             st["stall_reloc"] = st.get("stall_reloc", 0) + 1
-            if st["stall_reloc"] >= _RELOC_STALL and len(st["buf"]) >= int(_COLD_MIN * _SR):
+            # перелок ТОЛЬКО при длительном застое И не чаще кулдауна (иначе find_segments по буферу
+            # душит поток — на длинном мелодичном аяте позиция стоит легитимно, это НЕ потеря пассажа)
+            cd_ok = (st["n"] - st.get("last_reloc_n", -10**9)) >= _RELOC_COOLDOWN
+            if st["stall_reloc"] >= _RELOC_STALL and cd_ok and len(st["buf"]) >= int(_COLD_MIN * _SR):
                 Er, decr = _decode_window(st["buf"], _COLD_WIN, idx2ch, ch2idx)
                 if Er is not None:
                     v2 = find_segments(Er, q, idx2ch, ch2idx, index=index)
@@ -314,6 +318,7 @@ def live_stream(request):
                         st["verses"] = _build_corpus(index, v2)
                         st["trk"] = SegmentTracker(index, st["verses"])
                         _track(st, decr)                    # переискать текущую позицию
+                st["last_reloc_n"] = st["n"]
                 st["stall_reloc"] = 0
         return _reply({})
     except Exception as e:
