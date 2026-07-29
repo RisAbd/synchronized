@@ -146,6 +146,14 @@ _CROSS_MAX = int(os.environ.get("SYNC_LIVE_CROSSMAX", "40"))         # тико�
 # (skeleton-difflib ≥ порога). На мелодичном/шумном декоде find_segments возвращает МУСОРНУЮ суру
 # (её ratio низкий) → не прыгаем, остаёмся на месте (последовательность > случайный скачок).
 _RELOC_RATIO_MIN = float(os.environ.get("SYNC_LIVE_RELOCRATIO", "0.45"))
+# ПОДТВЕРЖДЕНИЕ ПЕРЕЛОКА (фикс мульти-сегмент дрейфа rec9 Фатиха→Исра). На ПЕРЕХОДЕ между несмежными
+# пассажами буфер = хвост старого + начало нового + такбир/пауза → find_segments мелькает МУСОРНОЙ
+# сурой (rec9: 2, 23, 4, 35, 21…, каждый релок другая), а ВЕРНАЯ (17) держится подряд. Берём новую
+# суру, только если тот же кандидат подтвердился _RELOC_CONFIRM релок-попыток подряд, ЛИБО ratio
+# уже уверенный (≥ _RELOC_STRONG) — тогда сразу. Снимает и блок `len(v2)>=2`: на переходе верная
+# сура возвращалась ОДНОАЯТНЫМ коротким пассажом (len<2) и отвергалась до t=222с (глубокий остаток).
+_RELOC_CONFIRM = int(os.environ.get("SYNC_LIVE_RELOCCONFIRM", "2"))   # релок-попыток подряд той же новой суры
+_RELOC_STRONG = float(os.environ.get("SYNC_LIVE_RELOCSTRONG", "0.6")) # ratio уверенного лока → без подтверждения
 
 
 def _trunc(s):
@@ -358,13 +366,33 @@ def _analyze(st):
                     # ГЕЙТ КАЧЕСТВА: свитчим, только если новый пассаж реально объясняет декод —
                     # иначе на мелодичном/шумном декоде прыгали бы в МУСОРНУЮ суру (баг rec7-хвоста).
                     ratio = _passage_ratio(index, v2, decr) if v2 else 0.0
+                    new_s = v2[0][0] if v2 else None
+                    qualifies = bool(v2) and new_s != cur_surah and ratio >= _RELOC_RATIO_MIN
+                    if qualifies and cross:
+                        # cross уже прошёл K-тиковый гард лидерства (_RELOCK_HOLD) в scan — это и есть
+                        # его подтверждение; повторный confirm-2 избыточен и лишь замедлил бы холодное
+                        # выправление (Ар-Рахман истиаза-интро → 55). Переключаем сразу.
+                        confirmed = True
+                        st["reloc_cand_s"] = None; st["reloc_cand_n"] = 0
+                    elif qualifies:
+                        # stall: одноразовый find_segments на переходном буфере ненадёжен → confirm-2.
+                        if new_s == st.get("reloc_cand_s"):
+                            st["reloc_cand_n"] = st.get("reloc_cand_n", 0) + 1
+                        else:
+                            st["reloc_cand_s"] = new_s; st["reloc_cand_n"] = 1
+                        confirmed = st["reloc_cand_n"] >= _RELOC_CONFIRM or ratio >= _RELOC_STRONG
+                    else:
+                        confirmed = False
+                        st["reloc_cand_s"] = None; st["reloc_cand_n"] = 0
                     if os.environ.get("SYNC_LIVE_DBG"):
                         print(f"RELOC n={st['n']} cross={cross} stall={stall_trig} cur={cur_surah} "
-                              f"v2={v2[0] if v2 else None} ratio={ratio:.2f}", flush=True)
-                    if v2 and len(v2) >= 2 and v2[0][0] != cur_surah and ratio >= _RELOC_RATIO_MIN:
+                              f"v2={v2[0] if v2 else None} ratio={ratio:.2f} "
+                              f"cand={st.get('reloc_cand_s')}×{st.get('reloc_cand_n')} conf={confirmed}", flush=True)
+                    if confirmed:
                         st["verses"] = _build_corpus(index, v2)
                         st["trk"] = SegmentTracker(index, st["verses"])
                         st["tvotes"] = None
+                        st["reloc_cand_s"] = None; st["reloc_cand_n"] = 0
                         _track(st, decr)
                 st["last_reloc_n"] = st["n"]
                 st["stall_reloc"] = 0
