@@ -134,6 +134,14 @@ _LOCK_CONF = float(os.environ.get("SYNC_LIVE_LOCKCONF", "0.45")) # доля го
 _LOCK_MIN = float(os.environ.get("SYNC_LIVE_LOCKMIN", "6"))       # мин. буфера перед локом (с)
 _SCAN_WIN_CH = int(os.environ.get("SYNC_LIVE_SCANWIN", "50"))     # символов декода для голосования
 _TRUNC = int(os.environ.get("SYNC_LIVE_TRUNC", "120"))           # обрезка длинного текста аята (симв)
+# кросс-сура быстрый перелок в track (фикс холодного мимо-лока): если ДРУГАЯ сура уверенно
+# лидирует _RELOCK_HOLD тиков подряд по фоновому scan — перелок сразу, не ждём застоя.
+_RELOCK_CONF = float(os.environ.get("SYNC_LIVE_RELOCKCONF", "0.35")) # мин. уверенность кросс-лидера (доля топ-K)
+_RELOCK_HOLD = int(os.environ.get("SYNC_LIVE_RELOCKHOLD", "3"))      # тиков подряд лидерства ТОЙ ЖЕ другой суры
+# кросс-перелок разрешён ТОЛЬКО в раннем окне после первого лока (фикс ХОЛОДНОГО мимо-лока из-за
+# басмалы-интро). Позже — доверяем последовательному треку (легитимная смена суры ловится застоем);
+# иначе на мелодичном/повторном чтении k-грамм шумит и кросс прыгал бы по случайным сурам (регресс rec7).
+_CROSS_MAX = int(os.environ.get("SYNC_LIVE_CROSSMAX", "40"))         # тиков от первого лока, пока кросс жив
 
 
 def _trunc(s):
@@ -273,6 +281,7 @@ def _analyze(st):
                     st["verses"] = _build_corpus(index, verses)
                     st["trk"] = SegmentTracker(index, st["verses"])
                     st["phase"] = "track"; st["stall_reloc"] = 0
+                    st["lock_n"] = st["n"]          # тик первого лока — окно для кросс-перелока (см. track)
                     _track(st, dec2)
                     return _build_reply(st, {"locked": True, "candidates": cand_out})
             return _build_reply(st, {"scan": True, "candidates": cand_out, "conf": conf})
@@ -280,12 +289,40 @@ def _analyze(st):
         # track
         E, dec = _decode_window(st["buf"], _TRACK_WIN, idx2ch, ch2idx)
         moved = _track(st, dec) if dec else False
-        if moved:
+        cur_surah = st["last_pos"][0] if st.get("last_pos") else None
+
+        # Фоновый scan во время track (по УЖЕ декодированному окну — без доп. GPU): ловим ХОЛОДНЫЙ
+        # мимо-лок (встали не в ту суру, а трекер фейкает движение по чужому корпусу → застоя нет).
+        # Триггерим перелок, только если ДРУГАЯ сура уверенно лидирует _RELOCK_HOLD тиков подряд.
+        # Кросс-СУРА → безопасно для рефрена (там лидер = та же сура, не триггерит).
+        cross = False
+        if dec:
+            dens = match_align.ayah_density(dec[-_SCAN_WIN_CH:], index)
+            st["tvotes"] = dens if st.get("tvotes") is None else st["tvotes"] * _DECAY + dens
+            tc = match_align.topk_from_votes(st["tvotes"], index, _KTOP)
+            lead_s = tc[0]["surah"] if tc else None
+            lead_c = tc[0]["confidence"] if tc else 0.0
+            # робастно: копим ПОДРЯД тики, где #1 = одна и та же ДРУГАЯ сура (не абсолютный порог,
+            # тот хрупок и зависит от _KTOP-нормировки); низкий conf-гейт лишь отсекает чистый шум.
+            early = (st["n"] - st.get("lock_n", -10**9)) <= _CROSS_MAX   # только раннее окно после лока
+            if early and lead_s is not None and lead_s != cur_surah and lead_c >= _RELOCK_CONF:
+                if lead_s == st.get("cross_surah"):
+                    st["cross_n"] = st.get("cross_n", 0) + 1
+                else:
+                    st["cross_surah"] = lead_s; st["cross_n"] = 1
+                cross = st["cross_n"] >= _RELOCK_HOLD
+            else:
+                st["cross_n"] = 0; st["cross_surah"] = None
+
+        if moved and not cross:
             st["stall_reloc"] = 0
         else:
-            st["stall_reloc"] = st.get("stall_reloc", 0) + 1
+            if not cross:
+                st["stall_reloc"] = st.get("stall_reloc", 0) + 1
             cd_ok = (st["n"] - st.get("last_reloc_n", -10**9)) >= _RELOC_COOLDOWN
-            if st["stall_reloc"] >= _RELOC_STALL and cd_ok and len(st["buf"]) >= int(_COLD_MIN * _SR):
+            stall_trig = st["stall_reloc"] >= _RELOC_STALL and cd_ok       # обычный застой (кулдаун)
+            # cross — быстрый путь: без кулдауна (устойчивый K-тиковый лидер уже сильный гард)
+            if (cross or stall_trig) and len(st["buf"]) >= int(_COLD_MIN * _SR):
                 Er, decr = _decode_window(st["buf"], _COLD_WIN, idx2ch, ch2idx)
                 if Er is not None:
                     v2 = find_segments(Er, q, idx2ch, ch2idx, index=index)
@@ -293,13 +330,14 @@ def _analyze(st):
                     # Если та же сура (застой на РЕФРЕНЕ «فبأي آلاء…» ×31) — НЕ перестраиваем корпус
                     # (иначе find_segments выберет другое вхождение того же аята → прыжок по всей суре),
                     # оставляем трекер идти ВПЕРЁД монотонно.
-                    cur_surah = st["last_pos"][0] if st.get("last_pos") else None
                     if v2 and len(v2) >= 2 and v2[0][0] != cur_surah:
                         st["verses"] = _build_corpus(index, v2)
                         st["trk"] = SegmentTracker(index, st["verses"])
+                        st["tvotes"] = None
                         _track(st, decr)
                 st["last_reloc_n"] = st["n"]
                 st["stall_reloc"] = 0
+                st["cross_n"] = 0; st["cross_surah"] = None  # после попытки — копим заново (бережём GPU)
         return _build_reply(st, {})
     except Exception as e:
         import traceback
