@@ -349,17 +349,19 @@ document.getElementById('closeAdd').onclick = () => modal.classList.remove('open
 modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('open'); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') modal.classList.remove('open'); });
 
-// ── 🎤 Live-поиск места (WI): микрофон → /live/locate (эмиссии+find_segments+SegmentTracker) ──
+// ── 🎤 Live-поиск места (WI v2): микрофон → короткие чанки → /live/stream ──
+// Рекордер перезапускаем каждые CHUNK_MS → каждая запись = самостоятельный webm с заголовком (валиден
+// для декода поодиночке). Сервер копит роллинг-буфер, холодно лочит суру, ведёт позицию трекером.
 const liveModal = document.getElementById('liveModal');
 const liveBtn = document.getElementById('liveBtn');
 const liveState = document.getElementById('liveState');
 const liveFound = document.getElementById('liveFound');
 const liveText = document.getElementById('liveText');
 const liveDbg = document.getElementById('liveDbg');
-let liveRec = null, liveChunks = [], liveTimer = null, liveBusy = false, liveOn = false;
-let liveStream = null, liveRecycle = null;
-const LIVE_WINDOW_MS = 20000;   // окно записи: перезапускаем рекордер → блоб мал, валиден, латентность стабильна
-const LIVE_SID = Math.random().toString(36).slice(2);   // id сессии (серверная липкость результата)
+let liveRec = null, liveChunks = [], liveBusy = false, liveOn = false;
+let liveStream = null, liveRecycle = null, liveFirst = true;
+const CHUNK_MS = 4000;                                   // длина чанка (≈ период обновления)
+const LIVE_SID = Math.random().toString(36).slice(2);
 
 document.getElementById('openLive').onclick = () => liveModal.classList.add('open');
 document.getElementById('closeLive').onclick = () => { stopLive(); liveModal.classList.remove('open'); };
@@ -367,7 +369,6 @@ liveModal.addEventListener('click', e => { if (e.target === liveModal) { stopLiv
 
 function stopLive() {
   liveOn = false;
-  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
   if (liveRecycle) { clearInterval(liveRecycle); liveRecycle = null; }
   if (liveRec && liveRec.state !== 'inactive') { try { liveRec.stop(); } catch (e) {} }
   if (liveStream) liveStream.getTracks().forEach(t => t.stop());
@@ -375,23 +376,30 @@ function stopLive() {
   liveBtn.textContent = '▶ Слушать'; liveState.textContent = 'микрофон выключен';
 }
 
-function armRecorder() {
-  // (пере)запуск рекордера на новом окне: старые чанки только с валидным webm-заголовком
-  if (liveRec && liveRec.state !== 'inactive') { try { liveRec.stop(); } catch (e) {} }
+function startRecorder() {
   liveChunks = [];
   liveRec = new MediaRecorder(liveStream);
   liveRec.ondataavailable = e => { if (e.data && e.data.size) liveChunks.push(e.data); };
-  liveRec.start(1000);                       // блобы по 1с
+  liveRec.onstop = () => {
+    const blob = new Blob(liveChunks, { type: liveRec.mimeType || 'audio/webm' });
+    if (blob.size > 800) sendChunk(blob);
+  };
+  liveRec.start();
+}
+
+function cycle() {                                       // отрезать текущий чанк и начать новый
+  if (!liveOn) return;
+  if (liveRec && liveRec.state !== 'inactive') { try { liveRec.stop(); } catch (e) {} }  // onstop → отправка
+  startRecorder();
 }
 
 async function startLive() {
   try {
     liveStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    armRecorder();
-    liveOn = true;
-    liveBtn.textContent = '■ Стоп'; liveState.textContent = 'слушаю…';
-    liveTimer = setInterval(sendLive, 2500);            // раз в 2.5с шлём накопленное окно
-    liveRecycle = setInterval(armRecorder, LIVE_WINDOW_MS);  // окно ограничено → латентность стабильна
+    liveOn = true; liveFirst = true;
+    startRecorder();
+    liveBtn.textContent = '■ Стоп'; liveState.textContent = 'слушаю… (набираю первые секунды)';
+    liveRecycle = setInterval(cycle, CHUNK_MS);
   } catch (e) {
     liveState.textContent = 'нет доступа к микрофону: ' + e.message;
   }
@@ -399,28 +407,31 @@ async function startLive() {
 
 liveBtn.onclick = () => { if (liveOn) stopLive(); else startLive(); };
 
-async function sendLive() {
-  if (liveBusy || !liveChunks.length) return;
+async function sendChunk(blob) {
+  if (liveBusy) return;                                  // пропускаем чанк, если сервер ещё считает предыдущий
   liveBusy = true;
+  const reset = liveFirst; liveFirst = false;
   try {
-    const blob = new Blob(liveChunks, { type: liveRec.mimeType || 'audio/webm' });
     const t0 = performance.now();
-    const r = await fetch(API + '/live/locate?sid=' + LIVE_SID, { method: 'POST', body: blob });
+    const r = await fetch(API + '/live/stream?sid=' + LIVE_SID + (reset ? '&reset=1' : ''),
+                          { method: 'POST', body: blob });
     const d = await r.json();
     const ms = Math.round(performance.now() - t0);
     if (d.error) { liveState.textContent = 'ошибка сервера: ' + d.error; liveDbg.textContent = (d.trace || ''); }
-    else if (d.warmup && !d.found) { liveState.textContent = 'слушаю… (набираю контекст, читай дальше)'; }
-    else if (d.empty && !d.found) { liveState.textContent = 'слушаю… (пока тихо)'; }
-    else if (d.found) {
-      liveState.textContent = 'слушаю…  ' + (d.stale ? '(держу прошлое) ' : 'найдено за ' + ms + 'мс');
-      const seg = d.segments.map(s => 'сура ' + s.surah + ':' + s.ayah_start + '–' + s.ayah_end).join(' · ');
-      const cur = d.current ? (d.current.surah + ':' + d.current.ayah) : '—';
-      liveFound.innerHTML = '<b>' + seg + '</b> &nbsp; текущий аят: <b>' + cur + '</b>';
+    else if (d.phase === 'cold') {
+      liveState.textContent = d.warmup
+        ? ('слушаю… (набираю контекст ' + (d.buf_sec || 0) + 'с, читай дальше)')
+        : ('определяю отрывок…' + (d.cand ? ' похоже на ' + d.cand : ''));
+    }
+    else if (d.phase === 'track' && d.current) {
+      liveState.textContent = 'веду за тобой  (' + ms + 'мс)';
+      liveFound.innerHTML = 'текущий аят: <b>' + d.current.surah + ':' + d.current.ayah + '</b>';
       liveText.innerHTML = (d.ayat || []).map(a =>
         '<span style="' + (a.current ? 'background:#3a5;color:#fff;border-radius:6px;padding:0 .2em' : '') + '">'
         + a.text + '</span>').join(' ﴿﴾ ');
-      liveDbg.textContent = 'декод: …' + (d.decode_tail || '');
-    } else { liveState.textContent = 'слушаю… (место не найдено)'; liveDbg.textContent = 'декод: …' + (d.decode_tail || ''); }
+    }
+    else if (d.empty) { /* тихий/битый чанк — держим прошлое */ }
+    liveDbg.textContent = 'фаза ' + (d.phase || '?') + ' · буфер ' + (d.buf_sec || 0) + 'с · чанк#' + (d.n || 0);
   } catch (e) { liveState.textContent = 'ошибка связи: ' + e.message; }
   finally { liveBusy = false; }
 }
