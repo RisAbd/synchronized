@@ -142,10 +142,26 @@ _RELOCK_HOLD = int(os.environ.get("SYNC_LIVE_RELOCKHOLD", "3"))      # тико�
 # басмалы-интро). Позже — доверяем последовательному треку (легитимная смена суры ловится застоем);
 # иначе на мелодичном/повторном чтении k-грамм шумит и кросс прыгал бы по случайным сурам (регресс rec7).
 _CROSS_MAX = int(os.environ.get("SYNC_LIVE_CROSSMAX", "40"))         # тиков от первого лока, пока кросс жив
+# ГЕЙТ КАЧЕСТВА перелока: свитчим корпус только если предполагаемый пассаж РЕАЛЬНО объясняет декод
+# (skeleton-difflib ≥ порога). На мелодичном/шумном декоде find_segments возвращает МУСОРНУЮ суру
+# (её ratio низкий) → не прыгаем, остаёмся на месте (последовательность > случайный скачок).
+_RELOC_RATIO_MIN = float(os.environ.get("SYNC_LIVE_RELOCRATIO", "0.45"))
 
 
 def _trunc(s):
     return s if len(s) <= _TRUNC else s[:_TRUNC].rstrip() + "…"
+
+
+def _passage_ratio(index, verses, dec):
+    """Насколько пассаж (его согласный скелет) объясняет декод — difflib-ratio. Гейт против перелока
+    в мусорную суру на шумном/мелодичном декоде (мусор ничего не матчит сильно)."""
+    import difflib
+    flat, skel = index[3], index[4]
+    pos = {sa: i for i, sa in enumerate(flat)}
+    txt = "".join(skel[pos[(s, a)]] for (s, a) in verses if (s, a) in pos)
+    if not txt or not dec:
+        return 0.0
+    return difflib.SequenceMatcher(None, dec, txt, autojunk=False).ratio()
 
 
 def _build_corpus(index, verses):
@@ -330,7 +346,13 @@ def _analyze(st):
                     # Если та же сура (застой на РЕФРЕНЕ «فبأي آلاء…» ×31) — НЕ перестраиваем корпус
                     # (иначе find_segments выберет другое вхождение того же аята → прыжок по всей суре),
                     # оставляем трекер идти ВПЕРЁД монотонно.
-                    if v2 and len(v2) >= 2 and v2[0][0] != cur_surah:
+                    # ГЕЙТ КАЧЕСТВА: свитчим, только если новый пассаж реально объясняет декод —
+                    # иначе на мелодичном/шумном декоде прыгали бы в МУСОРНУЮ суру (баг rec7-хвоста).
+                    ratio = _passage_ratio(index, v2, decr) if v2 else 0.0
+                    if os.environ.get("SYNC_LIVE_DBG"):
+                        print(f"RELOC n={st['n']} cross={cross} stall={stall_trig} cur={cur_surah} "
+                              f"v2={v2[0] if v2 else None} ratio={ratio:.2f}", flush=True)
+                    if v2 and len(v2) >= 2 and v2[0][0] != cur_surah and ratio >= _RELOC_RATIO_MIN:
                         st["verses"] = _build_corpus(index, v2)
                         st["trk"] = SegmentTracker(index, st["verses"])
                         st["tvotes"] = None
