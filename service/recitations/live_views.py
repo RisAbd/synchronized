@@ -123,7 +123,8 @@ _COLD_MIN = float(os.environ.get("SYNC_LIVE_COLDMIN", "22"))      # накопи
 _COLD_WIN = float(os.environ.get("SYNC_LIVE_COLDWIN", "45"))      # окно декода для холодного лока
 _TRACK_WIN = float(os.environ.get("SYNC_LIVE_TRACKWIN", "14"))    # окно декода для трекинга
 _FWD_AYAT = int(os.environ.get("SYNC_LIVE_FWD", "120"))           # аятов вперёд в корпусе трекера
-_RELOC_STALL = int(os.environ.get("SYNC_LIVE_RELOC", "4"))        # чанков застоя → перелокализация
+_RELOC_STALL = int(os.environ.get("SYNC_LIVE_RELOC", "4"))        # обработок застоя → перелокализация
+_PROC_STEP = float(os.environ.get("SYNC_LIVE_PROCSTEP", "1.2"))   # с нового аудио между тяж. обработками
 _STREAM_MINCHUNK = int(os.environ.get("SYNC_LIVE_MINCHUNK", "800"))
 
 
@@ -205,22 +206,36 @@ def live_stream(request):
         return JsonResponse(base)
 
     raw = request.body
-    if not raw or len(raw) < _STREAM_MINCHUNK:
+    is_pcm = bool(request.GET.get("pcm")) or "octet" in (request.content_type or "")
+    if not raw or (not is_pcm and len(raw) < _STREAM_MINCHUNK) or (is_pcm and len(raw) < 320):
         return _reply({"empty": True})
 
     try:
-        # чанк webm/opus → PCM 16к, дописать в роллинг-буфер (склейка PCM без webm-заголовков)
-        with tempfile.TemporaryDirectory() as d:
-            src = os.path.join(d, "c.bin"); wav = os.path.join(d, "c.wav")
-            with open(src, "wb") as f:
-                f.write(raw)
-            subprocess.run(["ffmpeg", "-nostdin", "-y", "-i", src, "-ar", str(_SR), "-ac", "1", wav],
-                           capture_output=True)
-            if not (os.path.exists(wav) and os.path.getsize(wav) > 4000):
-                return _reply({"empty": True, "detail": "no audio in chunk"})
-            pcm = w2v_align._load_wav(wav)
+        if is_pcm:
+            # сырой Int16LE PCM 16кГц моно с фронта (Web Audio) — БЕЗ ffmpeg/webm, дописать в буфер.
+            # Директива владельца tg_5373: фронт шлёт крохотные чанки сразу, бэк держит роллинг-окно.
+            pcm = np.frombuffer(raw, dtype="<i2").astype("float32") / 32768.0
+        else:
+            # чанк webm/opus → PCM 16к (совместимость), дописать в буфер (склейка PCM без заголовков)
+            with tempfile.TemporaryDirectory() as d:
+                src = os.path.join(d, "c.bin"); wav = os.path.join(d, "c.wav")
+                with open(src, "wb") as f:
+                    f.write(raw)
+                subprocess.run(["ffmpeg", "-nostdin", "-y", "-i", src, "-ar", str(_SR), "-ac", "1", wav],
+                               capture_output=True)
+                if not (os.path.exists(wav) and os.path.getsize(wav) > 4000):
+                    return _reply({"empty": True, "detail": "no audio in chunk"})
+                pcm = w2v_align._load_wav(wav)
         st["buf"] = np.concatenate([st["buf"], pcm])[-int(_BUF_CAP * _SR):]
         st["n"] += 1
+
+        # РАЗВЯЗКА приёма и обработки (директива владельца tg_5373): чанки принимаем всегда (дёшево),
+        # а тяжёлый декод+трек гоняем не чаще, чем набежит _PROC_STEP с нового аудио — «распознаёшь
+        # сколько можешь». Иначе быстро отдаём текущее состояние (append-only тик).
+        new_since = len(st["buf"]) - st.get("last_proc", 0)
+        if new_since < int(_PROC_STEP * _SR) and st["n"] > 1:
+            return _reply({"skip": True})
+        st["last_proc"] = len(st["buf"])
 
         if st["phase"] == "cold":
             if len(st["buf"]) < int(_COLD_MIN * _SR):

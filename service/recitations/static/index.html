@@ -349,18 +349,21 @@ document.getElementById('closeAdd').onclick = () => modal.classList.remove('open
 modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('open'); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') modal.classList.remove('open'); });
 
-// ── 🎤 Live-поиск места (WI v2): микрофон → короткие чанки → /live/stream ──
-// Рекордер перезапускаем каждые CHUNK_MS → каждая запись = самостоятельный webm с заголовком (валиден
-// для декода поодиночке). Сервер копит роллинг-буфер, холодно лочит суру, ведёт позицию трекером.
+// ── 🎤 Live-поиск места (WI v2): микрофон → сырой PCM крохотными чанками → /live/stream ──
+// Директива владельца (tg_5373): фронт НЕ копит — шлём сырой PCM 16кГц каждые SEND_MS (~700мс) сразу.
+// Web Audio (ScriptProcessor) даёт сырые сэмплы → даунсемплим до 16кГц → Int16 → POST octet-stream.
+// Сервер держит роллинг-буфер, декод+трек гоняет своим темпом («сколько успеваешь»). Без webm/ffmpeg.
 const liveModal = document.getElementById('liveModal');
 const liveBtn = document.getElementById('liveBtn');
 const liveState = document.getElementById('liveState');
 const liveFound = document.getElementById('liveFound');
 const liveText = document.getElementById('liveText');
 const liveDbg = document.getElementById('liveDbg');
-let liveRec = null, liveChunks = [], liveBusy = false, liveOn = false;
-let liveStream = null, liveRecycle = null, liveFirst = true;
-const CHUNK_MS = 4000;                                   // длина чанка (≈ период обновления)
+let liveOn = false, liveBusy = false, liveFirst = true;
+let liveStream = null, liveCtx = null, liveSrc = null, liveProc = null, liveTimer = null;
+let pcmParts = [], pcmLen = 0;
+const SEND_MS = 700;                                     // как часто шлём накопленный PCM
+const TARGET_SR = 16000;
 const LIVE_SID = Math.random().toString(36).slice(2);
 
 document.getElementById('openLive').onclick = () => liveModal.classList.add('open');
@@ -369,37 +372,30 @@ liveModal.addEventListener('click', e => { if (e.target === liveModal) { stopLiv
 
 function stopLive() {
   liveOn = false;
-  if (liveRecycle) { clearInterval(liveRecycle); liveRecycle = null; }
-  if (liveRec && liveRec.state !== 'inactive') { try { liveRec.stop(); } catch (e) {} }
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  if (liveProc) { try { liveProc.disconnect(); } catch (e) {} liveProc.onaudioprocess = null; liveProc = null; }
+  if (liveSrc) { try { liveSrc.disconnect(); } catch (e) {} liveSrc = null; }
+  if (liveCtx) { try { liveCtx.close(); } catch (e) {} liveCtx = null; }
   if (liveStream) liveStream.getTracks().forEach(t => t.stop());
-  liveRec = null; liveStream = null; liveChunks = [];
+  liveStream = null; pcmParts = []; pcmLen = 0;
   liveBtn.textContent = '▶ Слушать'; liveState.textContent = 'микрофон выключен';
-}
-
-function startRecorder() {
-  liveChunks = [];
-  liveRec = new MediaRecorder(liveStream);
-  liveRec.ondataavailable = e => { if (e.data && e.data.size) liveChunks.push(e.data); };
-  liveRec.onstop = () => {
-    const blob = new Blob(liveChunks, { type: liveRec.mimeType || 'audio/webm' });
-    if (blob.size > 800) sendChunk(blob);
-  };
-  liveRec.start();
-}
-
-function cycle() {                                       // отрезать текущий чанк и начать новый
-  if (!liveOn) return;
-  if (liveRec && liveRec.state !== 'inactive') { try { liveRec.stop(); } catch (e) {} }  // onstop → отправка
-  startRecorder();
 }
 
 async function startLive() {
   try {
     liveStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    liveCtx = new (window.AudioContext || window.webkitAudioContext)();
+    liveSrc = liveCtx.createMediaStreamSource(liveStream);
+    liveProc = liveCtx.createScriptProcessor(4096, 1, 1);
+    liveProc.onaudioprocess = e => {
+      if (!liveOn) return;
+      pcmParts.push(new Float32Array(e.inputBuffer.getChannelData(0)));  // копия сэмплов
+      pcmLen += e.inputBuffer.length;
+    };
+    liveSrc.connect(liveProc); liveProc.connect(liveCtx.destination);
     liveOn = true; liveFirst = true;
-    startRecorder();
     liveBtn.textContent = '■ Стоп'; liveState.textContent = 'слушаю… (набираю первые секунды)';
-    liveRecycle = setInterval(cycle, CHUNK_MS);
+    liveTimer = setInterval(flushPcm, SEND_MS);
   } catch (e) {
     liveState.textContent = 'нет доступа к микрофону: ' + e.message;
   }
@@ -407,14 +403,40 @@ async function startLive() {
 
 liveBtn.onclick = () => { if (liveOn) stopLive(); else startLive(); };
 
-async function sendChunk(blob) {
-  if (liveBusy) return;                                  // пропускаем чанк, если сервер ещё считает предыдущий
+function drainFloat() {                                  // собрать накопленные Float32 в один массив
+  const buf = new Float32Array(pcmLen); let o = 0;
+  for (const p of pcmParts) { buf.set(p, o); o += p.length; }
+  pcmParts = []; pcmLen = 0;
+  return buf;
+}
+
+function toInt16_16k(f32, srcSr) {                       // даунсемпл srcSr→16кГц (усреднение) + Int16LE
+  const ratio = srcSr / TARGET_SR;
+  const n = Math.floor(f32.length / ratio);
+  const out = new Int16Array(n);
+  for (let i = 0; i < n; i++) {
+    const start = Math.floor(i * ratio), end = Math.floor((i + 1) * ratio);
+    let s = 0, c = 0;
+    for (let j = start; j < end && j < f32.length; j++) { s += f32[j]; c++; }
+    let v = c ? s / c : 0;
+    v = Math.max(-1, Math.min(1, v));
+    out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+  }
+  return out;
+}
+
+async function flushPcm() {
+  if (!liveOn || liveBusy || pcmLen === 0) return;
+  const srcSr = liveCtx.sampleRate;
+  const int16 = toInt16_16k(drainFloat(), srcSr);
+  if (int16.length < 160) return;                        // <10мс — пропускаем
   liveBusy = true;
   const reset = liveFirst; liveFirst = false;
   try {
     const t0 = performance.now();
-    const r = await fetch(API + '/live/stream?sid=' + LIVE_SID + (reset ? '&reset=1' : ''),
-                          { method: 'POST', body: blob });
+    const r = await fetch(API + '/live/stream?pcm=1&sid=' + LIVE_SID + (reset ? '&reset=1' : ''),
+                          { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' },
+                            body: int16.buffer });
     const d = await r.json();
     const ms = Math.round(performance.now() - t0);
     if (d.error) { liveState.textContent = 'ошибка сервера: ' + d.error; liveDbg.textContent = (d.trace || ''); }
@@ -430,8 +452,8 @@ async function sendChunk(blob) {
         '<span style="' + (a.current ? 'background:#3a5;color:#fff;border-radius:6px;padding:0 .2em' : '') + '">'
         + a.text + '</span>').join(' ﴿﴾ ');
     }
-    else if (d.empty) { /* тихий/битый чанк — держим прошлое */ }
-    liveDbg.textContent = 'фаза ' + (d.phase || '?') + ' · буфер ' + (d.buf_sec || 0) + 'с · чанк#' + (d.n || 0);
+    liveDbg.textContent = 'фаза ' + (d.phase || '?') + ' · буфер ' + (d.buf_sec || 0) + 'с · тик#' + (d.n || 0)
+      + (d.skip ? ' (накопление)' : '');
   } catch (e) { liveState.textContent = 'ошибка связи: ' + e.message; }
   finally { liveBusy = false; }
 }
