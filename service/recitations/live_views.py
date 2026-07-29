@@ -53,7 +53,7 @@ def live_locate(request):
     sid = request.GET.get("sid", "") or "_"
     raw = request.body
     if not raw or len(raw) < 2000:
-        return _sticky(sid, {"ok": True, "empty": True})
+        return JsonResponse(_continuity(sid, {"ok": True, "empty": True}))
 
     try:
         import json as _json

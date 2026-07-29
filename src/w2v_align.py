@@ -89,12 +89,20 @@ def emissions(audio_path, window_sec: float = 20.0):
     ch2idx = {k: int(v) for k, v in vocab.items()}
 
     audio = _load_wav(audio_path)
+    # свёрточный стек wav2vec2 схлопывает ~320× → на аудио короче ~0.4с глубокая свёртка падает
+    # (RuntimeError: kernel size can't be greater than input). В live первые чанки окна с микрофона
+    # бывают крохотными → возвращаем None, вызыватель трактует как «пусто» (не крашим 500-й).
+    _MIN_SAMPLES = int(0.4 * SAMPLE_RATE)
+    if len(audio) < _MIN_SAMPLES:
+        return None, 0.0, idx2ch, ch2idx
     dur = len(audio) / SAMPLE_RATE
     chunks, strides = [], []
     t = 0.0
     while t < dur:
         e = min(dur, t + window_sec)
         seg = audio[int(t * SAMPLE_RATE):int(e * SAMPLE_RATE)]
+        if len(seg) < _MIN_SAMPLES:                 # хвостовой огрызок окна — пропускаем
+            break
         iv = proc(seg, sampling_rate=SAMPLE_RATE, return_tensors="pt").input_values.to(device)
         with torch.inference_mode():
             emis = torch.log_softmax(model(iv).logits, dim=-1)[0].cpu().numpy().astype("float32")
@@ -102,6 +110,8 @@ def emissions(audio_path, window_sec: float = 20.0):
         strides.append((e - t) / len(emis))
         t = e
     torch.cuda.empty_cache()
+    if not chunks:
+        return None, 0.0, idx2ch, ch2idx
     E = np.concatenate(chunks, axis=0)
     stride_ms = float(np.mean(strides) * 1000)
     return E, stride_ms, idx2ch, ch2idx
