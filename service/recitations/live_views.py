@@ -289,7 +289,12 @@ def _analyze(st):
                 Er, decr = _decode_window(st["buf"], _COLD_WIN, idx2ch, ch2idx)
                 if Er is not None:
                     v2 = find_segments(Er, q, idx2ch, ch2idx, index=index)
-                    if v2 and len(v2) >= 2:
+                    # ПРИОРИТЕТ ПОСЛЕДОВАТЕЛЬНОСТИ (владелец tg_5744): перелок ТОЛЬКО при смене СУРЫ.
+                    # Если та же сура (застой на РЕФРЕНЕ «فبأي آلاء…» ×31) — НЕ перестраиваем корпус
+                    # (иначе find_segments выберет другое вхождение того же аята → прыжок по всей суре),
+                    # оставляем трекер идти ВПЕРЁД монотонно.
+                    cur_surah = st["last_pos"][0] if st.get("last_pos") else None
+                    if v2 and len(v2) >= 2 and v2[0][0] != cur_surah:
                         st["verses"] = _build_corpus(index, v2)
                         st["trk"] = SegmentTracker(index, st["verses"])
                         _track(st, decr)

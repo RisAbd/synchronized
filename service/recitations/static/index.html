@@ -469,27 +469,27 @@ function applyLiveFont() {
 
 function renderPlace(d, provisional) {
   applyLiveFont();
-  // как в плеере: ОДИН размер у всех аятов, текущий отличается только ПОДСВЕТКОЙ (не крупнее).
-  // prev/cur/next (3 аята). Текущий — пословная подсветка по word_frac.
+  // СПЛОШНОЙ поток как в плеере (мусхаф): аяты идут подряд одним justify-текстом, НЕ разрываются по
+  // окончанию аята; после каждого — маркер номера ۝, текущий аят выделяется цветом/подсветкой слова.
   liveFound.innerHTML = '<b>' + d.current.surah + ':' + d.current.ayah + '</b>';
   const wf = (d.word_frac == null) ? -1 : d.word_frac;
+  const ARN = ['٠','١','٢','٣','٤','٥','٦','٧','٨','٩'];
+  const arNum = n => String(n).split('').map(c => ARN[+c] || c).join('');
   const parts = (d.ayat || []).map(a => {
-    if (!a.current) {
-      return '<div style="opacity:.4;line-height:1.9;margin:.12em 0">' + a.text + '</div>';
-    }
-    let inner = a.text;
-    if (wf >= 0) {
+    let body = a.text;
+    if (a.current && wf >= 0) {
       const words = a.text.split(/\s+/).filter(Boolean);
       const wi = Math.max(0, Math.min(words.length - 1, Math.floor(wf * words.length)));
-      inner = words.map((w, i) =>
-        '<span style="' + (i === wi ? 'background:#3a5;color:#fff;border-radius:6px;padding:0 .15em' : '') + '">' + w + '</span>'
+      body = words.map((w, i) =>
+        '<span style="' + (i === wi ? 'background:#3a5;color:#fff;border-radius:6px;padding:0 .1em' : '') + '">' + w + '</span>'
       ).join(' ');
     }
-    // текущий — тот же размер, отличается фоном/жирностью (как подсветка активного аята в плеере)
-    return '<div style="line-height:1.9;margin:.12em 0;font-weight:700">' + inner + '</div>';
+    const style = a.current ? 'color:var(--accent);font-weight:700' : 'opacity:.55';
+    return '<span style="' + style + '">' + body + '</span>'
+      + '<span style="opacity:.4;font-size:.7em"> ۝' + arNum(a.ayah) + ' </span>';
   });
-  liveText.style.textAlign = 'center';
-  liveText.innerHTML = parts.join('');
+  liveText.style.textAlign = 'justify';
+  liveText.innerHTML = parts.join('');   // всё в одном контейнере → сплошной поток, без разрывов
 }
 
 let candSig = '';                                        // сигнатура списка — не перерисовывать без изменений (без мигания)
