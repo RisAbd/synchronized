@@ -362,7 +362,7 @@ const liveDbg = document.getElementById('liveDbg');
 let liveOn = false, liveBusy = false, liveFirst = true;
 let liveStream = null, liveCtx = null, liveSrc = null, liveProc = null, liveTimer = null;
 let pcmParts = [], pcmLen = 0;
-const SEND_MS = 700;                                     // как часто шлём накопленный PCM
+const SEND_MS = 500;                                     // как часто шлём накопленный PCM
 const TARGET_SR = 16000;
 const LIVE_SID = Math.random().toString(36).slice(2);
 
@@ -425,6 +425,32 @@ function toInt16_16k(f32, srcSr) {                       // даунсемпл s
   return out;
 }
 
+function renderPlace(d, provisional) {
+  // текущий аят КРУПНО с пословной подсветкой (word_frac), контекст — мелко и бледно.
+  liveFound.innerHTML = (provisional ? 'предположительно ' : '') + '<b>' + d.current.surah + ':' + d.current.ayah + '</b>';
+  const cur = d.current;
+  const wf = (d.word_frac == null) ? -1 : d.word_frac;
+  const parts = (d.ayat || []).map(a => {
+    const isCur = a.current;
+    if (!isCur) {
+      return '<div style="opacity:.45;font-size:.62em;margin:.15em 0">' + a.surah + ':' + a.ayah + '  ' + a.text + '</div>';
+    }
+    // текущий: крупно, слово по word_frac подсвечено
+    let inner = a.text;
+    if (wf >= 0) {
+      const words = a.text.split(/\s+/).filter(Boolean);
+      const wi = Math.max(0, Math.min(words.length - 1, Math.floor(wf * words.length)));
+      inner = words.map((w, i) =>
+        '<span style="' + (i === wi ? 'background:#3a5;color:#fff;border-radius:6px;padding:0 .15em' : '') + '">' + w + '</span>'
+      ).join(' ');
+    }
+    return '<div style="font-size:1.15em;line-height:1.9;margin:.25em 0;' + (provisional ? 'opacity:.6' : '') + '">'
+      + inner + '</div>';
+  });
+  liveText.style.textAlign = 'center';
+  liveText.innerHTML = parts.join('');
+}
+
 async function flushPcm() {
   if (!liveOn || liveBusy || pcmLen === 0) return;
   const srcSr = liveCtx.sampleRate;
@@ -440,6 +466,10 @@ async function flushPcm() {
     const d = await r.json();
     const ms = Math.round(performance.now() - t0);
     if (d.error) { liveState.textContent = 'ошибка сервера: ' + d.error; liveDbg.textContent = (d.trace || ''); }
+    else if (d.phase === 'cold' && d.current) {           // провизорный кандидат — показываем сразу (бледно)
+      liveState.textContent = 'определяю отрывок…' + (d.cand ? ' похоже на ' + d.cand : '');
+      renderPlace(d, true);
+    }
     else if (d.phase === 'cold') {
       liveState.textContent = d.warmup
         ? ('слушаю… (набираю контекст ' + (d.buf_sec || 0) + 'с, читай дальше)')
@@ -447,10 +477,7 @@ async function flushPcm() {
     }
     else if (d.phase === 'track' && d.current) {
       liveState.textContent = 'веду за тобой  (' + ms + 'мс)';
-      liveFound.innerHTML = 'текущий аят: <b>' + d.current.surah + ':' + d.current.ayah + '</b>';
-      liveText.innerHTML = (d.ayat || []).map(a =>
-        '<span style="' + (a.current ? 'background:#3a5;color:#fff;border-radius:6px;padding:0 .2em' : '') + '">'
-        + a.text + '</span>').join(' ﴿﴾ ');
+      renderPlace(d, false);
     }
     liveDbg.textContent = 'фаза ' + (d.phase || '?') + ' · буфер ' + (d.buf_sec || 0) + 'с · тик#' + (d.n || 0)
       + (d.skip ? ' (накопление)' : '');

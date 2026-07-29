@@ -119,12 +119,12 @@ def _continuity(sid, cur):
 _STREAM = {}
 _SR = 16000
 _BUF_CAP = float(os.environ.get("SYNC_LIVE_BUFCAP", "48"))        # сколько с PCM держим
-_COLD_MIN = float(os.environ.get("SYNC_LIVE_COLDMIN", "22"))      # накопить перед 1-й попыткой лока
+_COLD_MIN = float(os.environ.get("SYNC_LIVE_COLDMIN", "10"))      # накопить перед 1-й попыткой лока
 _COLD_WIN = float(os.environ.get("SYNC_LIVE_COLDWIN", "45"))      # окно декода для холодного лока
 _TRACK_WIN = float(os.environ.get("SYNC_LIVE_TRACKWIN", "14"))    # окно декода для трекинга
 _FWD_AYAT = int(os.environ.get("SYNC_LIVE_FWD", "120"))           # аятов вперёд в корпусе трекера
 _RELOC_STALL = int(os.environ.get("SYNC_LIVE_RELOC", "4"))        # обработок застоя → перелокализация
-_PROC_STEP = float(os.environ.get("SYNC_LIVE_PROCSTEP", "1.2"))   # с нового аудио между тяж. обработками
+_PROC_STEP = float(os.environ.get("SYNC_LIVE_PROCSTEP", "1.0"))   # с нового аудио между тяж. обработками
 _STREAM_MINCHUNK = int(os.environ.get("SYNC_LIVE_MINCHUNK", "800"))
 
 
@@ -202,6 +202,7 @@ def live_stream(request):
             base["current"] = {"surah": loc[0], "ayah": loc[1]}
             base["current_text"] = _ayah_text(q, loc[0], loc[1])
             base["ayat"] = st.get("last_ctx", [])
+            base["word_frac"] = st.get("word_frac")
         base.update(extra)
         return JsonResponse(base)
 
@@ -244,7 +245,7 @@ def live_stream(request):
             if E is None:
                 return _reply({"warmup": True})
             verses = find_segments(E, q, idx2ch, ch2idx, index=index)
-            if not verses or len(verses) < 2:
+            if not verses:
                 return _reply({"cold": True, "seg": 0})
             surah0 = verses[0][0]
             # континуитет: та же сура 2 попытки подряд → лочим (защита от разового ложного окна)
@@ -252,8 +253,15 @@ def live_stream(request):
                 st["cold_hits"] += 1
             else:
                 st["cold_surah"] = surah0; st["cold_hits"] = 1
-            if st["cold_hits"] < 2:
-                return _reply({"cold": True, "seg": len(verses), "cand": f"{surah0}:{verses[0][1]}"})
+            # лочим только при ≥2 аятах И подтверждении; иначе провизорно показываем кандидата (раньше)
+            if st["cold_hits"] < 2 or len(verses) < 2:
+                # провизорно показать кандидата СРАЗУ (быстрая первая подсветка ~_COLD_MIN с, не ждём
+                # 2-е подтверждение) — владелец: «поначалу распознаёт очень долго»
+                st["verses"] = _build_corpus(index, verses)
+                st["last_pos"] = (verses[0][0], verses[0][1])
+                st["last_ctx"] = _ctx_ayat(q, st["verses"], st["last_pos"])
+                return _reply({"cold": True, "provisional": True, "seg": len(verses),
+                               "cand": f"{surah0}:{verses[0][1]}"})
             # ЛОК: корпус трекера = пассаж find_segments + продолжение вперёд по Корану
             st["verses"] = _build_corpus(index, verses)
             st["trk"] = SegmentTracker(index, st["verses"])
@@ -303,6 +311,19 @@ def _track(st, dec):
     if cur:
         st["last_pos"] = (cur["surah"], cur["ayah"])
         st["last_ctx"] = _ctx_ayat(q, st["verses"], (cur["surah"], cur["ayah"]))
+        # доля пройденного ТЕКУЩЕГО аята по позиции трекера в M → пословная подсветка на фронте
+        # (владелец: пословные тайминги не выкидываем, подсвечивать слово «по возможности»)
+        try:
+            sa, p = trk.sa, min(trk.p, len(trk.sa) - 1)
+            key = sa[p]
+            a0 = a1 = p
+            while a0 > 0 and sa[a0 - 1] == key:
+                a0 -= 1
+            while a1 < len(sa) - 1 and sa[a1 + 1] == key:
+                a1 += 1
+            st["word_frac"] = round((p - a0) / max(1, a1 - a0), 3)
+        except Exception:
+            st["word_frac"] = None
     return st.get("last_pos") != prev
 
 
