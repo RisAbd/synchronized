@@ -27,7 +27,15 @@
   → латентность росла 0.6→2.4с → зависание к 40с; ПОЧИНЕНО буфером 20с + редким перелоком, латентность
   плоская ~200мс). **Само-тест:** `work/stream_selftest.py` (реальный эндпоинт vs истина w2v): rec5=1.00,
   rec7=0.93, rec12=0.89, rec9 (мульти-сегм Фатиха+Исра) 0.01→0.66 перелоком; латентность медиана ~450мс.
-  Инструменты: `work/proto_stream*.py`, `work/proto_coldlock.py`, `work/stream_selftest.py`.
+  **⚡ ВЕБСОКЕТ (фикс зависания, tg_5558):** HTTP-версия виснула — 100мс-чанки=10 POST/с, ngrok-free
+  троттлит и рвёт коннект на ~12с (воспроизведено: HTTP умирал на 12с, ws шёл 40с без обрывов). Перевёл
+  на вебсокет: **live-сервис теперь `uvicorn` (ASGI), НЕ runserver** — `service/synchronized/asgi.py`
+  тонкий роутер (`websocket /live/ws`→`live_views.live_ws`, HTTP→Django), `uvicorn`+`websockets` в
+  `work/pydeps` (pip --target), команда в docker-compose. Ядро вынесено в `_process_pcm` (общее для
+  HTTP `live_stream` и WS), GPU-декод в `run_in_executor`. Фронт: WebSocket, кадры PCM Int16 потоком,
+  boost/reset — текст. ⚠️ uvicorn БЕЗ --reload → после правки live_views/asgi делать
+  `docker compose restart live`. Шрифт/размер live подцепляются из плеера (`sync.arabfont/arabsize`).
+  Инструменты: `work/proto_stream*.py`, `work/proto_coldlock.py`, `work/stream_selftest.py`, `work/ws_test*.py`.
   match_align: `ayah_density`/`topk_from_votes`/`locate`/`StreamLocator`/`SegmentTracker`. Env-крутилки
   `SYNC_LIVE_*`. **Открыто (владелец продолжит гонять):** вебсокет (пока частые POST — я показал, что узкое
   место = GPU-декод, не сеть; ws почти не ускорит); рефрен-суры (rec10 предел мелодичного декода); режим
