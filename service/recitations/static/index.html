@@ -358,7 +358,8 @@ const liveText = document.getElementById('liveText');
 const liveDbg = document.getElementById('liveDbg');
 let liveRec = null, liveChunks = [], liveTimer = null, liveBusy = false, liveOn = false;
 let liveStream = null, liveRecycle = null;
-const LIVE_WINDOW_MS = 12000;   // окно записи: перезапускаем рекордер → блоб мал, валиден, латентность стабильна
+const LIVE_WINDOW_MS = 20000;   // окно записи: перезапускаем рекордер → блоб мал, валиден, латентность стабильна
+const LIVE_SID = Math.random().toString(36).slice(2);   // id сессии (серверная липкость результата)
 
 document.getElementById('openLive').onclick = () => liveModal.classList.add('open');
 document.getElementById('closeLive').onclick = () => { stopLive(); liveModal.classList.remove('open'); };
@@ -404,12 +405,13 @@ async function sendLive() {
   try {
     const blob = new Blob(liveChunks, { type: liveRec.mimeType || 'audio/webm' });
     const t0 = performance.now();
-    const r = await fetch(API + '/live/locate', { method: 'POST', body: blob });
+    const r = await fetch(API + '/live/locate?sid=' + LIVE_SID, { method: 'POST', body: blob });
     const d = await r.json();
     const ms = Math.round(performance.now() - t0);
-    if (d.empty) { liveState.textContent = 'слушаю… (пока тихо)'; }
+    if (d.error) { liveState.textContent = 'ошибка сервера: ' + d.error; liveDbg.textContent = (d.trace || ''); }
+    else if (d.empty && !d.found) { liveState.textContent = 'слушаю… (пока тихо)'; }
     else if (d.found) {
-      liveState.textContent = 'слушаю…  найдено за ' + ms + 'мс';
+      liveState.textContent = 'слушаю…  ' + (d.stale ? '(держу прошлое) ' : 'найдено за ' + ms + 'мс');
       const seg = d.segments.map(s => 'сура ' + s.surah + ':' + s.ayah_start + '–' + s.ayah_end).join(' · ');
       const cur = d.current ? (d.current.surah + ':' + d.current.ayah) : '—';
       liveFound.innerHTML = '<b>' + seg + '</b> &nbsp; текущий аят: <b>' + cur + '</b>';

@@ -10,7 +10,8 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
 _CACHE = {}
-_TAIL_SEC = float(os.environ.get("SYNC_LIVE_TAIL", "25"))   # берём последние N с аудио (свежий контекст)
+_SESS = {}                                                  # sid → последний найденный ответ (антимерцание)
+_TAIL_SEC = float(os.environ.get("SYNC_LIVE_TAIL", "22"))   # берём последние N с аудио (свежий контекст)
 
 
 def _quran():
@@ -49,18 +50,36 @@ def live_locate(request):
     """POST: тело = аудио-блоб (webm/opus/wav). Ответ JSON: найденный пассаж + текущий аят + текст."""
     if request.method != "POST":
         return JsonResponse({"error": "POST only"}, status=405)
+    sid = request.GET.get("sid", "") or "_"
     raw = request.body
     if not raw or len(raw) < 2000:
-        return JsonResponse({"ok": True, "empty": True})
+        return _sticky(sid, {"ok": True, "empty": True})
 
     try:
-        return _do_locate(raw)
+        res = _do_locate(raw)
+        # липкость: если сейчас ничего не нашли, но раньше находили — вернём прошлое (антимерцание)
+        import json as _json
+        payload = _json.loads(res.content)
+        if payload.get("found"):
+            _SESS[sid] = payload
+            return res
+        return _sticky(sid, payload)
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
         print("LIVE_LOCATE_ERROR:\n" + tb, flush=True)   # видно в логах (монитор)
-        return JsonResponse({"ok": False, "error": type(e).__name__ + ": " + str(e),
-                             "trace": tb[-900:]}, status=200)   # 200 → клиент покажет причину
+        return _sticky(sid, {"ok": False, "error": type(e).__name__ + ": " + str(e),
+                             "trace": tb[-900:]})
+
+
+def _sticky(sid, cur):
+    """Вернуть текущий ответ, либо последний НАЙДЕННЫЙ для сессии с пометкой stale (если сейчас пусто)."""
+    last = _SESS.get(sid)
+    if not cur.get("found") and last:
+        out = dict(last)
+        out["stale"] = True
+        return JsonResponse(out)
+    return JsonResponse(cur)
 
 
 def _do_locate(raw: bytes):
