@@ -11,10 +11,18 @@
 
 > Коротко: текущий фокус и свежие договорённости. Детали статусов — в `docs/BACKLOG.md`.
 
+- **⚙️ ИНФРА (30.07, указка владельца «поднимай ОДИН сервис»): `web` и `live` СЛИТЫ в один ASGI-сервис.**
+  `web` теперь = `uvicorn synchronized.asgi:application` и отдаёт ВСЁ: обычный Django (HTTP/статика/БД)
+  И websocket `/live/ws` (роутер `asgi.py`: `/live/ws`→`live_ws`, остальное→Django). Отдельного `live`
+  БОЛЬШЕ НЕТ (сносить `docker compose up -d --remove-orphans`). Сервисы: `redis / web / worker`. `web`
+  требует GPU (live-декод wav2vec2). **Порт:** в РЕПО стандартный 8000; ЛОКАЛЬНО — 8002 через gitignored
+  `docker-compose.override.yml` (`ports: !override ["8002:8000"]`; 8000 занят чужими проектами — memory
+  [[local-web-port-8002]]). Плеер И live-микрофон — на ОДНОМ порту (локально 8002, ngrok → 8002). ⚠️
+  uvicorn БЕЗ --reload → после правок live_views/asgi/views: `docker compose restart web` (НЕ `live`).
 - **Сессия 19-ПРОД7 (29.07): LIVE-СТРИМИНГ WI довёл до рабочего по итеративному фидбеку владельца
   (десятки голосовых, тестит удалённо с телефона через ngrok).** Ядро — `service/recitations/live_views.py`
-  `live_stream` (эндпоинт `POST /live/stream`, отдельный GPU-сервис `live` :8010, наружу ngrok
-  `btu8y3ol8`). **Архитектура (роллинг-буфер PCM):** фронт (`static/index.html`, Web Audio
+  `live_stream` (эндпоинт `POST /live/stream`; сервис — единый `web`-ASGI, см. заметку ИНФРА выше,
+  раньше был отдельный `live` :8010). **Архитектура (роллинг-буфер PCM):** фронт (`static/index.html`, Web Audio
   ScriptProcessor) шлёт сырой Int16 PCM 16кГц крохотными чанками (SEND_MS=100мс, `?pcm=1` octet-stream,
   без ffmpeg/webm) → сервер копит роллинг-буфер `_BUF_CAP=20с`, развязка приём/обработка (append 1-3мс,
   тяжёлый декод не чаще `_PROC_STEP=0.5с`). **Фаза scan:** k-грамм-голоса с затуханием (`_DECAY=0.6`) →
@@ -34,7 +42,8 @@
   `work/pydeps` (pip --target), команда в docker-compose. Ядро вынесено в `_process_pcm` (общее для
   HTTP `live_stream` и WS), GPU-декод в `run_in_executor`. Фронт: WebSocket, кадры PCM Int16 потоком,
   boost/reset — текст. ⚠️ uvicorn БЕЗ --reload → после правки live_views/asgi делать
-  `docker compose restart live`. Шрифт/размер live подцепляются из плеера (`sync.arabfont/arabsize`).
+  `docker compose restart web` (сервис слит, см. заметку ИНФРА выше). Шрифт/размер live подцепляются
+  из плеера (`sync.arabfont/arabsize`).
   Инструменты: `work/proto_stream*.py`, `work/proto_coldlock.py`, `work/stream_selftest.py`, `work/ws_test*.py`.
   match_align: `ayah_density`/`topk_from_votes`/`locate`/`StreamLocator`/`SegmentTracker`. Env-крутилки
   `SYNC_LIVE_*`. **Открыто (владелец продолжит гонять):** вебсокет (пока частые POST — я показал, что узкое
@@ -43,9 +52,9 @@
   кандидаты только в scan, смена пассажа ловится застоем трекера).
 - **⚠️ GPU-ДИСЦИПЛИНА (владелец ЗОЛ, tg_5462/5464/5470/5522, memory [[gpu-first]]):** транскрипция его
   голосов (audio-task) = **ВСЕГДА GPU + ВСЕГДА large-v3**, НИКОГДА CPU, НИКОГДА малая модель. 6ГБ карта:
-  live-сервис (wav2vec2 ~1.5ГБ) + large-v3 (~4ГБ) не влезают → при OOM **освобождать VRAM**
-  `docker compose restart live` (не CPU!). Его сообщения — приоритет, live можно ронять. Перед
-  транскрипцией: `nvidia-smi`; если VRAM>500МБ → рестарт live. TTS (Silero) тоже на GPU.
+  web-сервис (wav2vec2 live ~1.5ГБ) + large-v3 (~4ГБ) не влезают → при OOM **освобождать VRAM**
+  `docker compose restart web` (не CPU!). Его сообщения — приоритет, live можно ронять. Перед
+  транскрипцией: `nvidia-smi`; если VRAM>500МБ → рестарт web. TTS (Silero) тоже на GPU.
 - **⚠️ ОЗВУЧКА владельцу (memory [[owner-audio-sendvoice]]) — ГОТОВ СКИЛЛ `tts-voice` (tg_5748):**
   отчёты/объяснения — ГОЛОСОМ через Telegram `sendVoice` (пузырь!), НЕ `sendfile`/документом.
   Переиспользуемый скилл `~/.claude/skills/tts-voice/` (Silero v4_ru на GPU → .ogg/opus → sendVoice,
@@ -566,9 +575,10 @@
   В ПРИНЦИПЕ (это П8, отдельный шаг, НЕ «настройка» forced). (3) Идея владельца (в NOTES): MMS-эмиссии
   можно декодить сами → искать отрывок в Коране → БЕЗ google/whisper и align.py («свой распознаватель»,
   целевая архитектура (A), после П8). (4) UI: тумблер прогонов в плеере спрятать за ?debug=1 (мелочь).
-- **NB инфра:** порт 8000 на хосте занят ЧУЖИМ проектом (`wildbox` в PyCharm) — веб-контейнер не
-  поднять, НЕ трогать его. Для работы с БД веб не нужен: `docker compose exec worker python manage.py
-  shell`. Скрипты в контейнере: `sys.path.insert(0,'/app/src'); sys.path.insert(0,'/app/service')`.
+- **NB инфра:** порт 8000 на хосте часто занят ЧУЖИМ проектом (`wildbox` в PyCharm) → локально `web`
+  поднимается на **8002** (gitignored `docker-compose.override.yml`, memory [[local-web-port-8002]]);
+  в репо `docker-compose.yml` стандартный 8000. Для работы с БД без веба: `docker compose exec worker
+  python manage.py shell`. Скрипты в контейнере: `sys.path.insert(0,'/app/src'); sys.path.insert(0,'/app/service')`.
 - **Сделано 04.07 (сессия 6, поздний фидбек владельца): список записей — живое обновление без
   `location.reload()`** (страница перезагружалась каждые 2.5с при пересчёте — «картинки мигают,
   бесит»). Карточка → партиал `_card.html` + `GET /r/<id>/card`; JS точечно подменяет одну
