@@ -53,6 +53,17 @@ def live_locate(request):
     if not raw or len(raw) < 2000:
         return JsonResponse({"ok": True, "empty": True})
 
+    try:
+        return _do_locate(raw)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print("LIVE_LOCATE_ERROR:\n" + tb, flush=True)   # видно в логах (монитор)
+        return JsonResponse({"ok": False, "error": type(e).__name__ + ": " + str(e),
+                             "trace": tb[-900:]}, status=200)   # 200 → клиент покажет причину
+
+
+def _do_locate(raw: bytes):
     import numpy as np  # noqa
     import match_align
     import w2v_align
@@ -67,18 +78,23 @@ def live_locate(request):
         wav = os.path.join(d, "a.wav")
         with open(src, "wb") as f:
             f.write(raw)
-        # последние _TAIL_SEC с (свежий контекст, ограничение латентности) → wav 16кГц моно
-        cmd = ["ffmpeg", "-nostdin", "-y", "-sseof", f"-{_TAIL_SEC}", "-i", src,
-               "-ar", "16000", "-ac", "1", wav]
-        r = subprocess.run(cmd, capture_output=True)
-        if r.returncode != 0 or not os.path.exists(wav):   # -sseof не сработал (аудио короче) → без него
-            r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-i", src, "-ar", "16000", "-ac", "1", wav],
-                               capture_output=True)
-        if r.returncode != 0 or not os.path.exists(wav):
-            return JsonResponse({"error": "ffmpeg", "detail": r.stderr.decode("utf-8", "ignore")[-500:]},
-                                status=500)
+        # последние _TAIL_SEC с (свежий контекст, ограничение латентности) → wav 16кГц моно.
+        # -sseof на НЕЗАВЕРШЁННОМ webm с микрофона может дать битый/пустой файл → всегда пробуем и
+        # ПОЛНУЮ конвертацию, берём тот wav, что реально содержит аудио (по размеру).
+        wav2 = os.path.join(d, "b.wav")
+        subprocess.run(["ffmpeg", "-nostdin", "-y", "-sseof", f"-{_TAIL_SEC}", "-i", src,
+                        "-ar", "16000", "-ac", "1", wav], capture_output=True)
+        rf = subprocess.run(["ffmpeg", "-nostdin", "-y", "-i", src, "-ar", "16000", "-ac", "1", wav2],
+                            capture_output=True)
+        cand = [p for p in (wav, wav2) if os.path.exists(p) and os.path.getsize(p) > 4000]
+        if not cand:
+            return JsonResponse({"ok": True, "empty": True,
+                                 "detail": rf.stderr.decode("utf-8", "ignore")[-300:]})
+        use = min(cand, key=os.path.getsize)   # sseof-хвост если валиден, иначе полный
+        E, stride, _i2c, _c2i = w2v_align.emissions(use)
 
-        E, stride, _i2c, _c2i = w2v_align.emissions(wav)
+    if E is None or E.shape[0] < 3:
+        return JsonResponse({"ok": True, "empty": True})
 
     special = {ch2idx.get(t) for t in ("<pad>", "<s>", "</s>", "<unk>", "|", "-", "ـ")} - {None}
     dec = greedy_skeleton(E, idx2ch, special, stride_ms=stride)
