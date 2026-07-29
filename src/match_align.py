@@ -836,6 +836,8 @@ _LOC_LOST_MAX = int(os.environ.get("SYNC_LOC_LOST", "2") or 2)  # окон бе�
 _TRK_BACK = int(os.environ.get("SYNC_TRK_BACK", "40") or 40)      # корпус-окно назад от указателя (симв.)
 _TRK_AHEAD = int(os.environ.get("SYNC_TRK_AHEAD", "180") or 180)  # корпус-окно вперёд
 _TRK_MINBLK = int(os.environ.get("SYNC_TRK_MINBLK", "6") or 6)    # мин. matching-блок, чтобы двигать указатель
+_TRK_STALL = int(os.environ.get("SYNC_TRK_STALL", "4") or 4)      # тиков без движения → форвард-восстановление
+_TRK_WIDEFWD = int(os.environ.get("SYNC_TRK_WIDEFWD", "600") or 600)  # ширина форвард-поиска при застревании
 
 
 def locate(dec_window: str, index, prior_fa: int | None = None,
@@ -932,7 +934,7 @@ class SegmentTracker:
     find_segments (в порядке чтения)."""
 
     def __init__(self, index, verses, back: int = _TRK_BACK, ahead: int = _TRK_AHEAD,
-                 minblk: int = _TRK_MINBLK):
+                 minblk: int = _TRK_MINBLK, stall: int = _TRK_STALL, widefwd: int = _TRK_WIDEFWD):
         Cs, char2fa, kidx, flat_ayahs, fa_skel = index
         fa2i = {fa: i for i, fa in enumerate(flat_ayahs)}
         skels, sa = [], []
@@ -949,7 +951,15 @@ class SegmentTracker:
         self.back = back
         self.ahead = ahead
         self.minblk = minblk
+        self.stall_max = stall
+        self.widefwd = widefwd
         self.p = 0
+        self._stall = 0
+
+    def _match_end(self, dec_tail, lo, hi):
+        sm = difflib.SequenceMatcher(None, dec_tail, self.M[lo:hi], autojunk=False)
+        blocks = [b for b in sm.get_matching_blocks() if b.size >= self.minblk]
+        return (lo + blocks[-1].b + blocks[-1].size) if blocks else None
 
     def feed(self, dec_tail: str) -> dict | None:
         """Обработать хвост декода; вернуть текущее {surah, ayah} (или None, если пассаж пуст)."""
@@ -957,10 +967,17 @@ class SegmentTracker:
             return None
         lo = max(0, self.p - self.back)
         hi = min(len(self.M), self.p + self.ahead)
-        sm = difflib.SequenceMatcher(None, dec_tail, self.M[lo:hi], autojunk=False)
-        blocks = [b for b in sm.get_matching_blocks() if b.size >= self.minblk]
-        if blocks:
-            last = blocks[-1]
-            self.p = lo + last.b + last.size    # указатель на конец последнего matching-блока
+        newp = self._match_end(dec_tail, lo, hi)
+        if newp is not None and newp > self.p:
+            self.p = newp
+            self._stall = 0
+        else:
+            self._stall += 1
+            if self._stall >= self.stall_max:   # застряли → шире, но ТОЛЬКО ВПЕРЁД (монотонно, внутри
+                hi2 = min(len(self.M), self.p + self.widefwd)   # пассажа → не телепорт в чужую суру)
+                fwd = self._match_end(dec_tail, self.p, hi2)
+                if fwd is not None and fwd > self.p:
+                    self.p = fwd
+                self._stall = 0
         s, a = self.sa[min(self.p, len(self.sa) - 1)]
         return {"surah": s, "ayah": a}
