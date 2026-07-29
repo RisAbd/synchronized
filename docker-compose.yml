@@ -99,3 +99,33 @@ services:
               capabilities: [gpu]
     depends_on:
       redis: {condition: service_started}
+
+  # Live-демо WI (микрофон → место в Коране в реальном времени): отдельный GPU-веб на :8010,
+  # наружу через ngrok. НЕ трогает web (:8000 занят чужим проектом). Тот же образ/код/модели.
+  live:
+    build:
+      context: .
+      dockerfile: service/Dockerfile
+    restart: unless-stopped
+    user: "${SYNC_UID:-1000}:${SYNC_GID:-1000}"
+    environment: *appenv
+    command: sh -c "python manage.py runserver 0.0.0.0:8010"
+    volumes:
+      - ./service:/app/service
+      - ./src:/app/src
+      - ./data:/app/data:ro
+      - ./media:/app/media
+      - ./work:/app/work
+      - ./cache:/app/.cache
+      - ./creds:/app/creds:ro
+    ports:
+      - "8010:8010"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      redis: {condition: service_started}

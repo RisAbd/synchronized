@@ -1,8 +1,10 @@
 from django.urls import path
 
 from . import views
+from . import live_views
 
 urlpatterns = [
+    path("live/locate", live_views.live_locate, name="live_locate"),
     path("", views.index, name="index"),
     path("add", views.add, name="add"),
     path("r/<int:pk>/run", views.run, name="run"),

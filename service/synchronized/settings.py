@@ -133,3 +133,7 @@ GSTT_CACHE_DIR = os.environ.get(
 GOOGLE_APPLICATION_CREDENTIALS = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
 GSTT_BUCKET = os.environ.get("SYNC_GSTT_BUCKET", "")
 GSTT_LIVE = os.environ.get("SYNC_GSTT_LIVE", "1") != "0"
+
+# Live-демо WI: аудио-блоб с микрофона может расти до нескольких МБ за запись → поднимаем лимит
+# тела запроса (дефолт Django 2.5МБ). Только для этого демо-эндпоинта важно; DEBUG-сервер.
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get("SYNC_MAX_UPLOAD", str(64 * 1024 * 1024)))

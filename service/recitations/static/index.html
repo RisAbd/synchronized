@@ -88,6 +88,7 @@
     <form class="search" onsubmit="return false">
       <input id="q" placeholder="Поиск: название, чтец, ссылка, сура…" autocomplete="off">
     </form>
+    <button type="button" class="add-btn" id="openLive" title="Живой поиск места по микрофону">🎤 Live</button>
     <button type="button" class="add-btn" id="openAdd">＋ Добавить</button>
   </div>
 
@@ -113,6 +114,25 @@
       </fieldset>
       <button type="submit">Добавить</button>
     </form>
+  </div>
+</div>
+
+<div class="modal" id="liveModal">
+  <div class="sheet">
+    <div class="mhead">
+      <h2>🎤 Live-поиск места</h2>
+      <button type="button" class="mclose" id="closeLive" title="закрыть">✕</button>
+    </div>
+    <p class="lead" style="margin:.2em 0 1em">Нажми «Слушать», читай вслух — сервис на лету
+      распознаёт и находит место в Коране. Тайминги здесь не важны, важно быстрое нахождение.</p>
+    <div class="row" style="align-items:center;gap:1em">
+      <button type="button" id="liveBtn" class="add-btn">▶ Слушать</button>
+      <span id="liveState" style="color:#9aa">микрофон выключен</span>
+    </div>
+    <div id="liveFound" style="margin-top:1em;font-size:1.05em"></div>
+    <div id="liveText" dir="rtl" lang="ar"
+         style="margin-top:.8em;line-height:2.2;font-size:1.6em;font-family:'Amiri','Scheherazade New',serif"></div>
+    <div id="liveDbg" style="margin-top:.8em;color:#889;font-size:.8em;direction:ltr"></div>
   </div>
 </div>
 
@@ -328,6 +348,69 @@ document.getElementById('openAdd').onclick = () => { modal.classList.add('open')
 document.getElementById('closeAdd').onclick = () => modal.classList.remove('open');
 modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('open'); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') modal.classList.remove('open'); });
+
+// ── 🎤 Live-поиск места (WI): микрофон → /live/locate (эмиссии+find_segments+SegmentTracker) ──
+const liveModal = document.getElementById('liveModal');
+const liveBtn = document.getElementById('liveBtn');
+const liveState = document.getElementById('liveState');
+const liveFound = document.getElementById('liveFound');
+const liveText = document.getElementById('liveText');
+const liveDbg = document.getElementById('liveDbg');
+let liveRec = null, liveChunks = [], liveTimer = null, liveBusy = false, liveOn = false;
+
+document.getElementById('openLive').onclick = () => liveModal.classList.add('open');
+document.getElementById('closeLive').onclick = () => { stopLive(); liveModal.classList.remove('open'); };
+liveModal.addEventListener('click', e => { if (e.target === liveModal) { stopLive(); liveModal.classList.remove('open'); } });
+
+function stopLive() {
+  liveOn = false;
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  if (liveRec && liveRec.state !== 'inactive') { try { liveRec.stop(); } catch (e) {} }
+  if (liveRec && liveRec.stream) liveRec.stream.getTracks().forEach(t => t.stop());
+  liveRec = null; liveChunks = [];
+  liveBtn.textContent = '▶ Слушать'; liveState.textContent = 'микрофон выключен';
+}
+
+async function startLive() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    liveChunks = [];
+    liveRec = new MediaRecorder(stream);
+    liveRec.ondataavailable = e => { if (e.data && e.data.size) liveChunks.push(e.data); };
+    liveRec.start(1000);                    // копим блобы по 1с
+    liveOn = true;
+    liveBtn.textContent = '■ Стоп'; liveState.textContent = 'слушаю…';
+    liveTimer = setInterval(sendLive, 2500);  // раз в 2.5с отправляем накопленное
+  } catch (e) {
+    liveState.textContent = 'нет доступа к микрофону: ' + e.message;
+  }
+}
+
+liveBtn.onclick = () => { if (liveOn) stopLive(); else startLive(); };
+
+async function sendLive() {
+  if (liveBusy || !liveChunks.length) return;
+  liveBusy = true;
+  try {
+    const blob = new Blob(liveChunks, { type: liveRec.mimeType || 'audio/webm' });
+    const t0 = performance.now();
+    const r = await fetch(API + '/live/locate', { method: 'POST', body: blob });
+    const d = await r.json();
+    const ms = Math.round(performance.now() - t0);
+    if (d.empty) { liveState.textContent = 'слушаю… (пока тихо)'; }
+    else if (d.found) {
+      liveState.textContent = 'слушаю…  найдено за ' + ms + 'мс';
+      const seg = d.segments.map(s => 'сура ' + s.surah + ':' + s.ayah_start + '–' + s.ayah_end).join(' · ');
+      const cur = d.current ? (d.current.surah + ':' + d.current.ayah) : '—';
+      liveFound.innerHTML = '<b>' + seg + '</b> &nbsp; текущий аят: <b>' + cur + '</b>';
+      liveText.innerHTML = (d.ayat || []).map(a =>
+        '<span style="' + (a.current ? 'background:#3a5;color:#fff;border-radius:6px;padding:0 .2em' : '') + '">'
+        + a.text + '</span>').join(' ﴿﴾ ');
+      liveDbg.textContent = 'декод: …' + (d.decode_tail || '');
+    } else { liveState.textContent = 'слушаю… (место не найдено)'; liveDbg.textContent = 'декод: …' + (d.decode_tail || ''); }
+  } catch (e) { liveState.textContent = 'ошибка связи: ' + e.message; }
+  finally { liveBusy = false; }
+}
 
 // начальный поиск из ?q= (совместимость со старой ссылкой)
 if (QS.get('q')) qEl.value = QS.get('q');
