@@ -46,11 +46,14 @@
   live-сервис (wav2vec2 ~1.5ГБ) + large-v3 (~4ГБ) не влезают → при OOM **освобождать VRAM**
   `docker compose restart live` (не CPU!). Его сообщения — приоритет, live можно ронять. Перед
   транскрипцией: `nvidia-smi`; если VRAM>500МБ → рестарт live. TTS (Silero) тоже на GPU.
-- **⚠️ ОЗВУЧКА владельцу (memory [[owner-audio-sendvoice]]):** отчёты/объяснения — ГОЛОСОМ через
-  Telegram `sendVoice` (пузырь!), НЕ `sendfile`/документом (не проигрываются, «где голос»). Голос —
-  **мужской** (aidar/eugene; женские baya/kseniya/xenia). Длинный текст режется на батчи (Silero лимит
-  ~1000 симв, `work/tts_msg.py`). Каждый раз прикладывать ссылку ngrok в caption. Токен бота 2 —
-  `~/.claude/remote-control-bot/.env` `TELEGRAM_BOT_TOKEN_2`.
+- **⚠️ ОЗВУЧКА владельцу (memory [[owner-audio-sendvoice]]) — ГОТОВ СКИЛЛ `tts-voice` (tg_5748):**
+  отчёты/объяснения — ГОЛОСОМ через Telegram `sendVoice` (пузырь!), НЕ `sendfile`/документом.
+  Переиспользуемый скилл `~/.claude/skills/tts-voice/` (Silero v4_ru на GPU → .ogg/opus → sendVoice,
+  батчи для длинного текста внутри): `/usr/bin/python3.12 ~/.claude/skills/tts-voice/tts.py --text "…"
+  --send-telegram me --bot 2 --caption "… ngrok: <url>"`. Голос **мужской**, дефолт **`eugene`**
+  (tg_5749); женские baya/kseniya/xenia. Хост-python3.12 (torch+cuda), omegaconf в `pydeps` скилла.
+  Каждый раз прикладывать ngrok в caption. Токен бота 2 — `~/.claude/remote-control-bot/.env`
+  `TELEGRAM_BOT_TOKEN_2`. (Старый разовый `work/tts_msg.py` заменён скиллом.)
 
 - **Сессия 19-ПРОД6 (28.07): АВТО-СТРУКТУРА ПОВТОРОВ (оракул) ВСТРОЕНА + все 9 на github.io прогоном
   `w2vo` (BACKLOG WG).** Владелец снял паузу («фигачь до талова, не останавливайся, сам остановлю»).
