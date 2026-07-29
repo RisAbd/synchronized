@@ -405,19 +405,30 @@ async function startLive() {
       while (pcmLen > cap && pcmParts.length > 1) { pcmLen -= pcmParts.shift().length; }
     };
     liveSrc.connect(liveProc); liveProc.connect(liveCtx.destination);
-    liveOn = true;
+    liveOn = true; liveMode = ''; candSig = '';
     liveBtn.textContent = '■ Стоп'; liveState.textContent = 'подключаюсь…';
-    // WebSocket: один коннект, кадры PCM потоком
-    liveWs = new WebSocket(wsURL());
-    liveWs.binaryType = 'arraybuffer';
-    liveWs.onopen = () => { liveState.textContent = 'слушаю… (набираю первые секунды)';
-                            liveTimer = setInterval(flushPcm, SEND_MS); };
-    liveWs.onmessage = ev => { try { handleMsg(JSON.parse(ev.data)); } catch (e) {} };
-    liveWs.onerror = () => { liveState.textContent = 'ошибка вебсокета (проверь соединение)'; };
-    liveWs.onclose = () => { if (liveOn) liveState.textContent = 'соединение закрыто'; };
+    openWs();
   } catch (e) {
     liveState.textContent = 'нет доступа к микрофону: ' + e.message;
   }
+}
+
+function openWs() {
+  liveWs = new WebSocket(wsURL());
+  liveWs.binaryType = 'arraybuffer';
+  liveWs.onopen = () => {
+    liveMode = ''; candSig = '';
+    liveState.textContent = 'слушаю… (набираю первые секунды)';
+    if (!liveTimer) liveTimer = setInterval(flushPcm, SEND_MS);
+  };
+  liveWs.onmessage = ev => { try { handleMsg(JSON.parse(ev.data)); } catch (e) {} };
+  liveWs.onerror = () => {};
+  liveWs.onclose = () => {
+    if (liveOn) {                                        // обрыв во время сеанса → авто-реконнект (не зависаем)
+      liveState.textContent = 'переподключаюсь…';
+      setTimeout(() => { if (liveOn) openWs(); }, 600);
+    }
+  };
 }
 
 liveBtn.onclick = () => { if (liveOn) stopLive(); else startLive(); };
@@ -476,18 +487,23 @@ function renderPlace(d, provisional) {
   liveText.innerHTML = parts.join('');
 }
 
+let candSig = '';                                        // сигнатура списка — не перерисовывать без изменений (без мигания)
 function renderCandidates(cands, leaderLabel) {
   // список мест-кандидатов (владелец tg_5516: всегда список, тап повышает confidence)
-  if (!cands || !cands.length) { liveDbg2.innerHTML = ''; return; }
+  if (!cands || !cands.length) return;
+  const sig = leaderLabel + '|' + cands.map(c => c.surah + ':' + c.ayah).join(',');
+  if (sig === candSig) return;                           // тот же набор/лидер → не трогаем DOM
+  candSig = sig;
+  const fam = localStorage.getItem('sync.arabfont') || "'Amiri','Scheherazade New',serif";
   liveDbg2.innerHTML = '<div style="font-size:.72em;opacity:.7;margin:.5em 0 .2em">кандидаты (тапни, если знаешь верное):</div>'
-    + cands.map((c, i) => {
+    + cands.map((c) => {
       const key = c.surah + ':' + c.ayah;
       const lead = (leaderLabel === key);
       const pct = Math.round((c.confidence || 0) * 100);
       return '<div class="lcand" data-k="' + key + '" style="cursor:pointer;padding:.35em .5em;margin:.2em 0;border-radius:8px;'
         + 'border:1px solid ' + (lead ? '#3a5' : 'var(--line)') + ';background:' + (lead ? 'rgba(51,170,85,.12)' : 'transparent') + '">'
         + '<div style="display:flex;justify-content:space-between;font-size:.8em;opacity:.8"><b>' + key + '</b><span>' + pct + '%</span></div>'
-        + '<div dir="rtl" lang="ar" style="font-size:1.05em;line-height:1.7;font-family:\'Amiri\',serif">' + c.text + '</div>'
+        + '<div dir="rtl" lang="ar" style="font-size:1.15em;line-height:1.7;font-family:' + fam + '">' + c.text + '</div>'
         + '</div>';
     }).join('');
   liveDbg2.querySelectorAll('.lcand').forEach(el => el.onclick = () => boostCand(el.dataset.k));
@@ -505,17 +521,18 @@ function flushPcm() {
   liveWs.send(int16.buffer);                             // бинарный кадр PCM (Int16LE 16кГц)
 }
 
+let liveMode = '';                                       // '' | 'scan' | 'track' — чтобы не мигать
 function handleMsg(d) {
   if (d.error) { liveState.textContent = 'ошибка сервера: ' + d.error; liveDbg.textContent = (d.trace || ''); return; }
   if (d.phase === 'scan') {
     const cands = d.candidates || [];
     liveState.textContent = cands.length ? 'ищу место… (уточняется по мере чтения)' : 'слушаю… читай дальше';
-    liveText.innerHTML = ''; liveFound.innerHTML = '';
-    renderCandidates(cands, cands.length ? (cands[0].surah + ':' + cands[0].ayah) : '');
+    if (liveMode !== 'scan') { liveText.innerHTML = ''; liveFound.innerHTML = ''; liveMode = 'scan'; }
+    if (cands.length) renderCandidates(cands, cands[0].surah + ':' + cands[0].ayah);  // пусто → НЕ чистим (без мигания)
   } else if (d.phase === 'track' && d.current) {
     liveState.textContent = 'веду за тобой';
+    if (liveMode !== 'track') { liveDbg2.innerHTML = ''; liveMode = 'track'; }        // список кандидатов убрать один раз
     renderPlace(d, false);
-    renderCandidates(d.candidates || [], d.current.surah + ':' + d.current.ayah);
   }
   if (!d.skip) liveDbg.textContent = 'фаза ' + (d.phase || '?') + ' · буфер ' + (d.buf_sec || 0) + 'с · тик#' + (d.n || 0);
 }

@@ -111,7 +111,7 @@ services:
     environment: *appenv
     # uvicorn (ASGI) вместо runserver — нужен websocket /live/ws (стриминг WI). uvicorn+websockets
     # в ./work/pydeps (pip --target). HTTP-часть Django работает как прежде.
-    command: sh -c "PYTHONPATH=/app/work/pydeps:/app/src:/app/service python -m uvicorn synchronized.asgi:application --host 0.0.0.0 --port 8010 --ws websockets --log-level warning"
+    command: sh -c "PYTHONPATH=/app/work/pydeps:/app/src:/app/service python -m uvicorn synchronized.asgi:application --host 0.0.0.0 --port 8010 --ws websockets --ws-ping-interval 0 --ws-ping-timeout 300 --log-level warning"
     volumes:
       - ./service:/app/service
       - ./src:/app/src

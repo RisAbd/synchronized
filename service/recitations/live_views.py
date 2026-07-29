@@ -231,22 +231,30 @@ def _apply_boost(st, boost):
                         for c in cands]})
 
 
-def _process_pcm(st, pcm):
-    """ОБЩЕЕ ядро (HTTP live_stream + WS live_ws): дописать pcm-float в буфер, scan/track, вернуть dict.
-    pcm — np.float32 моно 16кГц. Возвращает dict-ответ (НЕ HttpResponse)."""
+def _append_pcm(st, pcm):
+    """Дёшево (в event-loop): дописать pcm-float в роллинг-буфер + n++. Тяжёлого НЕТ."""
     import numpy as np
+    st["buf"] = np.concatenate([st["buf"], pcm])[-int(_BUF_CAP * _SR):]
+    st["n"] += 1
+
+
+def _process_pcm(st, pcm):
+    """HTTP-путь (фолбэк): append + гейт _PROC_STEP + анализ. WS-путь append/анализ вызывает отдельно."""
+    _append_pcm(st, pcm)
+    new_since = len(st["buf"]) - st.get("last_proc", 0)
+    if new_since < int(_PROC_STEP * _SR) and st["n"] > 1:
+        return _build_reply(st, {"skip": True})
+    return _analyze(st)
+
+
+def _analyze(st):
+    """ТЯЖЁЛОЕ ядро (GPU-декод + scan/track) на ТЕКУЩЕМ буфере — БЕЗ append. В WS зовётся в executor
+    single-flight (один разбор за раз на самом свежем буфере) → очередь не растёт, нет бэклога/фриза."""
     import match_align
     from match_align import find_segments, SegmentTracker
     q = _quran(); index = _index(); idx2ch, ch2idx = _vocab()
     try:
-        st["buf"] = np.concatenate([st["buf"], pcm])[-int(_BUF_CAP * _SR):]
-        st["n"] += 1
-        # развязка приём/обработка: тяжёлый декод не чаще _PROC_STEP с нового аудио (иначе быстрый тик)
-        new_since = len(st["buf"]) - st.get("last_proc", 0)
-        if new_since < int(_PROC_STEP * _SR) and st["n"] > 1:
-            return _build_reply(st, {"skip": True})
         st["last_proc"] = len(st["buf"])
-
         if st["phase"] == "scan":
             E, dec = _decode_window(st["buf"], _TRACK_WIN, idx2ch, ch2idx)
             if dec:
@@ -446,14 +454,38 @@ def _do_locate(raw: bytes):
 # Вебсокет — ОДИН постоянный коннект: кадры PCM текут потоком, сервер шлёт JSON-обновления, нет
 # пер-запросного лимита. Тяжёлый декод (GPU, блокирующий) гоняем в threadpool, чтобы не держать loop.
 async def live_ws(scope, receive, send):
+    """SINGLE-FLIGHT: приём кадров дёшево в loop (_append_pcm), тяжёлый _analyze — ОДИН за раз в
+    executor на самом свежем буфере (кадры между разборами просто продлевают буфер) → очередь НЕ
+    растёт, нет бэклога/фриза. Плюс: пишем СЫРОЙ поток владельца в файл (дебаг на его аудио) + лог
+    подключений (видно в мониторе, когда он стримит)."""
     import asyncio
     import json as _json
+    import numpy as np
     from urllib.parse import parse_qs
     qs = parse_qs((scope.get("query_string") or b"").decode())
     sid = (qs.get("sid", ["_"])[0]) or "_"
-    st = _session(sid, reset=True)                       # каждый коннект = свежая сессия
+    st = _session(sid, reset=True)
     loop = asyncio.get_event_loop()
+    # запись сырого потока (Int16 16кГц) — конвертнуть в wav: ffmpeg -f s16le -ar 16000 -ac 1 -i <f> out.wav
+    cap_path = os.path.join(os.environ.get("SYNC_WORK", "/app/work"), f"live_cap_{sid}.pcm")
+    try:
+        cap = open(cap_path, "wb")
+    except Exception:
+        cap = None
+    print(f"LIVE_WS connect sid={sid} peer={scope.get('client')} → запись {cap_path}", flush=True)
     await send({"type": "websocket.accept"})
+
+    proc = {"task": None, "dirty": False, "frames": 0}
+
+    async def pump():
+        while proc["dirty"]:
+            proc["dirty"] = False
+            res = await loop.run_in_executor(None, _analyze, st)     # GPU вне loop, single-flight
+            try:
+                await send({"type": "websocket.send", "text": _json.dumps(res)})
+            except Exception:
+                return
+
     try:
         while True:
             ev = await receive()
@@ -466,11 +498,16 @@ async def live_ws(scope, receive, send):
                 raw = ev["bytes"]
                 if len(raw) < 320:
                     continue
-                pcm = _pcm_from_raw(raw, True)
-                if pcm is None:
-                    continue
-                res = await loop.run_in_executor(None, _process_pcm, st, pcm)  # GPU вне loop
-                await send({"type": "websocket.send", "text": _json.dumps(res)})
+                if cap:
+                    try: cap.write(raw)
+                    except Exception: pass
+                proc["frames"] += 1
+                if proc["frames"] % 50 == 0:
+                    print(f"LIVE_WS sid={sid} frames={proc['frames']} buf={len(st['buf'])/_SR:.1f}с phase={st['phase']}", flush=True)
+                _append_pcm(st, np.frombuffer(raw, dtype="<i2").astype("float32") / 32768.0)
+                proc["dirty"] = True
+                if proc["task"] is None or proc["task"].done():
+                    proc["task"] = asyncio.create_task(pump())       # запустить разбор, если не идёт
             elif ev.get("text") is not None:             # управление: reset / boost:s:a
                 msg = ev["text"].strip()
                 if msg == "reset":
@@ -478,13 +515,14 @@ async def live_ws(scope, receive, send):
                 elif msg.startswith("boost:"):
                     res = await loop.run_in_executor(None, _apply_boost, st, msg[6:])
                     await send({"type": "websocket.send", "text": _json.dumps(res)})
-    except Exception as e:
+    except Exception:
         import traceback
         print("LIVE_WS_ERROR:\n" + traceback.format_exc(), flush=True)
-        try:
-            await send({"type": "websocket.send", "text": _json.dumps({"ok": False, "error": str(e)})})
-        except Exception:
-            pass
+    finally:
+        if cap:
+            try: cap.close()
+            except Exception: pass
+        print(f"LIVE_WS disconnect sid={sid} frames={proc['frames']}", flush=True)
     try:
         await send({"type": "websocket.close"})
     except Exception:
