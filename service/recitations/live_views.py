@@ -56,30 +56,53 @@ def live_locate(request):
         return _sticky(sid, {"ok": True, "empty": True})
 
     try:
-        res = _do_locate(raw)
-        # липкость: если сейчас ничего не нашли, но раньше находили — вернём прошлое (антимерцание)
         import json as _json
+        res = _do_locate(raw)
         payload = _json.loads(res.content)
-        if payload.get("found"):
-            _SESS[sid] = payload
-            return res
-        return _sticky(sid, payload)
+        return JsonResponse(_continuity(sid, payload))
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
         print("LIVE_LOCATE_ERROR:\n" + tb, flush=True)   # видно в логах (монитор)
-        return _sticky(sid, {"ok": False, "error": type(e).__name__ + ": " + str(e),
-                             "trace": tb[-900:]})
+        return JsonResponse(_continuity(sid, {"ok": False,
+                            "error": type(e).__name__ + ": " + str(e), "trace": tb[-900:]}))
 
 
-def _sticky(sid, cur):
-    """Вернуть текущий ответ, либо последний НАЙДЕННЫЙ для сессии с пометкой stale (если сейчас пусто)."""
-    last = _SESS.get(sid)
-    if not cur.get("found") and last:
-        out = dict(last)
-        out["stale"] = True
-        return JsonResponse(out)
-    return JsonResponse(cur)
+_SWITCH_CONFIRM = int(os.environ.get("SYNC_LIVE_CONFIRM", "2"))   # окон подряд для смены суры
+
+
+def _primary_surah(p):
+    if p.get("current"):
+        return p["current"]["surah"]
+    segs = p.get("segments") or []
+    return segs[0]["surah"] if segs else None
+
+
+def _continuity(sid, cur):
+    """Контекст-aware удержание позиции (директива владельца: не «тупо первый кандидат»).
+    • не нашли сейчас → держим последний найденный (антимерцание, stale);
+    • нашли ТУ ЖЕ суру → принимаем;
+    • нашли ДРУГУЮ суру → это либо реальный переход, либо разовый ложный скачок короткого окна →
+      принимаем ТОЛЬКО если подтвердилось _SWITCH_CONFIRM окон подряд; иначе держим прошлое."""
+    sess = _SESS.setdefault(sid, {"last": None, "pk": None, "pn": 0})
+    last = sess["last"]
+    if not cur.get("found"):
+        if last:
+            out = dict(last); out["stale"] = True; return out
+        return cur
+    cs = _primary_surah(cur)
+    if last is None or _primary_surah(last) == cs:
+        sess["last"] = cur; sess["pk"] = None; sess["pn"] = 0
+        return cur
+    # другая сура — требуем подтверждения (континуитет-гейт против ложных скачков короткого окна)
+    if sess["pk"] == cs:
+        sess["pn"] += 1
+    else:
+        sess["pk"] = cs; sess["pn"] = 1
+    if sess["pn"] >= _SWITCH_CONFIRM:
+        sess["last"] = cur; sess["pk"] = None; sess["pn"] = 0
+        return cur
+    out = dict(last); out["stale"] = True; return out   # разовый скачок → держим прошлое
 
 
 def _do_locate(raw: bytes):
