@@ -464,7 +464,9 @@ async def live_ws(scope, receive, send):
     from urllib.parse import parse_qs
     qs = parse_qs((scope.get("query_string") or b"").decode())
     sid = (qs.get("sid", ["_"])[0]) or "_"
-    st = _session(sid, reset=True)
+    # reset ТОЛЬКО если явно (?reset=1) или сессии ещё нет → при авто-реконнекте позиция СОХРАНЯЕТСЯ
+    # (обрыв ngrok не сбрасывает в ре-скан → нет прыжков «с нуля», владелец tg_5704/5708)
+    st = _session(sid, reset=bool(qs.get("reset")) or sid not in _STREAM)
     loop = asyncio.get_event_loop()
     # запись сырого потока (Int16 16кГц) — конвертнуть в wav: ffmpeg -f s16le -ar 16000 -ac 1 -i <f> out.wav
     cap_path = os.path.join(os.environ.get("SYNC_WORK", "/app/work"), f"live_cap_{sid}.pcm")

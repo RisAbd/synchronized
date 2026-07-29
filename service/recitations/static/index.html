@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>synchronized</title>
 <link rel="icon" href="data:,">
+<!-- арабские шрифты (как в плеере) — без них Live рендерил системным serif -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Amiri+Quran&family=Lateef&family=Noto+Naskh+Arabic:wght@400;700&family=Scheherazade+New:wght@400;700&display=swap" rel="stylesheet">
 <style>
   :root { color-scheme: light dark;
     --bg:#faf7f0; --fg:#201d16; --muted:#8f8674; --line:rgba(120,110,90,.18);
@@ -407,14 +411,14 @@ async function startLive() {
     liveSrc.connect(liveProc); liveProc.connect(liveCtx.destination);
     liveOn = true; liveMode = ''; candSig = '';
     liveBtn.textContent = '■ Стоп'; liveState.textContent = 'подключаюсь…';
-    openWs();
+    openWs(true);                                        // старт сеанса → reset
   } catch (e) {
     liveState.textContent = 'нет доступа к микрофону: ' + e.message;
   }
 }
 
-function openWs() {
-  liveWs = new WebSocket(wsURL());
+function openWs(reset) {
+  liveWs = new WebSocket(wsURL() + (reset ? '&reset=1' : ''));  // реконнект БЕЗ reset → позиция цела
   liveWs.binaryType = 'arraybuffer';
   liveWs.onopen = () => {
     liveMode = ''; candSig = '';
@@ -424,9 +428,9 @@ function openWs() {
   liveWs.onmessage = ev => { try { handleMsg(JSON.parse(ev.data)); } catch (e) {} };
   liveWs.onerror = () => {};
   liveWs.onclose = () => {
-    if (liveOn) {                                        // обрыв во время сеанса → авто-реконнект (не зависаем)
+    if (liveOn) {                                        // обрыв во время сеанса → авто-реконнект БЕЗ reset
       liveState.textContent = 'переподключаюсь…';
-      setTimeout(() => { if (liveOn) openWs(); }, 600);
+      setTimeout(() => { if (liveOn) openWs(false); }, 600);
     }
   };
 }
@@ -456,22 +460,22 @@ function toInt16_16k(f32, srcSr) {                       // даунсемпл s
 }
 
 function applyLiveFont() {
-  // подцепляем настройки шрифта из плеера (владелец tg_5587: «пусть мои настройки подцепляются»)
-  const fam = localStorage.getItem('sync.arabfont');
-  const size = parseFloat(localStorage.getItem('sync.arabsize'));
-  if (fam) { liveText.style.fontFamily = fam; }
-  if (size) { liveText.style.fontSize = size.toFixed(2) + 'rem'; }
+  // как в плеере: тот же шрифт и размер (localStorage), дефолты — плеерные (Scheherazade New, 2.2rem)
+  const fam = localStorage.getItem('sync.arabfont') || "'Scheherazade New','Amiri','Noto Naskh Arabic',serif";
+  const size = parseFloat(localStorage.getItem('sync.arabsize')) || 2.2;
+  liveText.style.fontFamily = fam;
+  liveText.style.fontSize = size.toFixed(2) + 'rem';
 }
 
 function renderPlace(d, provisional) {
   applyLiveFont();
-  // текущий аят КРУПНО с пословной подсветкой (word_frac), контекст — мелко и бледно.
-  // TRACK: prev/cur/next (3 аята), текущий крупно + пословная подсветка
+  // как в плеере: ОДИН размер у всех аятов, текущий отличается только ПОДСВЕТКОЙ (не крупнее).
+  // prev/cur/next (3 аята). Текущий — пословная подсветка по word_frac.
   liveFound.innerHTML = '<b>' + d.current.surah + ':' + d.current.ayah + '</b>';
   const wf = (d.word_frac == null) ? -1 : d.word_frac;
   const parts = (d.ayat || []).map(a => {
     if (!a.current) {
-      return '<div style="opacity:.4;font-size:.6em;line-height:1.6;margin:.1em 0">' + a.text + '</div>';
+      return '<div style="opacity:.4;line-height:1.9;margin:.12em 0">' + a.text + '</div>';
     }
     let inner = a.text;
     if (wf >= 0) {
@@ -481,7 +485,8 @@ function renderPlace(d, provisional) {
         '<span style="' + (i === wi ? 'background:#3a5;color:#fff;border-radius:6px;padding:0 .15em' : '') + '">' + w + '</span>'
       ).join(' ');
     }
-    return '<div style="font-size:1.2em;line-height:2;margin:.2em 0">' + inner + '</div>';
+    // текущий — тот же размер, отличается фоном/жирностью (как подсветка активного аята в плеере)
+    return '<div style="line-height:1.9;margin:.12em 0;font-weight:700">' + inner + '</div>';
   });
   liveText.style.textAlign = 'center';
   liveText.innerHTML = parts.join('');
