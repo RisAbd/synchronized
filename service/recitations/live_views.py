@@ -293,7 +293,16 @@ def _analyze(st):
             if conf >= _LOCK_CONF and len(st["buf"]) >= int(_LOCK_MIN * _SR):
                 E2, dec2 = _decode_window(st["buf"], _COLD_WIN, idx2ch, ch2idx)
                 verses = find_segments(E2, q, idx2ch, ch2idx, index=index) if E2 is not None else None
-                if verses:
+                # ГЕЙТ КАЧЕСТВА ЛОКА: лочимся ТОЛЬКО если пассаж реально объясняет декод (ratio≥порога).
+                # Ранний декод (басмала-интро/мелодика) шумный → find_segments даёт МУСОРНУЮ суру с
+                # низким ratio → НЕ лочимся, ждём в scan (кандидаты всё равно показываются). Так
+                # чинится холодный мимо-лок в КОРНЕ: rec9 ждёт Фатиху (мусор 0.25-0.42 отвергнут,
+                # Фатиха 0.5+ принята); Ар-Рахман не встаёт в 29 на 6с (ждёт 55 к ~10с, ratio 0.8).
+                lock_ratio = _passage_ratio(index, verses, dec2) if verses else 0.0
+                if os.environ.get("SYNC_LIVE_DBG"):
+                    print(f"COLDLOCK n={st['n']} buf={len(st['buf'])/_SR:.1f}с v={verses[0] if verses else None}"
+                          f" ratio={lock_ratio:.2f} conf={conf:.2f}", flush=True)
+                if verses and lock_ratio >= _RELOC_RATIO_MIN:
                     st["verses"] = _build_corpus(index, verses)
                     st["trk"] = SegmentTracker(index, st["verses"])
                     st["phase"] = "track"; st["stall_reloc"] = 0
