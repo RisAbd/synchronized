@@ -361,12 +361,19 @@ const liveFound = document.getElementById('liveFound');
 const liveText = document.getElementById('liveText');
 const liveDbg = document.getElementById('liveDbg');
 const liveDbg2 = document.getElementById('liveDbg2');
-let liveOn = false, liveBusy = false, liveFirst = true;
+let liveOn = false, liveWs = null;
 let liveStream = null, liveCtx = null, liveSrc = null, liveProc = null, liveTimer = null;
 let pcmParts = [], pcmLen = 0;
-const SEND_MS = 100;                                     // как часто шлём накопленный PCM
+const SEND_MS = 150;                                     // как часто шлём кадр PCM в вебсокет
 const TARGET_SR = 16000;
 const LIVE_SID = Math.random().toString(36).slice(2);
+
+function wsURL() {
+  // вебсокет к тому же хосту (или ?api=): один постоянный коннект, кадры PCM потоком (нет ngrok-троттла)
+  let base = API;
+  if (!base) base = location.origin;
+  return base.replace(/^http/, 'ws') + '/live/ws?sid=' + LIVE_SID;
+}
 
 document.getElementById('openLive').onclick = () => liveModal.classList.add('open');
 document.getElementById('closeLive').onclick = () => { stopLive(); liveModal.classList.remove('open'); };
@@ -379,6 +386,7 @@ function stopLive() {
   if (liveSrc) { try { liveSrc.disconnect(); } catch (e) {} liveSrc = null; }
   if (liveCtx) { try { liveCtx.close(); } catch (e) {} liveCtx = null; }
   if (liveStream) liveStream.getTracks().forEach(t => t.stop());
+  if (liveWs) { try { liveWs.close(); } catch (e) {} liveWs = null; }
   liveStream = null; pcmParts = []; pcmLen = 0;
   liveBtn.textContent = '▶ Слушать'; liveState.textContent = 'микрофон выключен';
 }
@@ -393,14 +401,20 @@ async function startLive() {
       if (!liveOn) return;
       pcmParts.push(new Float32Array(e.inputBuffer.getChannelData(0)));  // копия сэмплов
       pcmLen += e.inputBuffer.length;
-      // кап бэклога: если сервер притормозил, не копим гигантский догоняющий кусок — держим ~последние 3с
-      const cap = liveCtx.sampleRate * 3;
+      const cap = liveCtx.sampleRate * 3;                // кап бэклога (держим ~последние 3с)
       while (pcmLen > cap && pcmParts.length > 1) { pcmLen -= pcmParts.shift().length; }
     };
     liveSrc.connect(liveProc); liveProc.connect(liveCtx.destination);
-    liveOn = true; liveFirst = true;
-    liveBtn.textContent = '■ Стоп'; liveState.textContent = 'слушаю… (набираю первые секунды)';
-    liveTimer = setInterval(flushPcm, SEND_MS);
+    liveOn = true;
+    liveBtn.textContent = '■ Стоп'; liveState.textContent = 'подключаюсь…';
+    // WebSocket: один коннект, кадры PCM потоком
+    liveWs = new WebSocket(wsURL());
+    liveWs.binaryType = 'arraybuffer';
+    liveWs.onopen = () => { liveState.textContent = 'слушаю… (набираю первые секунды)';
+                            liveTimer = setInterval(flushPcm, SEND_MS); };
+    liveWs.onmessage = ev => { try { handleMsg(JSON.parse(ev.data)); } catch (e) {} };
+    liveWs.onerror = () => { liveState.textContent = 'ошибка вебсокета (проверь соединение)'; };
+    liveWs.onclose = () => { if (liveOn) liveState.textContent = 'соединение закрыто'; };
   } catch (e) {
     liveState.textContent = 'нет доступа к микрофону: ' + e.message;
   }
@@ -430,7 +444,16 @@ function toInt16_16k(f32, srcSr) {                       // даунсемпл s
   return out;
 }
 
+function applyLiveFont() {
+  // подцепляем настройки шрифта из плеера (владелец tg_5587: «пусть мои настройки подцепляются»)
+  const fam = localStorage.getItem('sync.arabfont');
+  const size = parseFloat(localStorage.getItem('sync.arabsize'));
+  if (fam) { liveText.style.fontFamily = fam; }
+  if (size) { liveText.style.fontSize = size.toFixed(2) + 'rem'; }
+}
+
 function renderPlace(d, provisional) {
+  applyLiveFont();
   // текущий аят КРУПНО с пословной подсветкой (word_frac), контекст — мелко и бледно.
   // TRACK: prev/cur/next (3 аята), текущий крупно + пословная подсветка
   liveFound.innerHTML = '<b>' + d.current.surah + ':' + d.current.ayah + '</b>';
@@ -470,40 +493,31 @@ function renderCandidates(cands, leaderLabel) {
   liveDbg2.querySelectorAll('.lcand').forEach(el => el.onclick = () => boostCand(el.dataset.k));
 }
 
-async function boostCand(key) {
-  try { await fetch(API + '/live/stream?boost=' + key + '&sid=' + LIVE_SID, { method: 'POST', body: new Uint8Array(0) }); }
-  catch (e) {}
+function boostCand(key) {
+  if (liveWs && liveWs.readyState === 1) liveWs.send('boost:' + key);   // текст-управление по вебсокету
 }
 
-async function flushPcm() {
-  if (!liveOn || liveBusy || pcmLen === 0) return;
-  const srcSr = liveCtx.sampleRate;
-  const int16 = toInt16_16k(drainFloat(), srcSr);
-  if (int16.length < 160) return;                        // <10мс — пропускаем
-  liveBusy = true;
-  const reset = liveFirst; liveFirst = false;
-  try {
-    const t0 = performance.now();
-    const r = await fetch(API + '/live/stream?pcm=1&sid=' + LIVE_SID + (reset ? '&reset=1' : ''),
-                          { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' },
-                            body: int16.buffer });
-    const d = await r.json();
-    const ms = Math.round(performance.now() - t0);
-    if (d.error) { liveState.textContent = 'ошибка сервера: ' + d.error; liveDbg.textContent = (d.trace || ''); }
-    else if (d.phase === 'scan') {                         // мульти-кандидат: показываем список мест сразу
-      const cands = d.candidates || [];
-      liveState.textContent = cands.length ? 'ищу место… (уточняется по мере чтения)' : 'слушаю… читай дальше';
-      liveText.innerHTML = ''; liveFound.innerHTML = '';
-      renderCandidates(cands, cands.length ? (cands[0].surah + ':' + cands[0].ayah) : '');
-    }
-    else if (d.phase === 'track' && d.current) {
-      liveState.textContent = 'веду за тобой  (' + ms + 'мс)';
-      renderPlace(d, false);
-      renderCandidates(d.candidates || [], d.current.surah + ':' + d.current.ayah);
-    }
-    if (!d.skip) liveDbg.textContent = 'фаза ' + (d.phase || '?') + ' · буфер ' + (d.buf_sec || 0) + 'с · тик#' + (d.n || 0);
-  } catch (e) { liveState.textContent = 'ошибка связи: ' + e.message; }
-  finally { liveBusy = false; }
+function flushPcm() {
+  if (!liveOn || !liveWs || liveWs.readyState !== 1 || pcmLen === 0) return;
+  if (liveWs.bufferedAmount > 200000) return;            // бэкпрешер: сокет не разгрёб — пропускаем кадр
+  const int16 = toInt16_16k(drainFloat(), liveCtx.sampleRate);
+  if (int16.length < 160) return;
+  liveWs.send(int16.buffer);                             // бинарный кадр PCM (Int16LE 16кГц)
+}
+
+function handleMsg(d) {
+  if (d.error) { liveState.textContent = 'ошибка сервера: ' + d.error; liveDbg.textContent = (d.trace || ''); return; }
+  if (d.phase === 'scan') {
+    const cands = d.candidates || [];
+    liveState.textContent = cands.length ? 'ищу место… (уточняется по мере чтения)' : 'слушаю… читай дальше';
+    liveText.innerHTML = ''; liveFound.innerHTML = '';
+    renderCandidates(cands, cands.length ? (cands[0].surah + ':' + cands[0].ayah) : '');
+  } else if (d.phase === 'track' && d.current) {
+    liveState.textContent = 'веду за тобой';
+    renderPlace(d, false);
+    renderCandidates(d.candidates || [], d.current.surah + ':' + d.current.ayah);
+  }
+  if (!d.skip) liveDbg.textContent = 'фаза ' + (d.phase || '?') + ' · буфер ' + (d.buf_sec || 0) + 'с · тик#' + (d.n || 0);
 }
 
 // начальный поиск из ?q= (совместимость со старой ссылкой)

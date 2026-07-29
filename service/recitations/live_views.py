@@ -186,94 +186,67 @@ def _decode_window(buf, sec, idx2ch, ch2idx):
     return E, greedy_skeleton(E, idx2ch, special, stride_ms=stride)
 
 
-@csrf_exempt
-def live_stream(request):
-    """POST: тело = КОРОТКИЙ самостоятельный аудио-чанк (webm/opus/wav, ~4с). ?sid=…&reset=1 сброс.
-    Сервер копит PCM-буфер, холодно лочит пассаж, ведёт позицию трекером. Ответ: место + контекст."""
-    if request.method != "POST":
-        return JsonResponse({"error": "POST only"}, status=405)
+def _session(sid, reset=False):
     import numpy as np
-    import match_align
-    from match_align import find_segments, SegmentTracker
-    import w2v_align
-    q = _quran()
-    index = _index()
-    flat = index[3]
-    idx2ch, ch2idx = _vocab()
-    sid = request.GET.get("sid", "") or "_"
-
     st = _STREAM.get(sid)
-    if st is None or request.GET.get("reset"):
+    if st is None or reset:
         st = _STREAM[sid] = {"buf": np.zeros(0, dtype="float32"), "phase": "scan", "n": 0,
                              "verses": None, "trk": None, "votes": None,
                              "last_pos": None, "last_ctx": []}
+    return st
 
-    def _reply(extra):
-        loc = st.get("last_pos")
-        base = {"ok": True, "n": st["n"], "phase": st["phase"],
-                "buf_sec": round(len(st["buf"]) / _SR, 1)}
-        if loc:
-            base["current"] = {"surah": loc[0], "ayah": loc[1]}
-            base["current_text"] = _ayah_text(q, loc[0], loc[1])
-            base["ayat"] = st.get("last_ctx", [])
-            base["word_frac"] = st.get("word_frac")
-        base.update(extra)
-        return JsonResponse(base)
 
-    # тап по кандидату (владелец tg_5516): поднять его голоса. Boost тоже затухает со временем (общий
-    # _DECAY на каждом тике) → если аудио идёт про другое место, лидер всё равно сместится на верное.
-    boost = request.GET.get("boost")
-    if boost:
-        try:
-            bs, ba = boost.split(":")
-            fa2i = {fa: i for i, fa in enumerate(flat)}
-            fi = fa2i.get((int(bs), int(ba)))
-            if fi is not None:
-                if st["votes"] is None:
-                    st["votes"] = np.zeros(len(flat), dtype="float64")
-                st["votes"][fi] += float(os.environ.get("SYNC_LIVE_BOOST", "3.0"))
-        except Exception:
-            pass
-        cands = match_align.topk_from_votes(st["votes"], index, _KTOP) if st["votes"] is not None else []
-        return _reply({"candidates": [{"surah": c["surah"], "ayah": c["ayah"], "confidence": c["confidence"],
-                       "text": _trunc(_ayah_text(q, c["surah"], c["ayah"]))} for c in cands]})
+def _build_reply(st, extra):
+    q = _quran()
+    loc = st.get("last_pos")
+    base = {"ok": True, "n": st["n"], "phase": st["phase"], "buf_sec": round(len(st["buf"]) / _SR, 1)}
+    if loc:
+        base["current"] = {"surah": loc[0], "ayah": loc[1]}
+        base["current_text"] = _ayah_text(q, loc[0], loc[1])
+        base["ayat"] = st.get("last_ctx", [])
+        base["word_frac"] = st.get("word_frac")
+    base.update(extra)
+    return base
 
-    raw = request.body
-    is_pcm = bool(request.GET.get("pcm")) or "octet" in (request.content_type or "")
-    if not raw or (not is_pcm and len(raw) < _STREAM_MINCHUNK) or (is_pcm and len(raw) < 320):
-        return _reply({"empty": True})
 
+def _apply_boost(st, boost):
+    """Тап по кандидату (владелец tg_5516): поднять его голоса (затухают общим _DECAY)."""
+    import numpy as np
+    import match_align
+    index = _index(); flat = index[3]
     try:
-        if is_pcm:
-            # сырой Int16LE PCM 16кГц моно с фронта (Web Audio) — БЕЗ ffmpeg/webm, дописать в буфер.
-            # Директива владельца tg_5373: фронт шлёт крохотные чанки сразу, бэк держит роллинг-окно.
-            pcm = np.frombuffer(raw, dtype="<i2").astype("float32") / 32768.0
-        else:
-            # чанк webm/opus → PCM 16к (совместимость), дописать в буфер (склейка PCM без заголовков)
-            with tempfile.TemporaryDirectory() as d:
-                src = os.path.join(d, "c.bin"); wav = os.path.join(d, "c.wav")
-                with open(src, "wb") as f:
-                    f.write(raw)
-                subprocess.run(["ffmpeg", "-nostdin", "-y", "-i", src, "-ar", str(_SR), "-ac", "1", wav],
-                               capture_output=True)
-                if not (os.path.exists(wav) and os.path.getsize(wav) > 4000):
-                    return _reply({"empty": True, "detail": "no audio in chunk"})
-                pcm = w2v_align._load_wav(wav)
+        bs, ba = boost.split(":")
+        fa2i = {fa: i for i, fa in enumerate(flat)}
+        fi = fa2i.get((int(bs), int(ba)))
+        if fi is not None:
+            if st["votes"] is None:
+                st["votes"] = np.zeros(len(flat), dtype="float64")
+            st["votes"][fi] += float(os.environ.get("SYNC_LIVE_BOOST", "3.0"))
+    except Exception:
+        pass
+    q = _quran()
+    cands = match_align.topk_from_votes(st["votes"], index, _KTOP) if st["votes"] is not None else []
+    return _build_reply(st, {"candidates": [{"surah": c["surah"], "ayah": c["ayah"],
+                        "confidence": c["confidence"], "text": _trunc(_ayah_text(q, c["surah"], c["ayah"]))}
+                        for c in cands]})
+
+
+def _process_pcm(st, pcm):
+    """ОБЩЕЕ ядро (HTTP live_stream + WS live_ws): дописать pcm-float в буфер, scan/track, вернуть dict.
+    pcm — np.float32 моно 16кГц. Возвращает dict-ответ (НЕ HttpResponse)."""
+    import numpy as np
+    import match_align
+    from match_align import find_segments, SegmentTracker
+    q = _quran(); index = _index(); idx2ch, ch2idx = _vocab()
+    try:
         st["buf"] = np.concatenate([st["buf"], pcm])[-int(_BUF_CAP * _SR):]
         st["n"] += 1
-
-        # РАЗВЯЗКА приёма и обработки (директива владельца tg_5373): чанки принимаем всегда (дёшево),
-        # а тяжёлый декод+трек гоняем не чаще, чем набежит _PROC_STEP с нового аудио — «распознаёшь
-        # сколько можешь». Иначе быстро отдаём текущее состояние (append-only тик).
+        # развязка приём/обработка: тяжёлый декод не чаще _PROC_STEP с нового аудио (иначе быстрый тик)
         new_since = len(st["buf"]) - st.get("last_proc", 0)
         if new_since < int(_PROC_STEP * _SR) and st["n"] > 1:
-            return _reply({"skip": True})
+            return _build_reply(st, {"skip": True})
         st["last_proc"] = len(st["buf"])
 
-        # ── ФАЗА SCAN (мульти-гипотеза, растущая уверенность — директива владельца tg_5498) ──
-        # Не ждём «набора уверенности»: с первых секунд декодим и показываем НЕСКОЛЬКО кандидатов-мест
-        # по накопленным k-грамм-голосам (с затуханием → недавнее весит больше). Уверенность лидера
-        # растёт по нарастающей; лишние сами тонут. Как только лидер уверенно доминирует → точный лок.
         if st["phase"] == "scan":
             E, dec = _decode_window(st["buf"], _TRACK_WIN, idx2ch, ch2idx)
             if dec:
@@ -281,11 +254,10 @@ def live_stream(request):
                 st["votes"] = dens if st["votes"] is None else st["votes"] * _DECAY + dens
             cands = match_align.topk_from_votes(st["votes"], index, _KTOP) if st["votes"] is not None else []
             if not cands:
-                return _reply({"scan": True, "candidates": []})
+                return _build_reply(st, {"scan": True, "candidates": []})
             conf = cands[0]["confidence"]
             cand_out = [{"surah": c["surah"], "ayah": c["ayah"], "confidence": c["confidence"],
                          "text": _trunc(_ayah_text(q, c["surah"], c["ayah"]))} for c in cands]
-            # лидер уверенно доминирует и есть контекст → точный лок трекером
             if conf >= _LOCK_CONF and len(st["buf"]) >= int(_LOCK_MIN * _SR):
                 E2, dec2 = _decode_window(st["buf"], _COLD_WIN, idx2ch, ch2idx)
                 verses = find_segments(E2, q, idx2ch, ch2idx, index=index) if E2 is not None else None
@@ -294,21 +266,16 @@ def live_stream(request):
                     st["trk"] = SegmentTracker(index, st["verses"])
                     st["phase"] = "track"; st["stall_reloc"] = 0
                     _track(st, dec2)
-                    return _reply({"locked": True, "candidates": cand_out})
-            return _reply({"scan": True, "candidates": cand_out, "conf": conf})
+                    return _build_reply(st, {"locked": True, "candidates": cand_out})
+            return _build_reply(st, {"scan": True, "candidates": cand_out, "conf": conf})
 
-        # phase == track: декодим последние _TRACK_WIN с → ведём позицию по хвосту
+        # track
         E, dec = _decode_window(st["buf"], _TRACK_WIN, idx2ch, ch2idx)
         moved = _track(st, dec) if dec else False
-        # ПЕРЕЛОКАЛИЗАЦИЯ по застреванию: трекер не двигается _RELOC_STALL тиков (сменился пассаж /
-        # мульти-сегмент / чтец переключился) → find_segments по буферу заново + пересбор корпуса.
-        # (k-грамм-голоса в track на мелодике шумят → как триггер НЕ используем, только застой трекера.)
         if moved:
             st["stall_reloc"] = 0
         else:
             st["stall_reloc"] = st.get("stall_reloc", 0) + 1
-            # перелок ТОЛЬКО при длительном застое И не чаще кулдауна (иначе find_segments по буферу
-            # душит поток — на длинном мелодичном аяте позиция стоит легитимно, это НЕ потеря пассажа)
             cd_ok = (st["n"] - st.get("last_reloc_n", -10**9)) >= _RELOC_COOLDOWN
             if st["stall_reloc"] >= _RELOC_STALL and cd_ok and len(st["buf"]) >= int(_COLD_MIN * _SR):
                 Er, decr = _decode_window(st["buf"], _COLD_WIN, idx2ch, ch2idx)
@@ -317,15 +284,52 @@ def live_stream(request):
                     if v2 and len(v2) >= 2:
                         st["verses"] = _build_corpus(index, v2)
                         st["trk"] = SegmentTracker(index, st["verses"])
-                        _track(st, decr)                    # переискать текущую позицию
+                        _track(st, decr)
                 st["last_reloc_n"] = st["n"]
                 st["stall_reloc"] = 0
-        return _reply({})
+        return _build_reply(st, {})
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
-        print("LIVE_STREAM_ERROR:\n" + tb, flush=True)
-        return _reply({"ok": False, "error": type(e).__name__ + ": " + str(e), "trace": tb[-600:]})
+        print("LIVE_PROCESS_ERROR:\n" + tb, flush=True)
+        return _build_reply(st, {"ok": False, "error": type(e).__name__ + ": " + str(e), "trace": tb[-600:]})
+
+
+def _pcm_from_raw(raw, is_pcm):
+    """Байты чанка → np.float32 16кГц моно (сырой Int16 или webm/opus через ffmpeg). None если пусто."""
+    import numpy as np
+    import w2v_align
+    if is_pcm:
+        return np.frombuffer(raw, dtype="<i2").astype("float32") / 32768.0
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "c.bin"); wav = os.path.join(d, "c.wav")
+        with open(src, "wb") as f:
+            f.write(raw)
+        subprocess.run(["ffmpeg", "-nostdin", "-y", "-i", src, "-ar", str(_SR), "-ac", "1", wav],
+                       capture_output=True)
+        if not (os.path.exists(wav) and os.path.getsize(wav) > 4000):
+            return None
+        return w2v_align._load_wav(wav)
+
+
+@csrf_exempt
+def live_stream(request):
+    """POST ?sid=&reset=&pcm=&boost= — HTTP-обёртка над общим ядром (фолбэк, если нет вебсокета)."""
+    if request.method != "POST":
+        return JsonResponse({"error": "POST only"}, status=405)
+    sid = request.GET.get("sid", "") or "_"
+    st = _session(sid, reset=bool(request.GET.get("reset")))
+    boost = request.GET.get("boost")
+    if boost:
+        return JsonResponse(_apply_boost(st, boost))
+    raw = request.body
+    is_pcm = bool(request.GET.get("pcm")) or "octet" in (request.content_type or "")
+    if not raw or (not is_pcm and len(raw) < _STREAM_MINCHUNK) or (is_pcm and len(raw) < 320):
+        return JsonResponse(_build_reply(st, {"empty": True}))
+    pcm = _pcm_from_raw(raw, is_pcm)
+    if pcm is None:
+        return JsonResponse(_build_reply(st, {"empty": True, "detail": "no audio"}))
+    return JsonResponse(_process_pcm(st, pcm))
 
 
 def _track(st, dec):
@@ -435,3 +439,53 @@ def _do_locate(raw: bytes):
         "decode_tail": dec[-80:],
         "n_verses": len(verses),
     })
+
+
+# ─────────────────────────── WEBSOCKET (WI, директива владельца tg_5373/5558) ───────────────────
+# Причина зависания HTTP-версии: 100мс-чанки = ~10 запросов/с, ngrok-free троттлит и рвёт коннект.
+# Вебсокет — ОДИН постоянный коннект: кадры PCM текут потоком, сервер шлёт JSON-обновления, нет
+# пер-запросного лимита. Тяжёлый декод (GPU, блокирующий) гоняем в threadpool, чтобы не держать loop.
+async def live_ws(scope, receive, send):
+    import asyncio
+    import json as _json
+    from urllib.parse import parse_qs
+    qs = parse_qs((scope.get("query_string") or b"").decode())
+    sid = (qs.get("sid", ["_"])[0]) or "_"
+    st = _session(sid, reset=True)                       # каждый коннект = свежая сессия
+    loop = asyncio.get_event_loop()
+    await send({"type": "websocket.accept"})
+    try:
+        while True:
+            ev = await receive()
+            t = ev.get("type")
+            if t == "websocket.disconnect":
+                break
+            if t != "websocket.receive":
+                continue
+            if ev.get("bytes") is not None:              # кадр сырого Int16 PCM 16кГц
+                raw = ev["bytes"]
+                if len(raw) < 320:
+                    continue
+                pcm = _pcm_from_raw(raw, True)
+                if pcm is None:
+                    continue
+                res = await loop.run_in_executor(None, _process_pcm, st, pcm)  # GPU вне loop
+                await send({"type": "websocket.send", "text": _json.dumps(res)})
+            elif ev.get("text") is not None:             # управление: reset / boost:s:a
+                msg = ev["text"].strip()
+                if msg == "reset":
+                    st = _session(sid, reset=True)
+                elif msg.startswith("boost:"):
+                    res = await loop.run_in_executor(None, _apply_boost, st, msg[6:])
+                    await send({"type": "websocket.send", "text": _json.dumps(res)})
+    except Exception as e:
+        import traceback
+        print("LIVE_WS_ERROR:\n" + traceback.format_exc(), flush=True)
+        try:
+            await send({"type": "websocket.send", "text": _json.dumps({"ok": False, "error": str(e)})})
+        except Exception:
+            pass
+    try:
+        await send({"type": "websocket.close"})
+    except Exception:
+        pass

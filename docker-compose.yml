@@ -109,7 +109,9 @@ services:
     restart: unless-stopped
     user: "${SYNC_UID:-1000}:${SYNC_GID:-1000}"
     environment: *appenv
-    command: sh -c "python manage.py runserver 0.0.0.0:8010"
+    # uvicorn (ASGI) вместо runserver — нужен websocket /live/ws (стриминг WI). uvicorn+websockets
+    # в ./work/pydeps (pip --target). HTTP-часть Django работает как прежде.
+    command: sh -c "PYTHONPATH=/app/work/pydeps:/app/src:/app/service python -m uvicorn synchronized.asgi:application --host 0.0.0.0 --port 8010 --ws websockets --log-level warning"
     volumes:
       - ./service:/app/service
       - ./src:/app/src
