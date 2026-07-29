@@ -105,6 +105,168 @@ def _continuity(sid, cur):
     out = dict(last); out["stale"] = True; return out   # разовый скачок → держим прошлое
 
 
+# ─────────────────────────── ЧАНКОВЫЙ СТРИМИНГ (WI v2, директива владельца tg_5272) ──────────────
+# Старый live/locate декодировал ВЕСЬ РАСТУЩИЙ файл каждый раз → задержка росла, подсветка опаздывала.
+# Замеры (work/proto_stream*.py):
+#   • disjoint-чанки 4с: декод 48мс, но скелет слишком шумный (wav2vec2 нормализует фичи per-input,
+#     4с мало контекста) → k-грамм-локализация прыгает по случайным сурам;
+#   • rolling-20с + find_segments по КАЖДОМУ окну: на мелодичном чтении окна дают мусор (улик мало);
+#   • find_segments по буферу от НАЧАЛА 30-45с: НАДЁЖНО лочит суру (rec7 → 6:95-98) за ~1с.
+# Отсюда дизайн: сервер держит РОЛЛИНГ-буфер PCM, ОДИН раз холодно лочит пассаж find_segments'ом
+# (когда накоплено ≥ _COLD_MIN с), затем ведёт позицию SegmentTracker'ом по буквам ВПЕРЁД (монотонно),
+# НЕ перезапуская find_segments (на мелодичных окнах он бы прыгнул в мусор). Корпус трекера — от точки
+# лока вперёд по Корану (чтение последовательно). Цена константна (окно фиксировано), не растёт.
+_STREAM = {}
+_SR = 16000
+_BUF_CAP = float(os.environ.get("SYNC_LIVE_BUFCAP", "48"))        # сколько с PCM держим
+_COLD_MIN = float(os.environ.get("SYNC_LIVE_COLDMIN", "22"))      # накопить перед 1-й попыткой лока
+_COLD_WIN = float(os.environ.get("SYNC_LIVE_COLDWIN", "45"))      # окно декода для холодного лока
+_TRACK_WIN = float(os.environ.get("SYNC_LIVE_TRACKWIN", "14"))    # окно декода для трекинга
+_FWD_AYAT = int(os.environ.get("SYNC_LIVE_FWD", "120"))           # аятов вперёд в корпусе трекера
+_STREAM_MINCHUNK = int(os.environ.get("SYNC_LIVE_MINCHUNK", "800"))
+
+
+def _ctx_ayat(q, verses, cur, before=1, after=4):
+    """Соседние аяты вокруг текущего в ПАССАЖЕ чтения (контекст «память рядом»), с пометкой current."""
+    ci = next((i for i, v in enumerate(verses) if (v[0], v[1]) == cur), None)
+    if ci is None:
+        return []
+    out = []
+    for i in range(max(0, ci - before), min(len(verses), ci + after + 1)):
+        s, a = verses[i][0], verses[i][1]
+        # текущий = cur — если чтец перечитывает, cur может совпасть с несколькими; помечаем по позиции
+        out.append({"surah": s, "ayah": a, "text": _ayah_text(q, s, a), "current": (i == ci)})
+    return out
+
+
+def _decode_window(buf, sec, idx2ch, ch2idx):
+    """Декодировать последние `sec` с из PCM-буфера → (E, dec) или (None, '')."""
+    import w2v_align
+    from match_align import greedy_skeleton
+    n = min(len(buf), int(sec * _SR))
+    seg = buf[-n:]
+    if len(seg) < int(0.5 * _SR):
+        return None, ""
+    with tempfile.TemporaryDirectory() as d:
+        wav = os.path.join(d, "w.wav")
+        import soundfile as sf
+        sf.write(wav, seg, _SR)
+        E, stride, _i, _c = w2v_align.emissions(wav)
+    if E is None or E.shape[0] < 3:
+        return None, ""
+    special = {ch2idx.get(t) for t in ("<pad>", "<s>", "</s>", "<unk>", "|", "-", "ـ")} - {None}
+    return E, greedy_skeleton(E, idx2ch, special, stride_ms=stride)
+
+
+@csrf_exempt
+def live_stream(request):
+    """POST: тело = КОРОТКИЙ самостоятельный аудио-чанк (webm/opus/wav, ~4с). ?sid=…&reset=1 сброс.
+    Сервер копит PCM-буфер, холодно лочит пассаж, ведёт позицию трекером. Ответ: место + контекст."""
+    if request.method != "POST":
+        return JsonResponse({"error": "POST only"}, status=405)
+    import numpy as np
+    import match_align
+    from match_align import find_segments, SegmentTracker
+    import w2v_align
+    q = _quran()
+    index = _index()
+    flat = index[3]
+    idx2ch, ch2idx = _vocab()
+    sid = request.GET.get("sid", "") or "_"
+
+    st = _STREAM.get(sid)
+    if st is None or request.GET.get("reset"):
+        st = _STREAM[sid] = {"buf": np.zeros(0, dtype="float32"), "phase": "cold", "n": 0,
+                             "verses": None, "trk": None, "cold_surah": None, "cold_hits": 0,
+                             "last_pos": None, "last_ctx": []}
+
+    def _reply(extra):
+        loc = st.get("last_pos")
+        base = {"ok": True, "n": st["n"], "phase": st["phase"],
+                "buf_sec": round(len(st["buf"]) / _SR, 1)}
+        if loc:
+            base["current"] = {"surah": loc[0], "ayah": loc[1]}
+            base["current_text"] = _ayah_text(q, loc[0], loc[1])
+            base["ayat"] = st.get("last_ctx", [])
+        base.update(extra)
+        return JsonResponse(base)
+
+    raw = request.body
+    if not raw or len(raw) < _STREAM_MINCHUNK:
+        return _reply({"empty": True})
+
+    try:
+        # чанк webm/opus → PCM 16к, дописать в роллинг-буфер (склейка PCM без webm-заголовков)
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "c.bin"); wav = os.path.join(d, "c.wav")
+            with open(src, "wb") as f:
+                f.write(raw)
+            subprocess.run(["ffmpeg", "-nostdin", "-y", "-i", src, "-ar", str(_SR), "-ac", "1", wav],
+                           capture_output=True)
+            if not (os.path.exists(wav) and os.path.getsize(wav) > 4000):
+                return _reply({"empty": True, "detail": "no audio in chunk"})
+            pcm = w2v_align._load_wav(wav)
+        st["buf"] = np.concatenate([st["buf"], pcm])[-int(_BUF_CAP * _SR):]
+        st["n"] += 1
+
+        if st["phase"] == "cold":
+            if len(st["buf"]) < int(_COLD_MIN * _SR):
+                return _reply({"warmup": True, "buf_need": _COLD_MIN})
+            E, dec = _decode_window(st["buf"], _COLD_WIN, idx2ch, ch2idx)
+            if E is None:
+                return _reply({"warmup": True})
+            verses = find_segments(E, q, idx2ch, ch2idx, index=index)
+            if not verses or len(verses) < 2:
+                return _reply({"cold": True, "seg": 0})
+            surah0 = verses[0][0]
+            # континуитет: та же сура 2 попытки подряд → лочим (защита от разового ложного окна)
+            if st["cold_surah"] == surah0:
+                st["cold_hits"] += 1
+            else:
+                st["cold_surah"] = surah0; st["cold_hits"] = 1
+            if st["cold_hits"] < 2:
+                return _reply({"cold": True, "seg": len(verses), "cand": f"{surah0}:{verses[0][1]}"})
+            # ЛОК: корпус трекера = пассаж find_segments + продолжение вперёд по Корану
+            fa2i = {fa: i for i, fa in enumerate(flat)}
+            fa_end = fa2i.get((verses[-1][0], verses[-1][1]))
+            corpus = [(s, a) for (s, a) in verses]
+            if fa_end is not None:
+                for i in range(fa_end + 1, min(len(flat), fa_end + 1 + _FWD_AYAT)):
+                    corpus.append((flat[i][0], flat[i][1]))
+            st["verses"] = corpus
+            st["trk"] = SegmentTracker(index, corpus)
+            st["phase"] = "track"
+            # сразу протрекать по уже накопленному декоду
+            _track(st, dec)
+            return _reply({"locked": True, "seg": len(verses)})
+
+        # phase == track: декодим последние _TRACK_WIN с → ведём позицию по хвосту
+        E, dec = _decode_window(st["buf"], _TRACK_WIN, idx2ch, ch2idx)
+        if dec:
+            _track(st, dec)
+        return _reply({})
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print("LIVE_STREAM_ERROR:\n" + tb, flush=True)
+        return _reply({"ok": False, "error": type(e).__name__ + ": " + str(e), "trace": tb[-600:]})
+
+
+def _track(st, dec):
+    """Скормить декод трекеру окнами; обновить last_pos/last_ctx."""
+    q = _quran()
+    trk = st["trk"]
+    cur = None
+    W = 40
+    for end in range(min(W, len(dec)), len(dec) + 1, 20):
+        cur = trk.feed(dec[max(0, end - W):end])
+    if cur is None and st["verses"]:
+        cur = {"surah": st["verses"][0][0], "ayah": st["verses"][0][1]}
+    if cur:
+        st["last_pos"] = (cur["surah"], cur["ayah"])
+        st["last_ctx"] = _ctx_ayat(q, st["verses"], (cur["surah"], cur["ayah"]))
+
+
 def _do_locate(raw: bytes):
     import numpy as np  # noqa
     import match_align

@@ -5,6 +5,7 @@ from . import live_views
 
 urlpatterns = [
     path("live/locate", live_views.live_locate, name="live_locate"),
+    path("live/stream", live_views.live_stream, name="live_stream"),
     path("", views.index, name="index"),
     path("add", views.add, name="add"),
     path("r/<int:pk>/run", views.run, name="run"),
