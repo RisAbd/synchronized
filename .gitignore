@@ -47,3 +47,6 @@ new_tasks/
 
 # браузерные артефакты MCP-тестов
 .playwright-mcp/
+
+# локальный compose-override (бек на 8002 и пр.) — машинно-локальный, не в репо
+docker-compose.override.yml
