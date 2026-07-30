@@ -51,13 +51,14 @@ services:
       # Ванильный large-v3 на арабском измеренно ПЛОХ (rec9 5 слов на 21 мин), tarteel-base — 464 слова.
       # Если каталога нет — src/asr._default_model уходит в large-v3. Путь = ./cache смонтирован в /app/.cache.
       SYNC_WHISPER_MODEL: ${SYNC_WHISPER_MODEL:-/app/.cache/ct2-tarteel-base}
-      # Модель wav2vec2 для w2v/w2vo И live-декода. Дефолт — КОРАНОВСКАЯ (rabah2026 = xlsr-53-arabic,
-      # дообученная на Коране). Общая арабская MSA (jonatasgrosman) измеренно проваливает мелодичное/
-      # общинное чтение: на rec16 (صلاة الجمعة, хутба+намаз) live НИ РАЗУ не лочился (1043 тика scan),
-      # а корановская лочится за ~30с и держит 98% тиков в истинных сурах (Фатиха→Ан'ам); офлайн
-      # find_segments начал находить Фатиху. Скачивается в ./cache (HF hub). arxiv 2606.19747
-      # подтверждает: xlsr-53 на арабском без диакритики — оптимум для коранического ASR.
-      SYNC_W2V_MODEL: ${SYNC_W2V_MODEL:-rabah2026/wav2vec2-large-xlsr-53-arabic-quran-v_final}
+      # Модель wav2vec2 для w2v/w2vo И live-декода. Дефолт — общая арабская (jonatasgrosman xlsr-53).
+      # ОПЦИЯ: корановская `rabah2026/wav2vec2-large-xlsr-53-arabic-quran-v_final` (xlsr-53 дообученная
+      # на Коране) — измеренно сильно лучше на мелодичном/общинном чтении: на rec16 (صلاة الجمعة,
+      # хутба+намаз) обычная модель live НИ РАЗУ не лочилась (1043 тика scan), корановская лочится за
+      # ~30с и держит 98% тиков в верных сурах (Фатиха→Ан'ам), офлайн находит Фатиху. Включить —
+      # SYNC_W2V_MODEL=rabah2026/... в .env (модель в ./cache, HF hub). arxiv 2606.19747: xlsr-53 на
+      # арабском без диакритики — оптимум коранического ASR.
+      SYNC_W2V_MODEL: ${SYNC_W2V_MODEL:-}
       # Google STT: ключ сервис-аккаунта кладём в ./creds/ (gitignored) → монтируется в /app/creds.
       # Бакет и live-флаг — через .env (compose читает его автоматически). Без ключа/бакета
       # gstt.is_available()==False → google тихо уходит в кэш/пропуск, запись живёт по whisper.
