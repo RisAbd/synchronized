@@ -45,6 +45,18 @@ def _ayah_text(q, s, a):
         return ""
 
 
+def _surah_payload(q, s):
+    """ВЕСЬ текст суры s → {surah, title, ayat:[{ayah,text}]}. Фронт рендерит суру ЦЕЛИКОМ один раз
+    (стабильный DOM, как плеер), а трек-тики лишь двигают подсветку+скролл — без перерисовки на
+    каждый ответ бэка (владелец 30.07: перерисовка дёргала позицию текста на экране, терялось место)."""
+    try:
+        su = q.surah(s)
+        return {"surah": s, "title": getattr(su, "title", str(s)),
+                "ayat": [{"ayah": v.ayah, "text": v.text} for v in su.verses]}
+    except Exception:
+        return None
+
+
 @csrf_exempt
 def live_locate(request):
     """POST: тело = аудио-блоб (webm/opus/wav). Ответ JSON: найденный пассаж + текущий аят + текст."""
@@ -258,7 +270,7 @@ def _session(sid, reset=False):
         st = _STREAM[sid] = {"buf": np.zeros(0, dtype="float32"),
                              "cold_buf": np.zeros(0, dtype="float32"), "phase": "scan", "n": 0,
                              "verses": None, "trk": None, "votes": None,
-                             "last_pos": None, "last_ctx": [],
+                             "last_pos": None, "last_ctx": [], "sent_surah": None,
                              "memorize": False, "dev_low_n": 0, "deviation": False}
     return st
 
@@ -272,6 +284,13 @@ def _build_reply(st, extra):
         base["current_text"] = _ayah_text(q, loc[0], loc[1])
         base["ayat"] = st.get("last_ctx", [])
         base["word_frac"] = st.get("word_frac")
+        # ВЕСЬ текст суры — только при СМЕНЕ суры (иначе фронт рендерит один раз и лишь двигает
+        # подсветку/скролл, без перерисовки). На перелоке (смена пассажа) sent_surah сбросит корпус.
+        if st.get("sent_surah") != loc[0]:
+            pl = _surah_payload(q, loc[0])
+            if pl:
+                base["passage"] = pl
+                st["sent_surah"] = loc[0]
     if st.get("memorize"):
         base["memorize"] = True
         base["deviation"] = bool(st.get("deviation"))

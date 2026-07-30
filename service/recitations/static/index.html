@@ -80,6 +80,43 @@
   .modal .mhead h2 { font-size:1.15rem; margin:0; }
   .modal .mclose { background:none; color:var(--muted); font-size:1.5rem; line-height:1;
     padding:2px 8px; border-radius:8px; }
+  /* ── Live-ридер: текст суры как в плеере (сплошной поток), стабильный DOM + плавный автоскролл
+     (glide) без перерисовок. Владелец 30.07: перерисовка каждый тик дёргала позицию текста на
+     экране → терялось место чтения. Рендерим суру ЦЕЛИКОМ один раз, тики двигают лишь подсветку. */
+  :root { --arab-font:"Scheherazade New","Amiri","Noto Naskh Arabic",serif; --font-scale:0.93; --ayah-size:2.0rem; }
+  #liveModal .sheet.live-sheet { max-width:860px; width:100%; height:calc(100dvh - 40px);
+    margin-top:0; display:flex; flex-direction:column; }
+  .live-reader { flex:1; min-height:0; overflow-y:auto; margin-top:.6em; border-top:1px solid var(--line);
+    padding:22px 6px 48vh; direction:rtl; font-family:var(--arab-font);
+    font-size:calc(var(--ayah-size) * var(--font-scale)); line-height:calc(var(--ayah-size) * 2.3);
+    text-align:justify; text-align-last:center; }
+  .live-reader .stitle { display:block; text-align:center; color:var(--accent);
+    font:600 1.05rem system-ui; margin:0 0 12px; opacity:.7; }
+  .live-reader .ayah { color:var(--dim,#b9b1a0); transition:color .35s; }
+  .live-reader .ayah.near { color:var(--muted); }
+  .live-reader .ayah.active { color:var(--fg); }
+  .live-reader .ayah .num { font:600 .58em system-ui; color:var(--muted); margin:0 .35em; opacity:.8; }
+  .live-reader .w { border-radius:8px; padding:.02em .14em; transition:color .25s, background .25s; }
+  .live-reader .w.hot { color:#fff; background:var(--hot,#2e8b45); box-shadow:0 1px 10px rgba(46,139,69,.42); }
+  .live-reader.dev .w.hot { background:#c22; box-shadow:0 1px 10px rgba(200,40,40,.5); }
+  .live-reader.dev .ayah.active { color:#e24; }
+  #liveFontPanel { position:fixed; z-index:60; top:8px; right:8px; background:var(--card);
+    border:1px solid var(--line); border-radius:14px; padding:8px; box-shadow:0 8px 30px rgba(0,0,0,.28);
+    display:none; max-width:calc(100% - 16px); max-height:calc(100dvh - 16px); overflow-y:auto; }
+  #liveFontPanel.open { display:block; }
+  #liveFontPanel .fhead { font:600 11px system-ui; color:var(--muted); padding:4px 10px 8px; direction:ltr; }
+  #liveFontPanel .fhead.sep { border-top:1px solid var(--line); margin-top:6px; padding-top:10px; }
+  #liveFontPanel .fopt { display:block; width:100%; min-width:230px; text-align:right; direction:rtl;
+    background:transparent; border:none; color:var(--fg); cursor:pointer; padding:9px 12px;
+    border-radius:10px; font-size:1.5rem; line-height:1.5; }
+  #liveFontPanel .fopt.on { background:var(--accent); color:#fff; }
+  #liveFontPanel .fopt .fn { display:block; font:600 10px system-ui; color:var(--muted);
+    direction:ltr; text-align:left; margin-bottom:1px; }
+  #liveFontPanel .fopt.on .fn { color:rgba(255,255,255,.85); }
+  .sizerow { display:flex; align-items:center; gap:10px; direction:ltr; padding:4px 10px 8px; }
+  .sizerow button { flex:none; width:36px; height:36px; border:none; border-radius:9px;
+    background:var(--chip); color:var(--fg); cursor:pointer; font:600 14px system-ui; }
+  .sizerow input[type=range] { flex:1; min-width:120px; accent-color:var(--accent); cursor:pointer; }
 </style>
 </head>
 <body>
@@ -122,28 +159,27 @@
 </div>
 
 <div class="modal" id="liveModal">
-  <div class="sheet">
+  <div class="sheet live-sheet">
     <div class="mhead">
-      <h2>🎤 Live-поиск места</h2>
+      <h2 style="flex:1;min-width:0">🎤 Live</h2>
+      <button type="button" class="fontbtn add-btn" id="liveFontBtn" title="настройки шрифта"
+              style="background:var(--chip);color:var(--fg);padding:7px 12px">⚙&#xFE0E; Шрифт</button>
       <button type="button" class="mclose" id="closeLive" title="закрыть">✕</button>
     </div>
-    <p class="lead" style="margin:.2em 0 1em">Нажми «Слушать», читай вслух — сервис на лету
-      распознаёт и находит место в Коране. Тайминги здесь не важны, важно быстрое нахождение.</p>
-    <div class="row" style="align-items:center;gap:1em">
+    <div class="row" style="align-items:center;gap:.9em;flex-wrap:wrap">
       <button type="button" id="liveBtn" class="add-btn">▶ Слушать</button>
-      <span id="liveState" style="color:#9aa">микрофон выключен</span>
+      <span id="liveState" style="color:var(--muted)">микрофон выключен</span>
+      <label style="display:inline-flex;align-items:center;gap:.4em;cursor:pointer;font-size:.9em;color:var(--muted)">
+        <input type="checkbox" id="liveMemorize"> 🧠 заучивание
+      </label>
     </div>
-    <label style="display:inline-flex;align-items:center;gap:.45em;margin-top:.7em;cursor:pointer;font-size:.92em;color:#9aa">
-      <input type="checkbox" id="liveMemorize"> 🧠 режим заучивания
-      <span style="opacity:.6;font-size:.85em">— отклонишься от текста, подсветится красным</span>
-    </label>
-    <div id="liveFound" style="margin-top:1em;font-size:1.05em"></div>
-    <div id="liveText" dir="rtl" lang="ar"
-         style="margin-top:.8em;line-height:2.2;font-size:1.6em;font-family:'Amiri','Scheherazade New',serif"></div>
-    <div id="liveDbg2" style="margin-top:.6em"></div>
-    <div id="liveDbg" style="margin-top:.8em;color:#889;font-size:.8em;direction:ltr"></div>
+    <div id="liveFound" style="margin-top:.5em;font-size:.95em;color:var(--muted)"></div>
+    <div id="liveCands"></div>
+    <div id="liveReader" class="live-reader" dir="rtl" lang="ar"></div>
+    <div id="liveDbg" style="color:#889;font-size:.72em;direction:ltr;padding:2px 4px"></div>
   </div>
 </div>
+<div id="liveFontPanel"><div class="fhead">Арабский шрифт</div></div>
 
 <script>
 // СТАТИЧНАЯ библиотека (П11): фетчит /api/recitations и рисует список сама; бэк HTML не отдаёт.
@@ -366,12 +402,69 @@ const liveModal = document.getElementById('liveModal');
 const liveBtn = document.getElementById('liveBtn');
 const liveState = document.getElementById('liveState');
 const liveFound = document.getElementById('liveFound');
-const liveText = document.getElementById('liveText');
+const liveReader = document.getElementById('liveReader');
+const liveCands = document.getElementById('liveCands');
 const liveDbg = document.getElementById('liveDbg');
-const liveDbg2 = document.getElementById('liveDbg2');
 const liveMemorize = document.getElementById('liveMemorize');
 let liveOn = false, liveWs = null;
 let devOn = false;                                      // текущее состояние отклонения (для сигнала по фронту)
+
+// ── настройки шрифта/размера для live (порт плеера, ОБЩИЕ localStorage-ключи sync.arabfont/arabsize
+// → выбор синхронен с плеером; владелец 30.07: «подгрузи те же стили и сам выбор настроек»). Пишем
+// CSS-переменные на documentElement, live-ридер их читает (как #text в плеере). ──
+const LIVE_FONTS = [
+  { css: "'Scheherazade New', serif", name: 'Scheherazade New', scale: 0.93 },
+  { css: "'Amiri', serif", name: 'Amiri', scale: 1.09 },
+  { css: "'Amiri Quran', serif", name: 'Amiri Quran', scale: 0.78 },
+  { css: "'Noto Naskh Arabic', serif", name: 'Noto Naskh Arabic', scale: 1.12 },
+  { css: "'Lateef', serif", name: 'Lateef', scale: 1.31 },
+];
+const applyLiveFont = f => {
+  document.documentElement.style.setProperty('--arab-font', f.css);
+  document.documentElement.style.setProperty('--font-scale', f.scale);
+};
+const liveFontPanel = document.getElementById('liveFontPanel');
+const liveFontBtn = document.getElementById('liveFontBtn');
+(function initLiveFontPanel() {
+  const savedCss = localStorage.getItem('sync.arabfont');
+  const cur = LIVE_FONTS.find(f => f.css === savedCss) || LIVE_FONTS[0];
+  applyLiveFont(cur);
+  LIVE_FONTS.forEach(f => {
+    const b = document.createElement('button'); b.className = 'fopt' + (f.css === cur.css ? ' on' : '');
+    b.style.fontFamily = f.css;
+    b.innerHTML = '<span class="fn">' + f.name + '</span>بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ';
+    b.onclick = () => {
+      localStorage.setItem('sync.arabfont', f.css); applyLiveFont(f);
+      liveFontPanel.querySelectorAll('.fopt').forEach(x => x.classList.remove('on'));
+      b.classList.add('on'); liveFontPanel.classList.remove('open');
+    };
+    liveFontPanel.appendChild(b);
+  });
+  // размер (общий ключ sync.arabsize)
+  const SMIN = 1.4, SMAX = 5.6, SSTEP = 0.15, SDEF = 2.0;
+  let sz = parseFloat(localStorage.getItem('sync.arabsize'));
+  if (!(sz >= SMIN && sz <= SMAX)) sz = SDEF;
+  const applySz = rem => document.documentElement.style.setProperty('--ayah-size', rem.toFixed(2) + 'rem');
+  applySz(sz);
+  const head = document.createElement('div'); head.className = 'fhead sep'; head.textContent = 'Размер шрифта';
+  const row = document.createElement('div'); row.className = 'sizerow';
+  const minus = document.createElement('button'); minus.textContent = 'A−';
+  const plus = document.createElement('button'); plus.textContent = 'A+'; plus.style.fontSize = '18px';
+  const range = document.createElement('input'); range.type = 'range';
+  range.min = SMIN; range.max = SMAX; range.step = SSTEP; range.value = sz;
+  const setSz = v => { sz = Math.min(SMAX, Math.max(SMIN, Math.round(v / SSTEP) * SSTEP));
+    range.value = sz; applySz(sz); localStorage.setItem('sync.arabsize', sz.toFixed(2)); };
+  range.oninput = () => setSz(parseFloat(range.value));
+  minus.onclick = e => { e.stopPropagation(); setSz(sz - SSTEP); };
+  plus.onclick = e => { e.stopPropagation(); setSz(sz + SSTEP); };
+  row.appendChild(minus); row.appendChild(range); row.appendChild(plus);
+  liveFontPanel.appendChild(head); liveFontPanel.appendChild(row);
+})();
+liveFontBtn.onclick = e => { e.stopPropagation(); liveFontPanel.classList.toggle('open'); };
+document.addEventListener('click', e => {
+  if (liveFontPanel.classList.contains('open') && !liveFontPanel.contains(e.target) && e.target !== liveFontBtn)
+    liveFontPanel.classList.remove('open');
+});
 
 function sendMemorize() {                                // синхронизировать режим с сервером (после reset/реконнекта)
   if (liveWs && liveWs.readyState === 1) liveWs.send('memorize:' + (liveMemorize.checked ? '1' : '0'));
@@ -406,6 +499,7 @@ liveModal.addEventListener('click', e => { if (e.target === liveModal) { stopLiv
 
 function stopLive() {
   liveOn = false;
+  if (liveRaf) { cancelAnimationFrame(liveRaf); liveRaf = 0; }
   if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
   if (liveProc) { try { liveProc.disconnect(); } catch (e) {} liveProc.onaudioprocess = null; liveProc = null; }
   if (liveSrc) { try { liveSrc.disconnect(); } catch (e) {} liveSrc = null; }
@@ -431,6 +525,10 @@ async function startLive() {
     };
     liveSrc.connect(liveProc); liveProc.connect(liveCtx.destination);
     liveOn = true; liveMode = ''; candSig = '';
+    // сброс рендера суры (свежий сеанс → бэк перешлёт passage) + запуск плавного автоскролла
+    livePassageSurah = null; liveActiveKey = null; liveTargetEl = null;
+    liveReader.innerHTML = ''; liveCands.innerHTML = ''; liveFound.innerHTML = '';
+    if (!liveRaf) liveRaf = requestAnimationFrame(liveGlide);
     liveBtn.textContent = '■ Стоп'; liveState.textContent = 'подключаюсь…';
     openWs(true);                                        // старт сеанса → reset
   } catch (e) {
@@ -481,41 +579,84 @@ function toInt16_16k(f32, srcSr) {                       // даунсемпл s
   return out;
 }
 
-function applyLiveFont() {
-  // как в плеере: тот же шрифт и размер (localStorage), дефолты — плеерные (Scheherazade New, 2.2rem)
-  const fam = localStorage.getItem('sync.arabfont') || "'Scheherazade New','Amiri','Noto Naskh Arabic',serif";
-  const size = parseFloat(localStorage.getItem('sync.arabsize')) || 2.2;
-  liveText.style.fontFamily = fam;
-  liveText.style.fontSize = size.toFixed(2) + 'rem';
+// ── стабильный рендер суры + плавный автоскролл (как плеер). Суру рисуем ОДИН раз (renderPassage),
+// трек-тики лишь двигают подсветку слова/аята (updateLive) и плавно скроллят контейнер (liveGlide) →
+// текст на экране НЕ перерисовывается и НЕ дёргается (владелец 30.07). Видно ~3 аята + текст впереди. ─
+const ARN = ['٠','١','٢','٣','٤','٥','٦','٧','٨','٩'];
+const arNum = n => String(n).split('').map(c => ARN[+c] || c).join('');
+let liveAyahEl = {}, liveWordEl = {};                    // ключ surah:ayah → элемент аята / массив слов
+let liveActiveKey = null, liveActiveEl = null, liveHotEl = null, liveNear = [], liveTargetEl = null;
+let livePassageSurah = null;                             // какая сура сейчас отрисована (не перерисовывать зря)
+let liveRaf = 0;
+
+function renderPassage(p) {
+  // отрисовать ВСЮ суру целиком (стабильный DOM). Вызывается лишь при СМЕНЕ суры (бэк шлёт passage
+  // только тогда). Внутри одной суры трек-тики DOM не трогают — двигают классы подсветки.
+  if (!p || !p.ayat || livePassageSurah === p.surah) return;
+  livePassageSurah = p.surah;
+  liveAyahEl = {}; liveWordEl = {}; liveActiveKey = null; liveActiveEl = null; liveHotEl = null;
+  liveNear = []; liveTargetEl = null;
+  liveReader.innerHTML = '';
+  const h = document.createElement('div'); h.className = 'stitle';
+  h.textContent = 'سورة ' + (p.title || p.surah); liveReader.appendChild(h);
+  for (const v of p.ayat) {
+    const el = document.createElement('span'); el.className = 'ayah';   // инлайн → сплошной поток
+    const words = (v.text || '').split(/\s+/).filter(Boolean);
+    const spans = words.map(w => {
+      const s = document.createElement('span'); s.className = 'w'; s.textContent = w;
+      el.appendChild(s); el.appendChild(document.createTextNode(' '));
+      return s;
+    });
+    const num = document.createElement('span'); num.className = 'num';
+    num.textContent = '﴿' + arNum(v.ayah) + '﴾'; el.appendChild(num);
+    liveReader.appendChild(el); liveReader.appendChild(document.createTextNode(' '));
+    liveAyahEl[p.surah + ':' + v.ayah] = el;
+    liveWordEl[p.surah + ':' + v.ayah] = spans;
+  }
 }
 
-function renderPlace(d, provisional) {
-  applyLiveFont();
-  const dev = !!d.deviation;                             // режим заучивания: отклонение → красным
-  liveText.style.transition = 'background .2s';
-  liveText.style.background = dev ? 'rgba(210,40,40,.12)' : 'transparent';
-  // СПЛОШНОЙ поток как в плеере (мусхаф): аяты идут подряд одним justify-текстом, НЕ разрываются по
-  // окончанию аята; после каждого — маркер номера ۝, текущий аят выделяется цветом/подсветкой слова.
-  liveFound.innerHTML = '<b>' + d.current.surah + ':' + d.current.ayah + '</b>';
-  const wf = (d.word_frac == null) ? -1 : d.word_frac;
-  const ARN = ['٠','١','٢','٣','٤','٥','٦','٧','٨','٩'];
-  const arNum = n => String(n).split('').map(c => ARN[+c] || c).join('');
-  const parts = (d.ayat || []).map(a => {
-    let body = a.text;
-    if (a.current && wf >= 0) {
-      const words = a.text.split(/\s+/).filter(Boolean);
-      const wi = Math.max(0, Math.min(words.length - 1, Math.floor(wf * words.length)));
-      const hl = dev ? 'background:#c22;color:#fff' : 'background:#3a5;color:#fff';
-      body = words.map((w, i) =>
-        '<span style="' + (i === wi ? hl + ';border-radius:6px;padding:0 .1em' : '') + '">' + w + '</span>'
-      ).join(' ');
+function updateLive(d) {
+  if (d.passage) renderPassage(d.passage);
+  if (!d.current) return;
+  liveFound.innerHTML = '<b>' + d.current.surah + ':' + d.current.ayah + '</b>'
+    + (d.memorize ? (d.deviation ? ' <span style="color:#e24">🔴 отклонение</span>' : ' <span style="color:var(--ok)">🟢 верно</span>') : '');
+  const dev = !!d.deviation;
+  liveReader.classList.toggle('dev', dev);
+  const key = d.current.surah + ':' + d.current.ayah;
+  // активный аят + соседи (near) — только при смене аята
+  if (liveActiveKey !== key) {
+    if (liveActiveEl) liveActiveEl.classList.remove('active');
+    liveNear.forEach(x => x.classList.remove('near')); liveNear = [];
+    liveActiveKey = key; liveActiveEl = liveAyahEl[key] || null;
+    if (liveActiveEl) {
+      liveActiveEl.classList.add('active');
+      for (const sib of [liveActiveEl.previousElementSibling, liveActiveEl.nextElementSibling])
+        if (sib && sib.classList.contains('ayah')) { sib.classList.add('near'); liveNear.push(sib); }
     }
-    const style = a.current ? ('color:' + (dev ? '#e24' : 'var(--accent)') + ';font-weight:700') : 'opacity:.55';
-    return '<span style="' + style + '">' + body + '</span>'
-      + '<span style="opacity:.4;font-size:.7em"> ۝' + arNum(a.ayah) + ' </span>';
-  });
-  liveText.style.textAlign = 'justify';
-  liveText.innerHTML = parts.join('');   // всё в одном контейнере → сплошной поток, без разрывов
+  }
+  // горячее слово по word_frac (доля пройденного аята → индекс слова)
+  if (liveHotEl) { liveHotEl.classList.remove('hot'); liveHotEl = null; }
+  const words = liveWordEl[key] || [];
+  if (words.length) {
+    const wf = (d.word_frac == null) ? 0 : d.word_frac;
+    const wi = Math.max(0, Math.min(words.length - 1, Math.floor(wf * words.length)));
+    liveHotEl = words[wi]; if (liveHotEl) liveHotEl.classList.add('hot');
+    liveTargetEl = liveHotEl || liveActiveEl;
+  } else {
+    liveTargetEl = liveActiveEl;
+  }
+}
+
+// плавный автоскролл контейнера: держим целевой элемент на ~32% высоты ридера (виден текст впереди).
+// Экспоненциальный доводчик (как glide в плеере) → смена аята едет плавно, не рывком. rAF-цикл.
+function liveGlide() {
+  if (liveTargetEl && liveReader) {
+    const cr = liveReader.getBoundingClientRect();
+    const desired = cr.top + cr.height * 0.32;
+    const delta = liveTargetEl.getBoundingClientRect().top - desired;
+    if (Math.abs(delta) > 2) liveReader.scrollTop += delta * 0.16;
+  }
+  liveRaf = requestAnimationFrame(liveGlide);
 }
 
 let candSig = '';                                        // сигнатура списка — не перерисовывать без изменений (без мигания)
@@ -526,7 +667,7 @@ function renderCandidates(cands, leaderLabel) {
   if (sig === candSig) return;                           // тот же набор/лидер → не трогаем DOM
   candSig = sig;
   const fam = localStorage.getItem('sync.arabfont') || "'Amiri','Scheherazade New',serif";
-  liveDbg2.innerHTML = '<div style="font-size:.72em;opacity:.7;margin:.5em 0 .2em">кандидаты (тапни, если знаешь верное):</div>'
+  liveCands.innerHTML = '<div style="font-size:.72em;opacity:.7;margin:.5em 0 .2em">кандидаты (тапни, если знаешь верное):</div>'
     + cands.map((c) => {
       const key = c.surah + ':' + c.ayah;
       const lead = (leaderLabel === key);
@@ -537,7 +678,7 @@ function renderCandidates(cands, leaderLabel) {
         + '<div dir="rtl" lang="ar" style="font-size:1.15em;line-height:1.7;font-family:' + fam + '">' + c.text + '</div>'
         + '</div>';
     }).join('');
-  liveDbg2.querySelectorAll('.lcand').forEach(el => el.onclick = () => boostCand(el.dataset.k));
+  liveCands.querySelectorAll('.lcand').forEach(el => el.onclick = () => boostCand(el.dataset.k));
 }
 
 function boostCand(key) {
@@ -558,18 +699,16 @@ function handleMsg(d) {
   if (d.phase === 'scan') {
     const cands = d.candidates || [];
     liveState.textContent = cands.length ? 'ищу место… (уточняется по мере чтения)' : 'слушаю… читай дальше';
-    if (liveMode !== 'scan') { liveText.innerHTML = ''; liveFound.innerHTML = ''; liveMode = 'scan'; }
+    if (liveMode !== 'scan') { liveFound.innerHTML = ''; liveMode = 'scan'; }
     if (cands.length) renderCandidates(cands, cands[0].surah + ':' + cands[0].ayah);  // пусто → НЕ чистим (без мигания)
   } else if (d.phase === 'track' && d.current) {
     if (d.memorize && d.deviation) {
-      liveState.textContent = '🔴 отклонение от текста';
       if (!devOn) { devOn = true; beep(); }             // сигнал только на ФРОНТЕ отклонения (не каждый тик)
     } else {
-      liveState.textContent = d.memorize ? '🟢 читаешь верно' : 'веду за тобой';
       devOn = false;
     }
-    if (liveMode !== 'track') { liveDbg2.innerHTML = ''; liveMode = 'track'; }        // список кандидатов убрать один раз
-    renderPlace(d, false);
+    if (liveMode !== 'track') { liveCands.innerHTML = ''; candSig = ''; liveMode = 'track'; }  // кандидаты убрать один раз
+    updateLive(d);                                       // двигаем подсветку+скролл, DOM суры не перерисовываем
   }
   if (!d.skip) liveDbg.textContent = 'фаза ' + (d.phase || '?') + ' · буфер ' + (d.buf_sec || 0) + 'с · тик#' + (d.n || 0);
 }
