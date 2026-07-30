@@ -70,7 +70,7 @@ services:
     # Отдельный сервис `web`(runserver)+`live`(uvicorn) больше не нужен — один ASGI покрывает всё.
     # uvicorn+websockets лежат в ./work/pydeps (pip --target). БЕЗ --reload → после правок кода
     # (live_views/asgi/views) делать `docker compose restart web`. GPU нужен для live-декода (wav2vec2).
-    command: sh -c "python manage.py migrate --noinput && PYTHONPATH=/app/work/pydeps:/app/src:/app/service python -m uvicorn synchronized.asgi:application --host 0.0.0.0 --port 8000 --ws websockets --ws-ping-interval 0 --ws-ping-timeout 300 --log-level warning"
+    command: sh -c "python manage.py migrate --noinput && PYTHONPATH=/app/work/pydeps:/app/src:/app/service python -m uvicorn synchronized.asgi:application --host 0.0.0.0 --port 8000 --ws websockets --ws-ping-interval 0 --ws-ping-timeout 300 --ws-max-queue 1024 --log-level warning"
     ports:
       - "8000:8000"
     deploy:

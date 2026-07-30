@@ -134,7 +134,11 @@ _ACTIVE = {"n": 0}                                   # число ЖИВЫХ WS-
 # сессии. Владелец 30.07: не держать видеопамять, когда никто не читает, чтобы транскрипция large-v3
 # получала память БЕЗ перезагрузки сервиса. Во время активного теста модель остаётся (мгновенный ответ).
 # 0 → деинит выкл. Таймаут > паузы авто-реконнекта (обрыв ngrok) → короткий разрыв позицию не сбросит.
-_IDLE_UNLOAD_SEC = float(os.environ.get("SYNC_LIVE_IDLE_UNLOAD", "45"))
+# 180с (не 45): владелец читает суры ПОДРЯД, останавливаясь между ними на 20-60с. При 45с модель
+# успевала выгрузиться в паузе → старт следующей суры перезагружал её (~5с заморозка event-loop →
+# «долго думал» + браузер рвёт WS). 3 мин держим тёплой (переключение сур мгновенно), выгружаем лишь
+# при РЕАЛЬНОМ простое (для транскрипции large-v3). Крутилка SYNC_LIVE_IDLE_UNLOAD (0 → деинит выкл).
+_IDLE_UNLOAD_SEC = float(os.environ.get("SYNC_LIVE_IDLE_UNLOAD", "180"))
 _SR = 16000
 _BUF_CAP = float(os.environ.get("SYNC_LIVE_BUFCAP", "20"))        # роллинг-буфер PCM (владелец: ~20с, не 48)
 _COLD_MIN = float(os.environ.get("SYNC_LIVE_COLDMIN", "10"))      # накопить перед 1-й попыткой лока
@@ -161,6 +165,11 @@ _DECAY = float(os.environ.get("SYNC_LIVE_DECAY", "0.6"))          # затуха
 _KTOP = int(os.environ.get("SYNC_LIVE_KTOP", "4"))               # сколько кандидатов показывать
 _LOCK_CONF = float(os.environ.get("SYNC_LIVE_LOCKCONF", "0.45")) # доля голосов лидера → точный лок
 _LOCK_MIN = float(os.environ.get("SYNC_LIVE_LOCKMIN", "6"))       # мин. буфера перед локом (с)
+# ДРОССЕЛЬ холодного лока: тяжёлый decode(до 45с)+find_segments НЕ каждый тик. Пока conf≥порога, но
+# ratio ещё не дотянул до гейта (клиент только набирает контекст, ~10-16с), лок-попытка крутилась
+# КАЖДЫЙ тик (~0.3-0.5с GPU+difflib с GIL каждые ~0.45с) → event-loop голодал → WS через ngrok рвался
+# (owner tg_7171/7172: «сломалось, записалось как две сессии»). Пробуем лок не чаще, чем раз в N тиков.
+_COLD_LOCK_N = int(os.environ.get("SYNC_LIVE_COLDLOCKN", "6"))    # тиков между попытками холодного лока
 _SCAN_WIN_CH = int(os.environ.get("SYNC_LIVE_SCANWIN", "50"))     # символов декода для голосования
 _TRUNC = int(os.environ.get("SYNC_LIVE_TRUNC", "120"))           # обрезка длинного текста аята (симв)
 # кросс-сура быстрый перелок в track (фикс холодного мимо-лока): если ДРУГАЯ сура уверенно
@@ -366,7 +375,9 @@ def _analyze(st):
             conf = cands[0]["confidence"]
             cand_out = [{"surah": c["surah"], "ayah": c["ayah"], "confidence": c["confidence"],
                          "text": _trunc(_ayah_text(q, c["surah"], c["ayah"]))} for c in cands]
-            if conf >= _LOCK_CONF and len(st["buf"]) >= int(_LOCK_MIN * _SR):
+            cold_step_ok = (st["n"] - st.get("last_coldlock_n", -10**9)) >= _COLD_LOCK_N
+            if conf >= _LOCK_CONF and len(st["buf"]) >= int(_LOCK_MIN * _SR) and cold_step_ok:
+                st["last_coldlock_n"] = st["n"]
                 # растущий аккумулятор (от начала, до 45с) на холодный лок — длинное окно давит мусорную
                 # суру и растит ratio верного пассажа; фолбэк на роллинг, если аккумулятор выкл/короче.
                 cb = st.get("cold_buf")
@@ -690,6 +701,13 @@ async def live_ws(scope, receive, send):
     # reset ТОЛЬКО если явно (?reset=1) или сессии ещё нет → при авто-реконнекте позиция СОХРАНЯЕТСЯ
     # (обрыв ngrok не сбрасывает в ре-скан → нет прыжков «с нуля», владелец tg_5704/5708)
     st = _session(sid, reset=bool(qs.get("reset")) or sid not in _STREAM)
+    # generation-guard: при обрыве ngrok сервер НЕ узнаёт, что клиент ушёл (ws-ping-interval=0 → мёртвый
+    # коннект не реапится), клиент открывает НОВЫЙ WS того же sid → два хэндлера живут разом и гонятся за
+    # общий st (буфер/фаза/трекер) → состояние бьётся, «вернулось в scan» (owner tg_7185, две сессии в
+    # логах на один sid без disconnect между). Новый коннект вытесняет старый: каждый хэндлер помнит свой
+    # gen; как только gen сменился (пришёл новый) — старый (зомби) тихо выходит, не трогая общий st.
+    st["gen"] = st.get("gen", 0) + 1
+    my_gen = st["gen"]
     loop = asyncio.get_event_loop()
     # запись сырого потока (Int16 16кГц) — конвертнуть в wav: ffmpeg -f s16le -ar 16000 -ac 1 -i <f> out.wav
     cap_path = os.path.join(os.environ.get("SYNC_WORK", "/app/work"), f"live_cap_{sid}.pcm")
@@ -700,11 +718,22 @@ async def live_ws(scope, receive, send):
     print(f"LIVE_WS connect sid={sid} peer={scope.get('client')} → запись {cap_path}", flush=True)
     await send({"type": "websocket.accept"})
     _ACTIVE["n"] += 1                                 # живая сессия (для idle-деинита модели)
+    # ПРЕЛОАД модели в фоне, пока клиент набирает первые ~6с буфера: если модель была выгружена
+    # (простой) — грузим её ПАРАЛЛЕЛЬНО набору контекста, чтобы первый декод не морозил loop на ~5с
+    # посреди стрима (это и рвало WS + давало «долго думал»). Если уже тёплая — no-op.
+    try:
+        import w2v_align as _w2v
+        if not _w2v.is_loaded():
+            loop.run_in_executor(None, _w2v.warmup)
+    except Exception:
+        pass
 
     proc = {"task": None, "dirty": False, "frames": 0}
 
     async def pump():
         while proc["dirty"]:
+            if st.get("gen") != my_gen:                              # вытеснён новым коннектом → не анализируем
+                return
             proc["dirty"] = False
             res = await loop.run_in_executor(None, _analyze, st)     # GPU вне loop, single-flight
             try:
@@ -715,6 +744,8 @@ async def live_ws(scope, receive, send):
     try:
         while True:
             ev = await receive()
+            if st.get("gen") != my_gen:                  # новый коннект того же sid вытеснил нас → выходим
+                break
             t = ev.get("type")
             if t == "websocket.disconnect":
                 break

@@ -62,6 +62,19 @@ def is_loaded() -> bool:
     return _model is not None
 
 
+def warmup():
+    """Прелоад модели (загрузка HF-весов на GPU ~5с). Зовём при подключении live-сессии в отдельном
+    потоке, ПОКА клиент набирает первые ~6с буфера → загрузка прячется под неизбежный набор контекста,
+    первый декод уже по тёплой модели (не морозит event-loop на 5с посреди стрима). No-op если загружена."""
+    try:
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        _load_model(device)
+        return True
+    except Exception:
+        return False
+
+
 def unload():
     """Выгрузить модель из процесса → освободить VRAM (~1.5ГБ). Для деинита live при простое
     (владелец 30.07: не держать видеопамять, когда никто не читает → транскрипция large-v3 получает
