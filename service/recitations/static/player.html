@@ -186,6 +186,15 @@ function dataCandidates(){
 }
 let YOUTUBE_ID = '';   // узнаём из data.json (было server-side)
 const audio = document.getElementById('audio');
+// громкость <audio> сохраняется между перезагрузками (owner: каждый раз полная громкость)
+const VOL_KEY = 'sync.volume';
+(function(){
+  const v = parseFloat(localStorage.getItem(VOL_KEY));
+  if (!isNaN(v) && v >= 0 && v <= 1) audio.volume = v;
+  audio.addEventListener('volumechange', () => {
+    localStorage.setItem(VOL_KEY, audio.volume.toFixed(3));
+  });
+})();
 const textEl = document.getElementById('text');
 const badge = document.getElementById('badge');
 const badgeSurah = document.getElementById('badgeSurah');
