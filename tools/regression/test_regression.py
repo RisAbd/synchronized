@@ -3,6 +3,8 @@
 ловит «чиню одно, ломаю другое». Фикстуры лежат рядом со скриптом и трекаются в git.
 
   docker compose exec -T worker python /app/tools/regression/test_regression.py
+Корановская модель (пины в quran/, тест всё равно CPU — find_segments не зависит от модели):
+  docker compose exec -T -e REG_DIR=/app/tools/regression/quran worker python /app/tools/regression/test_regression.py
 
 Пересобрать пины (ТОЛЬКО после осознанной смены поведения, с GPU):
   docker compose exec -T worker python /app/tools/regression/build_regression.py"""
@@ -13,7 +15,7 @@ import django; django.setup()
 import match_align
 from quran import Quran
 
-REG = os.path.dirname(os.path.abspath(__file__))
+REG = os.environ.get("REG_DIR") or os.path.dirname(os.path.abspath(__file__))
 quran = Quran.load()
 index = match_align.build_index(quran)
 
