@@ -447,3 +447,62 @@ def build_manual_run(run, word_timeline: list[dict]) -> None:
     if not rec.title_ar and data.get("sections"):
         rec.title_ar = data["sections"][0]["title"]
         rec.save(update_fields=["title_ar", "updated_at"])
+
+
+# --- WH «Мануал 2»: слот-структура из ручной разметки повторов ---------------
+# Идея владельца (tg_4547): не задавать тайминг КАЖДОГО слова (тяжело — manual v3), а отметить ТОЛЬКО
+# повторы (какой кусок и сколько раз прочитан) → собрать слот-структуру → `w2v_align.forced_align(slots=)`
+# (уже надёжен, cov=1.0/fj=0 — сам раскладывает КАЖДОЕ звучание на свою копию) → почти идеал. Здесь —
+# ДЕТЕРМИНИРОВАННОЕ ядро (разметка → слоты), тестируется без GPU/фронта. Тайминги ставит forced_align.
+
+def flat_range_words(q, verses) -> list:
+    """Плоский порядок слов диапазона аятов → [(surah, ayah, wi, word)]. wi — безвакфовый индекс
+    слова В АЯТЕ (как forced_align/build_data: `quran.word_tokens` роняет токены-вакфы)."""
+    from quran import word_tokens
+    flat = []
+    for s, a in verses:
+        txt = q.verse(s, a).text
+        for wi, w in enumerate(word_tokens(txt)):
+            flat.append((s, a, wi, w))
+    return flat
+
+
+def slots_from_marks(flat: list, marks: list) -> list:
+    """Плоский список слов диапазона + разметка повторов → слоты для `forced_align(slots=)`.
+
+    `flat` — [(surah, ayah, wi, word)] в порядке чтения (из `flat_range_words`).
+    `marks` — [{"start": i, "end": j, "count": n}] по ПЛОСКИМ индексам `flat` (0-based, end включительно);
+    span [i..j] прочитан `n` раз подряд (n≥2). Пересечения/выход за границы/n<2 — ошибка.
+    Возврат — слоты [(surah, ayah, wi, word, rep)] в порядке чтения: непомеченные слова один раз;
+    помеченный span вставлен `count` раз подряд, копии 2..count с rep=True (пометка перечитки для П8)."""
+    n = len(flat)
+    ms = sorted((m for m in marks or []), key=lambda m: int(m["start"]))
+    prev_end = -1
+    norm = []
+    for m in ms:
+        i, j, c = int(m["start"]), int(m["end"]), int(m["count"])
+        if not (0 <= i <= j < n):
+            raise ValueError(f"метка [{i}..{j}] вне диапазона 0..{n - 1}")
+        if i <= prev_end:
+            raise ValueError(f"метки пересекаются на индексе {i}")
+        if c < 2:
+            raise ValueError(f"count={c} < 2 — это не повтор")
+        norm.append((i, j, c))
+        prev_end = j
+
+    slots = []
+    i, mi = 0, 0
+    while i < n:
+        if mi < len(norm) and norm[mi][0] == i:
+            start, end, c = norm[mi]
+            span = flat[start:end + 1]
+            for rep_i in range(c):
+                for (s, a, wi, w) in span:
+                    slots.append((s, a, wi, w, rep_i > 0))
+            i = end + 1
+            mi += 1
+        else:
+            s, a, wi, w = flat[i]
+            slots.append((s, a, wi, w, False))
+            i += 1
+    return slots
