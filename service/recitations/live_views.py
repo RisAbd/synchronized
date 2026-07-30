@@ -537,7 +537,14 @@ def _analyze(st):
                 st["last_reloc_n"] = st["n"]
                 st["stall_reloc"] = 0
                 st["cross_n"] = 0; st["cross_surah"] = None  # после попытки — копим заново (бережём GPU)
-        extra = {"candidates": track_cands, "switching": True} if switching and track_cands else {}
+        # кандидатов шлём ВСЕГДА (владелец tg: «пусть всегда есть, но свёрнуто»); фронт держит их
+        # свёрнутым оверлеем (не двигает текст), раскрывает по стрелке. switching — лишь подсказка-пульс
+        # на свёрнутом тумблере (другая сура набирает вес), НЕ форс-раскрытие.
+        extra = {}
+        if track_cands:
+            extra["candidates"] = track_cands
+            if switching:
+                extra["switching"] = True
         return _build_reply(st, extra)
     except Exception as e:
         import traceback
