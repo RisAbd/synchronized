@@ -71,6 +71,7 @@ services:
       - ./data:/app/data:ro       # quran.db (Tanzil + редакция Diyanet) — читаем, пишет хост-скрипт
       - ./media:/app/media        # аудио записей + сырые ответы ASR (persist)
       - ./work:/app/work          # промежуточные выгрузки (persist)
+      - ./tools:/app/tools        # утилиты/тесты (регресс find_segments и пр.) — трекается в git
       - ./cache:/app/.cache       # кэш моделей whisper/MMS (persist, не качать на рестарт)
       - ./creds:/app/creds:ro     # ключ Google STT (вне репо, gitignored) — read-only
     # ЕДИНЫЙ веб-сервис: uvicorn (ASGI) отдаёт И обычный Django (HTTP/статика/БД), И websocket
@@ -105,6 +106,7 @@ services:
       - ./data:/app/data:ro       # quran.db (Tanzil + редакция Diyanet) — читаем, пишет хост-скрипт
       - ./media:/app/media
       - ./work:/app/work
+      - ./tools:/app/tools        # утилиты/тесты (регресс find_segments и пр.) — трекается в git
       - ./cache:/app/.cache       # кэш моделей whisper/MMS (persist, не качать на рестарт)
       - ./creds:/app/creds:ro     # ключ Google STT (вне репо, gitignored) — read-only
     # GPU для ML-конвейера (whisper + forced). Требует nvidia-container-toolkit на хосте
