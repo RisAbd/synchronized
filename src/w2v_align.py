@@ -58,6 +58,28 @@ def _load_model(device: str):
     return _model, _processor, _vocab
 
 
+def is_loaded() -> bool:
+    return _model is not None
+
+
+def unload():
+    """Выгрузить модель из процесса → освободить VRAM (~1.5ГБ). Для деинита live при простое
+    (владелец 30.07: не держать видеопамять, когда никто не читает → транскрипция large-v3 получает
+    память БЕЗ перезагрузки сервиса). Следующий emissions() лениво загрузит модель заново."""
+    global _model, _processor, _vocab
+    if _model is None:
+        return False
+    _model = None; _processor = None; _vocab = None
+    try:
+        import gc, torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    return True
+
+
 def _load_wav(path):
     """Аудио → float32 моно 16кГц (soundfile + librosa-ресемпл при нужде). Без whisperx/ffmpeg-CLI."""
     import numpy as np

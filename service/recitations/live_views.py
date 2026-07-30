@@ -129,6 +129,12 @@ def _continuity(sid, cur):
 # НЕ перезапуская find_segments (на мелодичных окнах он бы прыгнул в мусор). Корпус трекера — от точки
 # лока вперёд по Корану (чтение последовательно). Цена константна (окно фиксировано), не растёт.
 _STREAM = {}
+_ACTIVE = {"n": 0}                                   # число ЖИВЫХ WS-сессий (для idle-деинита модели)
+# Простой без единой живой сессии дольше этого → выгружаем wav2vec2 из VRAM (~1.5ГБ) + чистим мёртвые
+# сессии. Владелец 30.07: не держать видеопамять, когда никто не читает, чтобы транскрипция large-v3
+# получала память БЕЗ перезагрузки сервиса. Во время активного теста модель остаётся (мгновенный ответ).
+# 0 → деинит выкл. Таймаут > паузы авто-реконнекта (обрыв ngrok) → короткий разрыв позицию не сбросит.
+_IDLE_UNLOAD_SEC = float(os.environ.get("SYNC_LIVE_IDLE_UNLOAD", "45"))
 _SR = 16000
 _BUF_CAP = float(os.environ.get("SYNC_LIVE_BUFCAP", "20"))        # роллинг-буфер PCM (владелец: ~20с, не 48)
 _COLD_MIN = float(os.environ.get("SYNC_LIVE_COLDMIN", "10"))      # накопить перед 1-й попыткой лока
@@ -650,6 +656,26 @@ def _do_locate(raw: bytes):
 # Причина зависания HTTP-версии: 100мс-чанки = ~10 запросов/с, ngrok-free троттлит и рвёт коннект.
 # Вебсокет — ОДИН постоянный коннект: кадры PCM текут потоком, сервер шлёт JSON-обновления, нет
 # пер-запросного лимита. Тяжёлый декод (GPU, блокирующий) гоняем в threadpool, чтобы не держать loop.
+async def _idle_deinit(loop):
+    """После простоя _IDLE_UNLOAD_SEC без живых сессий — выгрузить модель из VRAM + подчистить мёртвые
+    сессии. Планируется при падении числа сессий до 0; повторно проверяет счётчик (быстрый реконнект
+    его поднимет → деинит отменится). Безопасно: при 0 сессий декод не идёт (unload не рвёт inference)."""
+    import asyncio
+    if _IDLE_UNLOAD_SEC <= 0:
+        return
+    await asyncio.sleep(_IDLE_UNLOAD_SEC)
+    if _ACTIVE["n"] > 0:
+        return                                        # кто-то подключился за время простоя → не трогаем
+    try:
+        import w2v_align
+        freed = await loop.run_in_executor(None, w2v_align.unload)
+        _STREAM.clear()                               # живых сессий нет → состояние трекеров/буферов не нужно
+        if freed:
+            print("LIVE idle → wav2vec2 выгружен из VRAM, сессии очищены", flush=True)
+    except Exception:
+        pass
+
+
 async def live_ws(scope, receive, send):
     """SINGLE-FLIGHT: приём кадров дёшево в loop (_append_pcm), тяжёлый _analyze — ОДИН за раз в
     executor на самом свежем буфере (кадры между разборами просто продлевают буфер) → очередь НЕ
@@ -673,6 +699,7 @@ async def live_ws(scope, receive, send):
         cap = None
     print(f"LIVE_WS connect sid={sid} peer={scope.get('client')} → запись {cap_path}", flush=True)
     await send({"type": "websocket.accept"})
+    _ACTIVE["n"] += 1                                 # живая сессия (для idle-деинита модели)
 
     proc = {"task": None, "dirty": False, "frames": 0}
 
@@ -725,7 +752,14 @@ async def live_ws(scope, receive, send):
         if cap:
             try: cap.close()
             except Exception: pass
-        print(f"LIVE_WS disconnect sid={sid} frames={proc['frames']}", flush=True)
+        _ACTIVE["n"] = max(0, _ACTIVE["n"] - 1)
+        print(f"LIVE_WS disconnect sid={sid} frames={proc['frames']} active={_ACTIVE['n']}", flush=True)
+        if _ACTIVE["n"] == 0:                         # никого не осталось → запланировать выгрузку модели
+            try:
+                import asyncio
+                asyncio.create_task(_idle_deinit(loop))
+            except Exception:
+                pass
     try:
         await send({"type": "websocket.close"})
     except Exception:
