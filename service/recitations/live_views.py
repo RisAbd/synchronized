@@ -181,11 +181,17 @@ _TRUNC = int(os.environ.get("SYNC_LIVE_TRUNC", "120"))           # обрезк�
 # кросс-сура быстрый перелок в track (фикс холодного мимо-лока): если ДРУГАЯ сура уверенно
 # лидирует _RELOCK_HOLD тиков подряд по фоновому scan — перелок сразу, не ждём застоя.
 _RELOCK_CONF = float(os.environ.get("SYNC_LIVE_RELOCKCONF", "0.35")) # мин. уверенность кросс-лидера (доля топ-K)
-_RELOCK_HOLD = int(os.environ.get("SYNC_LIVE_RELOCKHOLD", "3"))      # тиков подряд лидерства ТОЙ ЖЕ другой суры
-# кросс-перелок разрешён ТОЛЬКО в раннем окне после первого лока (фикс ХОЛОДНОГО мимо-лока из-за
-# басмалы-интро). Позже — доверяем последовательному треку (легитимная смена суры ловится застоем);
-# иначе на мелодичном/повторном чтении k-грамм шумит и кросс прыгал бы по случайным сурам (регресс rec7).
-_CROSS_MAX = int(os.environ.get("SYNC_LIVE_CROSSMAX", "40"))         # тиков от первого лока, пока кросс жив
+_RELOCK_HOLD = int(os.environ.get("SYNC_LIVE_RELOCKHOLD", "2"))      # тиков подряд лидерства ТОЙ ЖЕ другой суры (2 — свап раньше)
+# УСКОРЕНИЕ СВАПА (владелец tg_7334: детект кандидатов быстрый ~3с, но текст свапается поздно — ждал
+# полного confirm-2; «переключай пораньше, когда уже детектим с некоторой вероятностью»). Механизм:
+# confirm-1, когда k-грамм-кросс-лидер и find_segments СОГЛАСНЫ (new_s == cross_surah) при ratio ≥
+# _RELOC_AGREE_RATIO — два независимых сигнала совпали ⇒ не ждём второго find_segments. Мусорный
+# одноразовый матч так НЕ пройдёт: k-грамм должен УСТОЙЧИВО (HOLD тиков) вести ту же суру И find_segments
+# её же подтвердить на ПОЛНОМ 20с-окне. ⚠️ Короткое окно (_CROSS_WIN<20) ПРОБОВАЛ и ОТВЕРГ: на переходе
+# Фатиха→Исра (rec9, басмала/такбир в буфере) 12с-окно мис-резолвило суру 2 вместо 17 (ложный свап =
+# «говно» по владельцу) → держим ПОЛНЫЙ _COLD_WIN. Скорость даёт confirm-1-agree, не длина окна.
+_CROSS_WIN = float(os.environ.get("SYNC_LIVE_CROSSWIN", "20"))       # окно find_segments при cross (=_COLD_WIN, полный контекст)
+_RELOC_AGREE_RATIO = float(os.environ.get("SYNC_LIVE_AGREERATIO", "0.48"))  # ratio согласия k-грамм+find_seg → confirm-1
 # ГЕЙТ КАЧЕСТВА перелока: свитчим корпус только если предполагаемый пассаж РЕАЛЬНО объясняет декод
 # (skeleton-difflib ≥ порога). На мелодичном/шумном декоде find_segments возвращает МУСОРНУЮ суру
 # (её ratio низкий) → не прыгаем, остаёмся на месте (последовательность > случайный скачок).
@@ -469,6 +475,10 @@ def _analyze(st):
                 cross = st["cross_n"] >= _RELOCK_HOLD
             else:
                 st["cross_n"] = 0; st["cross_surah"] = None
+        # ПЕРЕКЛЮЧЕНИЕ ДЕТЕКТИТСЯ (владелец tg_7316): кандидатов держим в ПАМЯТИ всегда (для свапа), а
+        # на фронт шлём окно выбора ТОЛЬКО когда ДРУГАЯ сура реально набирает вес (cross_n≥1). При
+        # уверенном ведении основной суры фронт кандидатов не показывает (основной текст сверху, чисто).
+        switching = st.get("cross_n", 0) >= 1
 
         if moved and not cross:
             st["stall_reloc"] = 0
@@ -479,7 +489,8 @@ def _analyze(st):
             stall_trig = st["stall_reloc"] >= _RELOC_STALL and cd_ok       # обычный застой (кулдаун)
             # cross — быстрый путь: без кулдауна (устойчивый K-тиковый лидер уже сильный гард)
             if (cross or stall_trig) and len(st["buf"]) >= int(_COLD_MIN * _SR):
-                Er, decr = _decode_window(st["buf"], _COLD_WIN, idx2ch, ch2idx)
+                # при cross — КОРОТКОЕ свежее окно (новая сура доминирует раньше хвоста старой)
+                Er, decr = _decode_window(st["buf"], _CROSS_WIN if cross else _COLD_WIN, idx2ch, ch2idx)
                 if Er is not None:
                     v2 = find_segments(Er, q, idx2ch, ch2idx, index=index)
                     # ПРИОРИТЕТ ПОСЛЕДОВАТЕЛЬНОСТИ (владелец tg_5744): перелок ТОЛЬКО при смене СУРЫ.
@@ -504,7 +515,12 @@ def _analyze(st):
                             st["reloc_cand_n"] = st.get("reloc_cand_n", 0) + 1
                         else:
                             st["reloc_cand_s"] = new_s; st["reloc_cand_n"] = 1
-                        confirmed = st["reloc_cand_n"] >= _RELOC_CONFIRM
+                        # СОГЛАСИЕ двух сигналов (владелец tg_7334 «переключай пораньше»): k-грамм-кросс
+                        # УСТОЙЧИВО (HOLD тиков) вёл ту же суру, и find_segments её же подтвердил при
+                        # ratio≥порога → confirm-1 (не ждём второй find_segments). Иначе — прежний confirm-2.
+                        agree = bool(cross) and new_s == st.get("cross_surah") and ratio >= _RELOC_AGREE_RATIO
+                        need = 1 if agree else _RELOC_CONFIRM
+                        confirmed = st["reloc_cand_n"] >= need
                     else:
                         confirmed = False
                         st["reloc_cand_s"] = None; st["reloc_cand_n"] = 0
@@ -521,7 +537,8 @@ def _analyze(st):
                 st["last_reloc_n"] = st["n"]
                 st["stall_reloc"] = 0
                 st["cross_n"] = 0; st["cross_surah"] = None  # после попытки — копим заново (бережём GPU)
-        return _build_reply(st, {"candidates": track_cands})
+        extra = {"candidates": track_cands, "switching": True} if switching and track_cands else {}
+        return _build_reply(st, extra)
     except Exception as e:
         import traceback
         tb = traceback.format_exc()

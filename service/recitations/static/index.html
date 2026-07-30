@@ -96,9 +96,15 @@
   .live-reader .ayah.near { color:var(--muted); }
   .live-reader .ayah.active { color:var(--fg); }
   .live-reader .ayah .num { font:600 .58em system-ui; color:var(--muted); margin:0 .35em; opacity:.8; }
-  .live-reader .w { border-radius:8px; padding:.02em .14em; transition:color .25s, background .25s; }
-  .live-reader .w.hot { color:#fff; background:var(--hot,#2e8b45); box-shadow:0 1px 10px rgba(46,139,69,.42); }
-  .live-reader.dev .w.hot { background:#c22; box-shadow:0 1px 10px rgba(200,40,40,.5); }
+  .live-reader .w { border-radius:8px; padding:.02em .14em; transition:color .2s, background .2s; }
+  /* градиентная подсветка как в плеере (владелец tg_7334): центр .hot + соседи .lit с затуханием --wi,
+     мягче и шире → маскирует неточность привязки слова, не «резкий одиночный акцент» */
+  .live-reader .w.lit { color:var(--hl-fg,inherit);
+    background:color-mix(in srgb, var(--hot,#2e8b45) calc(var(--wi,0) * 55%), transparent); }
+  .live-reader .w.hot { color:#fff; background:color-mix(in srgb, var(--hot,#2e8b45) 90%, transparent);
+    box-shadow:0 1px 7px rgba(46,139,69,.34); }
+  .live-reader.dev .w.lit { background:color-mix(in srgb, #c22 calc(var(--wi,0) * 55%), transparent); }
+  .live-reader.dev .w.hot { background:#c22; box-shadow:0 1px 8px rgba(200,40,40,.45); }
   .live-reader.dev .ayah.active { color:#e24; }
   #liveFontPanel { position:fixed; z-index:60; top:8px; right:8px; background:var(--card);
     border:1px solid var(--line); border-radius:14px; padding:8px; box-shadow:0 8px 30px rgba(0,0,0,.28);
@@ -174,8 +180,8 @@
       </label>
     </div>
     <div id="liveFound" style="margin-top:.5em;font-size:.95em;color:var(--muted)"></div>
-    <div id="liveCands"></div>
     <div id="liveReader" class="live-reader" dir="rtl" lang="ar"></div>
+    <div id="liveCands"></div>
     <div id="liveDbg" style="color:#889;font-size:.72em;direction:ltr;padding:2px 4px"></div>
   </div>
 </div>
@@ -611,6 +617,7 @@ const ARN = ['٠','١','٢','٣','٤','٥','٦','٧','٨','٩'];
 const arNum = n => String(n).split('').map(c => ARN[+c] || c).join('');
 let liveAyahEl = {}, liveWordEl = {};                    // ключ surah:ayah → элемент аята / массив слов
 let liveActiveKey = null, liveActiveEl = null, liveHotEl = null, liveNear = [], liveTargetEl = null;
+let liveLitEls = [];                                     // соседи-слова в градиент-окне (снимаем каждый тик)
 let livePassageSurah = null;                             // какая сура сейчас отрисована (не перерисовывать зря)
 let livePassageData = null;                              // последняя присланная сура (ре-рендер при смене редакции)
 let liveRaf = 0;
@@ -623,7 +630,7 @@ function renderPassage(p) {
   if (livePassageSurah === p.surah) return;
   livePassageSurah = p.surah;
   liveAyahEl = {}; liveWordEl = {}; liveActiveKey = null; liveActiveEl = null; liveHotEl = null;
-  liveNear = []; liveTargetEl = null;
+  liveNear = []; liveTargetEl = null; liveLitEls = [];
   liveReader.innerHTML = '';
   const h = document.createElement('div'); h.className = 'stitle';
   h.textContent = 'سورة ' + (p.title || p.surah); liveReader.appendChild(h);
@@ -662,13 +669,21 @@ function updateLive(d) {
         if (sib && sib.classList.contains('ayah')) { sib.classList.add('near'); liveNear.push(sib); }
     }
   }
-  // горячее слово по word_frac (доля пройденного аята → индекс слова)
+  // горячее слово по word_frac (доля пройденного аята → индекс) + ГРАДИЕНТ-ОКНО ±R соседей (как плеер):
+  // мягче/шире, маскирует неточность привязки, не «резкий одиночный акцент» (владелец tg_7334)
   if (liveHotEl) { liveHotEl.classList.remove('hot'); liveHotEl = null; }
+  liveLitEls.forEach(x => { x.classList.remove('lit'); x.style.removeProperty('--wi'); });
+  liveLitEls = [];
   const words = liveWordEl[key] || [];
   if (words.length) {
     const wf = (d.word_frac == null) ? 0 : d.word_frac;
     const wi = Math.max(0, Math.min(words.length - 1, Math.floor(wf * words.length)));
-    liveHotEl = words[wi]; if (liveHotEl) liveHotEl.classList.add('hot');
+    const R = 3;
+    for (let dw = -R; dw <= R; dw++) {
+      const el = words[wi + dw]; if (!el) continue;      // за краем аята — пропускаем (как плеер)
+      if (dw === 0) { el.classList.add('hot'); liveHotEl = el; }
+      else { el.style.setProperty('--wi', (1 - Math.abs(dw) / (R + 1)).toFixed(2)); el.classList.add('lit'); liveLitEls.push(el); }
+    }
     liveTargetEl = liveHotEl || liveActiveEl;
   } else {
     liveTargetEl = liveActiveEl;
@@ -737,10 +752,12 @@ function handleMsg(d) {
     }
     liveMode = 'track';
     updateLive(d);                                       // двигаем подсветку+скролл, DOM суры не перерисовываем
-    // ВСЕГДА держим кандидатов живыми (владелец tg_7242): видно, как растёт вес другой суры перед
-    // свапом; тап всё так же бустит. Основную суру ведёт ридер выше, список — что ещё голосует.
-    if (d.candidates && d.candidates.length)
+    // Кандидатов держит бэк в памяти; ПОКАЗЫВАЕМ окно выбора (снизу) ТОЛЬКО когда бэк задетектил
+    // переключение (d.switching — другая сура набирает вес). Уверенное ведение → список скрыт, чтобы
+    // основной текст был чистым и сверху (владелец tg_7316: не крутить кандидатов постоянно/поверх).
+    if (d.switching && d.candidates && d.candidates.length)
       renderCandidates(d.candidates, d.candidates[0].surah + ':' + d.candidates[0].ayah);
+    else if (liveCands.innerHTML) { liveCands.innerHTML = ''; candSig = ''; }
   }
   if (!d.skip) liveDbg.textContent = 'фаза ' + (d.phase || '?') + ' · буфер ' + (d.buf_sec || 0) + 'с · тик#' + (d.n || 0);
 }
