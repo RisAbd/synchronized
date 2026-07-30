@@ -156,6 +156,55 @@ def manual_save(request, pk):
                                "coverage_pct": round((m.get("coverage") or 0) * 100)}))
 
 
+def marks(request, pk):
+    """WH «Мануал 2» — облегчённый разметчик повторов, статичный файл. Красивый URL /r/<id>/marks
+    редиректом на статику (пробрасываем ?asr/?api). Страница фетчит /r/<id>/data.json (слова диапазона)."""
+    get_object_or_404(Recitation, pk=pk)
+    qs = request.GET.urlencode()
+    url = f"{settings.STATIC_URL}mark_repeats.html?rec={pk}" + (f"&{qs}" if qs else "")
+    return redirect(url)
+
+
+# CSRF-exempt: fetch из статичного разметчика (WH), тело — verses/marks JSON-строками в полях формы
+# (urlencoded, простой CORS без preflight, как manual/save). Персональный прототип.
+@csrf_exempt
+@require_POST
+def marks_save(request, pk):
+    """WH «Мануал 2»: сохранить ручную разметку повторов → запустить GPU-прогон «marks»
+    (forced_align(slots=)). Разметка кладётся в rec_dir/marks.json, прогон гоняется асинхронно
+    (source `marks`, ISOLATE) — клиент опрашивает статус, как обычный распознаватель."""
+    rec = get_object_or_404(Recitation, pk=pk)
+    try:
+        verses = json.loads(request.POST.get("verses") or "")
+        marks_list = json.loads(request.POST.get("marks") or "[]")
+    except (ValueError, TypeError):
+        return _cors(JsonResponse({"ok": False, "error": "битый JSON"}, status=400))
+    if not isinstance(verses, list) or not verses:
+        return _cors(JsonResponse({"ok": False, "error": "пустой диапазон verses"}, status=400))
+    # ВАЛИДИРУЕМ разметку до запуска GPU (пересечения/границы/count) — ядром slots_from_marks
+    try:
+        vpairs = [(int(s), int(a)) for s, a in verses]
+        q = pipeline._quran()
+        flat = pipeline.flat_range_words(q, vpairs)
+        pipeline.slots_from_marks(flat, marks_list)
+    except Exception as e:  # noqa: BLE001 — сообщаем пользователю в UI
+        return _cors(JsonResponse({"ok": False, "error": str(e)[:300]}, status=400))
+
+    d = pipeline.rec_dir(rec.id)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "marks.json").write_text(
+        json.dumps({"verses": [[s, a] for s, a in vpairs], "marks": marks_list}, ensure_ascii=False),
+        encoding="utf-8")
+
+    run, _ = AsrRun.objects.get_or_create(recitation=rec, recognizer="marks")
+    run.status = AsrRun.Status.QUEUED
+    run.error = ""
+    run.save(update_fields=["status", "error", "updated_at"])
+    dispatch_run(run.id)
+    return _cors(JsonResponse({"ok": True, "id": rec.id, "recognizer": "marks",
+                               "queued": True, "words": len(flat)}))
+
+
 def _run_dict(r):
     m = r.metrics or {}
     cov = m.get("coverage")
