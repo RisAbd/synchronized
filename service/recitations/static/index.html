@@ -24,11 +24,29 @@
   h1 { font-size:1.9rem; margin:0 0 4px; letter-spacing:-.02em; }
   .dot { color:var(--accent); }
   .lead { color:var(--muted); margin:0 0 28px; line-height:1.5; }
-  form.add { display:flex; flex-direction:column; gap:10px; background:var(--card);
-    border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:0; }
+  form.add { display:flex; flex-direction:column; gap:14px; }
   form.add input { background:transparent; border:1px solid var(--line); color:var(--fg);
     border-radius:10px; padding:11px 13px; font-size:1rem; }
   form.add input:focus { outline:none; border-color:var(--accent); }
+  /* главное поле — крупная ссылка с иконкой */
+  .urlfield { display:flex; align-items:center; gap:10px; border:1.5px solid var(--line);
+    border-radius:13px; padding:4px 6px 4px 14px; background:var(--bg); transition:border-color .15s, box-shadow .15s; }
+  .urlfield:focus-within { border-color:var(--accent); box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 15%,transparent); }
+  .urlfield .urlicon { font-size:1.15rem; opacity:.7; flex:none; }
+  .urlfield input { flex:1; min-width:0; border:none; background:transparent; padding:13px 6px; font-size:1.05rem; }
+  .urlfield input:focus { outline:none; }
+  .addhint { color:var(--muted); font-size:.82rem; margin:-4px 2px 0; line-height:1.45; }
+  /* «Дополнительно» — свёрнутый блок доп.полей */
+  details.adv { border-top:1px solid var(--line); padding-top:4px; }
+  details.adv > summary { list-style:none; cursor:pointer; color:var(--muted); font-size:.9rem;
+    font-weight:600; padding:6px 2px; display:flex; align-items:center; gap:7px; user-select:none; }
+  details.adv > summary::-webkit-details-marker { display:none; }
+  details.adv > summary::before { content:'▸'; transition:transform .15s; font-size:.8em; }
+  details.adv[open] > summary::before { transform:rotate(90deg); }
+  .advbody { display:flex; flex-direction:column; gap:10px; padding:8px 2px 2px; }
+  #addSubmit { display:flex; align-items:center; justify-content:center; gap:9px; }
+  #addSubmit[disabled] { opacity:.7; cursor:default; }
+  #addSubmit .spin { border-top-color:#fff; margin:0; }
   .row { display:flex; gap:10px; } .row input { flex:1; min-width:0; }
   button { background:var(--accent); color:#fff; border:none; border-radius:10px;
     padding:12px 16px; font-size:1rem; font-weight:600; cursor:pointer; }
@@ -50,8 +68,8 @@
   .b-error { background:color-mix(in srgb,var(--err) 20%,transparent); color:var(--err); }
   .del { color:var(--muted); text-decoration:none; font-size:1.2rem; padding:2px 6px;
     background:none; }
-  fieldset.rec-pick { border:1px solid var(--line); border-radius:10px; margin:0; padding:8px 12px 10px; }
-  fieldset.rec-pick legend { color:var(--muted); font-size:.8rem; padding:0 6px; }
+  .rec-pick { border:1px solid var(--line); border-radius:10px; padding:8px 12px 10px; }
+  .rec-pick .rp-legend { color:var(--muted); font-size:.8rem; margin-bottom:2px; }
   label.rz { display:flex; align-items:baseline; gap:8px; padding:4px 0; cursor:pointer; font-size:.92rem; }
   label.rz small { color:var(--muted); font-size:.78rem; }
   .runs { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
@@ -168,15 +186,24 @@
       <button type="button" class="mclose" id="closeAdd" title="закрыть">✕</button>
     </div>
     <form class="add" id="addForm">
-      <input name="source_url" placeholder="Ссылка на YouTube или путь к аудиофайлу" required>
-      <div class="row">
-        <input name="title" placeholder="Название (необязательно)">
-        <input name="reciter" placeholder="Чтец (необязательно)">
-      </div>
-      <fieldset class="rec-pick" id="recPick">
-        <legend>Распознаватели (можно несколько — сравнить точность)</legend>
-      </fieldset>
-      <button type="submit">Добавить</button>
+      <label class="urlfield">
+        <span class="urlicon">🔗</span>
+        <input name="source_url" placeholder="Вставь ссылку на YouTube или путь к аудио" required autocomplete="off">
+      </label>
+      <p class="addhint">YouTube-ролик или локальный аудиофайл. Название и чтец подтянутся сами — обработка идёт в фоне.</p>
+      <details class="adv" id="addAdv">
+        <summary>Дополнительно</summary>
+        <div class="advbody">
+          <div class="row">
+            <input name="title" placeholder="Название (необязательно)">
+            <input name="reciter" placeholder="Чтец (необязательно)">
+          </div>
+          <div class="rec-pick" id="recPick">
+            <div class="rp-legend">Распознаватель (по умолчанию — лучший; можно выбрать несколько для сравнения)</div>
+          </div>
+        </div>
+      </details>
+      <button type="submit" id="addSubmit">Добавить запись</button>
     </form>
   </div>
 </div>
@@ -398,13 +425,18 @@ function scheduleMaybe(busy) {
 // добавление записи через fetch (без перезагрузки)
 document.getElementById('addForm').addEventListener('submit', async e => {
   e.preventDefault();
+  const btn = document.getElementById('addSubmit');
   const fd = new FormData(e.target);
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Добавляю…';   // лоадер
+  const restore = () => { btn.disabled = false; btn.textContent = 'Добавить запись'; };
   let r;
   try { r = await (await fetch(API + '/add', { method: 'POST', body: fd })).json(); }
-  catch (err) { alert('не удалось добавить'); return; }
+  catch (err) { restore(); alert('не удалось добавить'); return; }
+  restore();
   if (!r.ok) { alert(r.error || 'ошибка'); return; }
   if (r.dup) { location.href = playerHref(r.id); return; }
   modal.classList.remove('open'); e.target.reset();
+  document.getElementById('addAdv').open = false;   // свернуть «Дополнительно» обратно
   buildRecPickDefaults();
   load();
 });
