@@ -523,8 +523,10 @@ def _track(st, dec):
     prev = st.get("last_pos")
     cur = None
     W = 40
-    for end in range(min(W, len(dec)), len(dec) + 1, 20):
-        cur = trk.feed(dec[max(0, end - W):end])
+    # ОДНО кормление свежего хвоста за тик (континуитет, указка владельца): раньше цикл прогонял
+    # ВСЁ окно _TRACK_WIN (5-10 feed'ов за тик) → указатель продвигался многократно → РАЗГОН вперёд
+    # (racing на рефрене). Человек читает последовательно — за тик продвигаемся на свежий кусок раз.
+    cur = trk.feed(dec[-W:]) if dec else None
     if cur is None and st["verses"]:
         cur = {"surah": st["verses"][0][0], "ayah": st["verses"][0][1]}
     if cur:

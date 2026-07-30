@@ -838,6 +838,20 @@ _TRK_AHEAD = int(os.environ.get("SYNC_TRK_AHEAD", "180") or 180)  # корпус
 _TRK_MINBLK = int(os.environ.get("SYNC_TRK_MINBLK", "6") or 6)    # мин. matching-блок, чтобы двигать указатель
 _TRK_STALL = int(os.environ.get("SYNC_TRK_STALL", "4") or 4)      # тиков без движения → форвард-восстановление
 _TRK_WIDEFWD = int(os.environ.get("SYNC_TRK_WIDEFWD", "600") or 600)  # ширина форвард-поиска при застревании
+# КОНТИНУИТЕТ-ВЕСА выбора кандидата (указка владельца tg_6932/6935): человек читает ПОСЛЕДОВАТЕЛЬНО,
+# не прыгает. При повторе (рефрен «فبأي آلاء» ×31) декод матчит МНОГО мест — берём не «самое дальнее»
+# (старый bug: улетал к концу суры), а по ВЕСУ = сила_совпадения × приор_близости к текущей позиции:
+# ближайший-ВПЕРЁД = макс вес; слишком далеко ВПЕРЁД — штраф; НАЗАД — штраф. Это «алгоритмика», не
+# распознавание (то же, что континуитет-приор в реках). SYNC_TRK_WEIGHTED=0 → старое поведение.
+# ⚠️ по умолчанию ВЫКЛ: первый вариант весов регрессировал быстрые короткоаятные суры (rec12 0.99→0.86,
+# rec13 0.96→0.87) — ближний-forward не всегда верен, когда чтец реально идёт быстро. Идея владельца
+# верная, но нужна доработка: на НЕОДНОЗНАЧНОМ рефрене ДЕРЖАТЬ позицию (не угадывать вперёд — любой
+# прыжок = мусор), а не просто брать ближний. Следующая итерация. Флаг сохранён для тюнинга.
+_TRK_WEIGHTED = os.environ.get("SYNC_TRK_WEIGHTED", "0") != "0"
+_TRK_NEAR = int(os.environ.get("SYNC_TRK_NEAR", "24"))        # «бесплатный» шаг вперёд (симв.), ~1-2 слова
+_TRK_FWDSCALE = float(os.environ.get("SYNC_TRK_FWDSCALE", "60"))  # масштаб штрафа за слишком-далеко-вперёд
+_TRK_BACKW = float(os.environ.get("SYNC_TRK_BACKW", "0.35"))     # вес назад-кандидата (< вперёд; для перечиток)
+_TRK_BACKSCALE = float(os.environ.get("SYNC_TRK_BACKSCALE", "25"))  # масштаб затухания назад
 
 
 def locate(dec_window: str, index, prior_fa: int | None = None,
@@ -990,7 +1004,25 @@ class SegmentTracker:
     def _match_end(self, dec_tail, lo, hi):
         sm = difflib.SequenceMatcher(None, dec_tail, self.M[lo:hi], autojunk=False)
         blocks = [b for b in sm.get_matching_blocks() if b.size >= self.minblk]
-        return (lo + blocks[-1].b + blocks[-1].size) if blocks else None
+        if not blocks:
+            return None
+        if not _TRK_WEIGHTED:
+            return lo + blocks[-1].b + blocks[-1].size
+        # КОНТИНУИТЕТ-ВЕС: не «самое дальнее совпадение» (телепорт на поздний рефрен), а по весу =
+        # сила_блока × приор_близости к текущему p. Ближайший-вперёд макс; далеко-вперёд/назад — штраф.
+        import math
+        best_cp, best_w = None, -1.0
+        for b in blocks:
+            cp = lo + b.b + b.size
+            d = cp - self.p
+            if d < 0:
+                prox = _TRK_BACKW * math.exp(d / _TRK_BACKSCALE)              # назад — штраф
+            else:
+                prox = math.exp(-max(0.0, d - _TRK_NEAR) / _TRK_FWDSCALE)     # далеко-вперёд — штраф
+            w = b.size * prox
+            if w > best_w:
+                best_w, best_cp = w, cp
+        return best_cp
 
     def _coverage(self, dec_tail, lo, hi):
         """Какую долю хвоста декода объясняет ожидаемое окно корпуса [lo:hi] — сумма matching-блоков
