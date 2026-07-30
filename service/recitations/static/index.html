@@ -735,8 +735,12 @@ function handleMsg(d) {
     } else {
       devOn = false;
     }
-    if (liveMode !== 'track') { liveCands.innerHTML = ''; candSig = ''; liveMode = 'track'; }  // кандидаты убрать один раз
+    liveMode = 'track';
     updateLive(d);                                       // двигаем подсветку+скролл, DOM суры не перерисовываем
+    // ВСЕГДА держим кандидатов живыми (владелец tg_7242): видно, как растёт вес другой суры перед
+    // свапом; тап всё так же бустит. Основную суру ведёт ридер выше, список — что ещё голосует.
+    if (d.candidates && d.candidates.length)
+      renderCandidates(d.candidates, d.candidates[0].surah + ':' + d.candidates[0].ayah);
   }
   if (!d.skip) liveDbg.textContent = 'фаза ' + (d.phase || '?') + ' · буфер ' + (d.buf_sec || 0) + 'с · тик#' + (d.n || 0);
 }

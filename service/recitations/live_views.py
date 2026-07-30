@@ -443,17 +443,25 @@ def _analyze(st):
         # мимо-лок (встали не в ту суру, а трекер фейкает движение по чужому корпусу → застоя нет).
         # Триггерим перелок, только если ДРУГАЯ сура уверенно лидирует _RELOCK_HOLD тиков подряд.
         # Кросс-СУРА → безопасно для рефрена (там лидер = та же сура, не триггерит).
+        # ВСЕГДА живые кандидаты в track (владелец tg_7242): держим основную суру, но кандидатов НЕ
+        # выкидываем — их вес растёт по мере чтения новой суры, видно на фронте; как только ДРУГАЯ сура
+        # уверенно доминирует — свап. Раньше кросс-свап работал лишь в раннем окне (_CROSS_MAX тиков от
+        # лока) — «долго думал»/не переключался при смене суры мидстрим. Теперь БЕЗ окна: гард — устойчивое
+        # K-подряд лидерство ДРУГОЙ суры + confirm-2 + ratio-гейт на find_segments (рефрен = та же сура,
+        # не триггерит; мусорную суру на мелодике давит ratio).
         cross = False
+        track_cands = []
         if dec:
             dens = match_align.ayah_density(dec[-_SCAN_WIN_CH:], index)
             st["tvotes"] = dens if st.get("tvotes") is None else st["tvotes"] * _DECAY + dens
             tc = match_align.topk_from_votes(st["tvotes"], index, _KTOP)
+            track_cands = [{"surah": c["surah"], "ayah": c["ayah"], "confidence": c["confidence"],
+                            "text": _trunc(_ayah_text(q, c["surah"], c["ayah"]))} for c in tc]
             lead_s = tc[0]["surah"] if tc else None
             lead_c = tc[0]["confidence"] if tc else 0.0
-            # робастно: копим ПОДРЯД тики, где #1 = одна и та же ДРУГАЯ сура (не абсолютный порог,
-            # тот хрупок и зависит от _KTOP-нормировки); низкий conf-гейт лишь отсекает чистый шум.
-            early = (st["n"] - st.get("lock_n", -10**9)) <= _CROSS_MAX   # только раннее окно после лока
-            if early and lead_s is not None and lead_s != cur_surah and lead_c >= _RELOCK_CONF:
+            # копим ПОДРЯД тики, где #1 = одна и та же ДРУГАЯ сура (не абсолютный порог — он хрупок и
+            # зависит от _KTOP-нормировки); низкий conf-гейт лишь отсекает чистый шум.
+            if lead_s is not None and lead_s != cur_surah and lead_c >= _RELOCK_CONF:
                 if lead_s == st.get("cross_surah"):
                     st["cross_n"] = st.get("cross_n", 0) + 1
                 else:
@@ -513,7 +521,7 @@ def _analyze(st):
                 st["last_reloc_n"] = st["n"]
                 st["stall_reloc"] = 0
                 st["cross_n"] = 0; st["cross_surah"] = None  # после попытки — копим заново (бережём GPU)
-        return _build_reply(st, {})
+        return _build_reply(st, {"candidates": track_cands})
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
