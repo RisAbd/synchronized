@@ -11,6 +11,14 @@
 
 > Коротко: текущий фокус и свежие договорённости. Детали статусов — в `docs/BACKLOG.md`.
 
+- **Сессия 30.07-ПРОД5 (WH): «МАНУАЛ 2» — разметчик повторов, v1 ЦЕЛИКОМ (коммиты c706270/ae3be8d/939cd0c/52a3247).**
+  Облегчённый ручной элайнер: отмечаешь ТОЛЬКО повторы (что/сколько раз) → тайминги ставит
+  `forced_align(slots=)`. Ядро `pipeline.slots_from_marks`+`flat_range_words` (разметка `[{start,end,count}]`
+  по плоским индексам диапазона → слоты, юнит 13/13). Плагин `sources/marks.py` (SELECTABLE/AUTO=False/
+  ISOLATE, читает `rec_dir/marks.json`, подхватывается общим `run_one`). Эндпоинт `POST /r/<id>/marks/save`
+  (`views.marks_save`, валидирует до GPU) + роут `/r/<id>/marks`. Фронт `static/mark_repeats.html` (клик=span,
+  счётчик ×N, чипы, блок пересечений) + ссылка «🔁 повторы» в плеере (?debug=1). Полный HTTP e2e (playwright
+  POST→worker) на rec7: готово, coverage 0.924, fj=0, reps=5; rec7 очищен. Остаток — UX-итерации с владельцем.
 - **Сессия 30.07-ПРОД4 (WI): РЕЖИМ ЗАУЧИВАНИЯ v0 (опт-ин, коммит 04f3acb) — killer-фича (tg_4810).**
   Читаешь по памяти, отклонился → КРАСНЫМ + звук. `SegmentTracker.quality`=coverage(minblk=3) свежего
   декода к ожидаемому окну корпуса; детектор в `live_views._analyze` (гистерезис `_MEM_LOW=0.06`/
