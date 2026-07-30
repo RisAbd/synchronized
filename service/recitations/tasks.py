@@ -32,34 +32,6 @@ def _aggregate(rec) -> None:
     rec.save(update_fields=["status", "stage", "updated_at"])
 
 
-def _ensure_auto(rec, refresh: bool = False) -> None:
-    """Авто-источники (AUTO=True: w2v, forced) — пост-шаг на каждой записи. Обобщён над плоскими
-    плагинами: не хардкодит forced/w2v, а перебирает sources.auto() в порядке PRIORITY. Каждый:
-      • пропускаем тихо, если зависимостей нет (source.available()) или не выполнено предусловие
-        (source.ready(rec) — forced ждёт готовый ASR-источник диапазона) — без ERROR-прогона;
-      • иначе заводим/освежаем прогон и гоним.
-    refresh=True — пересчитать даже готовый (после пересчёта ASR диапазон-источник мог смениться;
-    без этого forced залипал на старом расчёте). w2v ПОЛНОСТЬЮ независим (свой диапазон из акустики),
-    forced берёт диапазон у ASR — оба идут ПОСЛЕ ASR-фазы (см. run_pipeline)."""
-    from .models import AsrRun, Status
-    from . import sources
-
-    for mod in sources.auto():
-        if not sources.available(mod) or not sources.ready(mod, rec):
-            continue
-        key = mod.KEY
-        run = rec.runs.filter(recognizer=key).first()
-        if run and run.status == Status.READY and not refresh:
-            continue  # уже посчитан
-        if run is None:
-            run = AsrRun.objects.create(recitation=rec, recognizer=key, status=Status.QUEUED)
-        else:
-            run.status = Status.QUEUED
-            run.error = ""
-            run.save(update_fields=["status", "error", "updated_at"])
-        _run_safe(run)
-
-
 def _run_safe(run) -> None:
     """Прогнать один AsrRun, аккуратно ведя его статус/ошибку."""
     from .models import Status
@@ -132,14 +104,13 @@ def run_pipeline(rec_id: int) -> None:
     # через GPU-лок — в BACKLOG).
     from . import sources
     todo = list(rec.runs.filter(status__in=[Status.QUEUED, Status.ERROR]))
-    # источники в процессе (не ISOLATE: google/whisper) — ПАРАЛЛЕЛЬНО в потоках; GPU-источники
-    # (ISOLATE: w2v/forced) — строго ПОСЛЕ (forced берёт диапазон у готового ASR, оба GPU-подпроцесс).
-    parallel_runs = [r for r in todo if not sources.is_isolated(r.recognizer)]
-    _run_parallel(parallel_runs)
-    # авто-источники (w2v/forced) — обобщённый пост-шаг: заводит недостающие + гонит явно
-    # добавленные (queued/error) ISOLATE-прогоны из todo, тихо пропускает без deps/предусловия.
-    # refresh, если только что перемололи ASR (диапазон-источник forced мог смениться).
-    _ensure_auto(rec, refresh=bool(parallel_runs))
+    # ВСЕ распознаватели равноправны и НЕЗАВИСИМЫ (владелец): гоним РОВНО выбранные в форме, никакой
+    # авто-магии/«особых» источников. Не-ISOLATE (google=сеть, whisper=GPU-инференс) — ПАРАЛЛЕЛЬНО
+    # (не конкурируют за ресурс). ISOLATE (w2v/forced/w2vo — каждый свой gpu_align-подпроцесс на 6ГБ) —
+    # строго ПОСЛЕДОВАТЕЛЬНО (иначе два torch/onnxruntime на карте = OOM + липкая CUDA-арена).
+    _run_parallel([r for r in todo if not sources.is_isolated(r.recognizer)])
+    for r in (r for r in todo if sources.is_isolated(r.recognizer)):
+        _run_safe(r)
     _aggregate(rec)
 
 
@@ -150,11 +121,8 @@ def run_single(run_id: int) -> None:
         run = AsrRun.objects.select_related("recitation").get(pk=run_id)
     except AsrRun.DoesNotExist:
         return
+    # запускаем РОВНО этот распознаватель (все независимы — никаких пост-шагов поверх)
     _run_safe(run)
-    from . import sources
-    if not sources.is_aligned(run.recognizer):
-        # пересчитали сырой ASR → обновим авто-источники поверх него (диапазон forced мог смениться)
-        _ensure_auto(run.recitation, refresh=True)
     _aggregate(run.recitation)
 
 

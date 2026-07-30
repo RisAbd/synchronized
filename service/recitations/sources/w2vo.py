@@ -18,7 +18,7 @@ KEY = "w2vo"
 LABEL = "Forced align (wav2vec2, оракул повторов)"
 NOTE = ("wav2vec2 + оракул правдоподобия для повторов (авто-структура перечиток через forced_align "
         "slots): берёт фразы-перечитки, что акустический Viterbi теряет; выбираемый для сравнения на слух")
-SELECTABLE = False
+SELECTABLE = True        # плоский независимый распознаватель (выбирается в форме, запускается сам)
 AUTO = False
 ISOLATE = True
 ALIGNED = True

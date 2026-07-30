@@ -25,6 +25,10 @@ AUTO = False
 ISOLATE = True
 ALIGNED = True
 PRIORITY = 6
+# требует РУЧНОЙ разметки (rec_dir/marks.json) → НЕ запускается при добавлении записи автоматически
+# (форма добавления гонит только авто-запускаемые SELECTABLE: google/whisper). Появляется прогоном
+# лишь когда владелец сохранил разметку через эндпоинт.
+NEEDS_MARKUP = True
 
 
 def available() -> bool:

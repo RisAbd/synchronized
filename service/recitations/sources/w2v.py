@@ -16,8 +16,8 @@ KEY = "w2v"
 LABEL = "Forced align (wav2vec2)"
 NOTE = ("wav2vec2 + СВОЙ CTC-Viterbi (без whisperx): держит слово сквозь мадд → честный coverage; "
         "ПОЛНОСТЬЮ независим — сам находит диапазон из акустики (ASR не нужен); активен по умолчанию")
-SELECTABLE = False
-AUTO = True
+SELECTABLE = True        # плоский независимый распознаватель: выбирается в форме, запускается сам по себе
+AUTO = False             # больше НЕ авто-пост-шаг (нет «особых» источников — все равноправны, владелец)
 ISOLATE = True
 ALIGNED = True
 PRIORITY = 10            # выше forced → дефолт в плеере среди выравнивателей

@@ -32,15 +32,17 @@ def index(request):
 
 
 def _chosen_recognizers(request) -> list[str]:
-    """Список распознавателей из формы (чекбоксы), с фолбэком на дефолт.
-    Берём только SELECTABLE-источники (google/whisper); авто-источники (forced/w2v) — не выбирают."""
+    """Распознаватели из формы (чекбоксы). ВСЕ равноправны и независимы (владелец): берём любой
+    SELECTABLE, исключаем лишь требующие ручной разметки (NEEDS_MARKUP=marks — по ссылке не запустить).
+    Ничего не прислали → гоним ВСЕ авто-запускаемые (форма их и отмечает по умолчанию)."""
     def ok(r):
         m = sources.get(r)
-        return m is not None and getattr(m, "SELECTABLE", False)
+        return (m is not None and getattr(m, "SELECTABLE", False)
+                and not getattr(m, "NEEDS_MARKUP", False))
     chosen = [r for r in request.POST.getlist("recognizers") if ok(r)]
     if not chosen:
-        chosen = [r for r in settings.DEFAULT_RECOGNIZERS if ok(r)]
-    return chosen or ["whisper"]
+        chosen = [k for k in sources.keys() if ok(k)]
+    return chosen
 
 
 # CSRF-exempt: add/delete зовутся fetch-ом из СТАТИЧНОГО фронта (П11), в т.ч. потенциально с
@@ -76,7 +78,8 @@ def run(request, pk):
     """Добавить/пересчитать один распознаватель для существующей записи."""
     rec = get_object_or_404(Recitation, pk=pk)
     rkey = (request.POST.get("recognizer") or "").strip()
-    # вручную добавляют/пересчитывают только SELECTABLE-источники; авто (forced/w2v) — пост-шагом
+    # любой SELECTABLE-распознаватель перезапускаем поодиночке (все независимы: google/whisper/w2v/
+    # forced/w2vo/marks) — «запустить только w2v по ссылке» теперь возможно (владелец)
     _m = sources.get(rkey)
     if _m is None or not getattr(_m, "SELECTABLE", False):
         return HttpResponseRedirect(reverse("player", args=[pk]))
@@ -242,11 +245,14 @@ def api_recitations(request):
     """JSON-список записей для статичной библиотеки (П11): фронт сам фетчит и рисует."""
     items = [_rec_dict(rec) for rec in
              Recitation.objects.prefetch_related("runs").order_by("-id")]
+    # для формы добавления — ВСЕ авто-запускаемые распознаватели (исключаем требующие ручной
+    # разметки: marks/«ручной» — его нельзя запустить по ссылке). Все отмечены по умолчанию.
+    form_recs = [m for m in sources.selectable() if not getattr(m, "NEEDS_MARKUP", False)]
     return _cors(JsonResponse({
         "recitations": items,
         "recognizers": [{"key": m.KEY, "label": m.LABEL, "note": getattr(m, "NOTE", "")}
-                        for m in sources.selectable()],
-        "default_recognizers": list(settings.DEFAULT_RECOGNIZERS),
+                        for m in form_recs],
+        "default_recognizers": [m.KEY for m in form_recs],
     }))
 
 

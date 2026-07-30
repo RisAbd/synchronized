@@ -191,15 +191,15 @@
         <input name="source_url" placeholder="Вставь ссылку на YouTube или путь к аудио" required autocomplete="off">
       </label>
       <p class="addhint">YouTube-ролик или локальный аудиофайл. Название и чтец подтянутся сами — обработка идёт в фоне.</p>
+      <div class="rec-pick" id="recPick">
+        <div class="rp-legend">Распознаватели — по умолчанию все (для сравнения). Сними лишние, чтобы прогнать только нужные.</div>
+      </div>
       <details class="adv" id="addAdv">
-        <summary>Дополнительно</summary>
+        <summary>Название и чтец (необязательно)</summary>
         <div class="advbody">
           <div class="row">
-            <input name="title" placeholder="Название (необязательно)">
+            <input name="title" placeholder="Название (иначе подтянется с YouTube)">
             <input name="reciter" placeholder="Чтец (необязательно)">
-          </div>
-          <div class="rec-pick" id="recPick">
-            <div class="rp-legend">Распознаватель (по умолчанию — лучший; можно выбрать несколько для сравнения)</div>
           </div>
         </div>
       </details>
@@ -219,9 +219,6 @@
     <div class="row" style="align-items:center;gap:.9em;flex-wrap:wrap">
       <button type="button" id="liveBtn" class="add-btn">▶ Слушать</button>
       <span id="liveState" style="color:var(--muted)">микрофон выключен</span>
-      <label style="display:inline-flex;align-items:center;gap:.4em;cursor:pointer;font-size:.9em;color:var(--muted)">
-        <input type="checkbox" id="liveMemorize"> 🧠 заучивание
-      </label>
     </div>
     <div id="liveFound" style="margin-top:.5em;font-size:.95em;color:var(--muted)"></div>
     <div id="liveReader" class="live-reader" dir="rtl" lang="ar"></div>
@@ -263,6 +260,26 @@ let recognizersCfg = null;
 
 function playerHref(id) {
   return 'player.html?rec=' + id + (API ? '&api=' + encodeURIComponent(API) : '');
+}
+
+// список распознавателей в форме: ВСЕ (google/whisper/w2v/forced/w2vo), отмечены по умолчанию;
+// каждый независим — можно снять лишние и прогнать только нужные (владелец: «каждый отдельный»)
+function buildRecPick(cfg) {
+  const fs = document.getElementById('recPick');
+  const def = cfg.default_recognizers || [];
+  (cfg.recognizers || []).forEach(rz => {
+    const lab = document.createElement('label'); lab.className = 'rz';
+    const inp = document.createElement('input'); inp.type = 'checkbox'; inp.name = 'recognizers';
+    inp.value = rz.key; if (def.includes(rz.key)) inp.checked = true;
+    const sp = document.createElement('span'); sp.textContent = rz.label;
+    const sm = document.createElement('small'); sm.textContent = rz.note || '';
+    lab.appendChild(inp); lab.appendChild(sp); lab.appendChild(sm); fs.appendChild(lab);
+  });
+}
+function buildRecPickDefaults() {   // вернуть все галки в дефолт (после успешного добавления)
+  if (!recognizersCfg) return;
+  const def = recognizersCfg.default_recognizers || [];
+  document.querySelectorAll('#recPick input[name=recognizers]').forEach(i => i.checked = def.includes(i.value));
 }
 
 function runChip(run, recId) {
@@ -395,25 +412,13 @@ function sync(recs) {
   applySearch();
 }
 
-function buildRecPick(cfg) {
-  const fs = document.getElementById('recPick');
-  (cfg.recognizers || []).forEach(rz => {
-    const lab = document.createElement('label'); lab.className = 'rz';
-    const inp = document.createElement('input'); inp.type = 'checkbox'; inp.name = 'recognizers';
-    inp.value = rz.key; if ((cfg.default_recognizers || []).includes(rz.key)) inp.checked = true;
-    const sp = document.createElement('span'); sp.textContent = rz.label;
-    const sm = document.createElement('small'); sm.textContent = rz.note || '';
-    lab.appendChild(inp); lab.appendChild(sp); lab.appendChild(sm); fs.appendChild(lab);
-  });
-}
-
 let polling = false;
 async function load() {
   let d;
   // ?t=… обходит агрессивный кеш GitHub Pages/браузера (F5 подгружал старый список)
   try { d = await (await fetch(LIST_URL + (LIST_URL.includes('?') ? '&' : '?') + 't=' + Date.now(), { cache: 'no-store' })).json(); }
   catch (e) { if (!cards.size) listEl.innerHTML = '<div class="empty">не удалось загрузить список</div>'; scheduleMaybe(true); return; }
-  if (!recognizersCfg) { recognizersCfg = d; buildRecPick(d); }
+  if (!recognizersCfg) { recognizersCfg = d; buildRecPick(d); }   // список распознавателей в форму (один раз)
   if (cards.size === 0) listEl.innerHTML = '';   // убрать «загрузка…»
   sync(d.recitations || []);
   scheduleMaybe((d.recitations || []).some(r => r.has_active_runs || !DONE(r.status)));
@@ -437,15 +442,9 @@ document.getElementById('addForm').addEventListener('submit', async e => {
   if (r.dup) { location.href = playerHref(r.id); return; }
   modal.classList.remove('open'); e.target.reset();
   document.getElementById('addAdv').open = false;   // свернуть «Дополнительно» обратно
-  buildRecPickDefaults();
+  buildRecPickDefaults();                            // вернуть все галки распознавателей
   load();
 });
-// вернуть чекбоксы в дефолт после сброса формы
-function buildRecPickDefaults() {
-  if (!recognizersCfg) return;
-  document.querySelectorAll('#recPick input[name=recognizers]').forEach(i =>
-    i.checked = (recognizersCfg.default_recognizers || []).includes(i.value));
-}
 
 // модалка
 const modal = document.getElementById('modal');
@@ -468,9 +467,7 @@ const liveCandsPanel = document.getElementById('liveCandsPanel');
 const liveCandsToggle = document.getElementById('liveCandsToggle');
 const liveCandsArrow = document.getElementById('liveCandsArrow');
 const liveDbg = document.getElementById('liveDbg');
-const liveMemorize = document.getElementById('liveMemorize');
 let liveOn = false, liveWs = null;
-let devOn = false;                                      // текущее состояние отклонения (для сигнала по фронту)
 
 // ── настройки шрифта/размера для live (порт плеера, ОБЩИЕ localStorage-ключи sync.arabfont/arabsize
 // → выбор синхронен с плеером; владелец 30.07: «подгрузи те же стили и сам выбор настроек»). Пишем
@@ -554,20 +551,6 @@ function initLiveEdition(p) {
   liveFontPanel.appendChild(head); liveFontPanel.appendChild(row);
 }
 
-function sendMemorize() {                                // синхронизировать режим с сервером (после reset/реконнекта)
-  if (liveWs && liveWs.readyState === 1) liveWs.send('memorize:' + (liveMemorize.checked ? '1' : '0'));
-}
-liveMemorize.onchange = () => { devOn = false; sendMemorize(); };
-
-function beep() {                                        // короткий сигнал при отклонении (звук по просьбе владельца)
-  try {
-    const ctx = liveCtx || new (window.AudioContext || window.webkitAudioContext)();
-    const o = ctx.createOscillator(), g = ctx.createGain();
-    o.type = 'square'; o.frequency.value = 330;
-    g.gain.value = 0.06; o.connect(g); g.connect(ctx.destination);
-    o.start(); o.stop(ctx.currentTime + 0.18);
-  } catch (e) {}
-}
 let liveStream = null, liveCtx = null, liveSrc = null, liveProc = null, liveTimer = null;
 let pcmParts = [], pcmLen = 0;
 const SEND_MS = 150;                                     // как часто шлём кадр PCM в вебсокет
@@ -629,8 +612,7 @@ function openWs(reset) {
   liveWs = new WebSocket(wsURL() + (reset ? '&reset=1' : ''));  // реконнект БЕЗ reset → позиция цела
   liveWs.binaryType = 'arraybuffer';
   liveWs.onopen = () => {
-    liveMode = ''; candSig = ''; devOn = false;
-    sendMemorize();                                      // сессия свежая после reset → сообщить режим
+    liveMode = ''; candSig = '';
     liveState.textContent = 'слушаю… (набираю первые секунды)';
     if (!liveTimer) liveTimer = setInterval(flushPcm, SEND_MS);
   };
@@ -711,10 +693,7 @@ function renderPassage(p) {
 function updateLive(d) {
   if (d.passage) renderPassage(d.passage);
   if (!d.current) return;
-  liveFound.innerHTML = '<b>' + d.current.surah + ':' + d.current.ayah + '</b>'
-    + (d.memorize ? (d.deviation ? ' <span style="color:#e24">🔴 отклонение</span>' : ' <span style="color:var(--ok)">🟢 верно</span>') : '');
-  const dev = !!d.deviation;
-  liveReader.classList.toggle('dev', dev);
+  liveFound.innerHTML = '<b>' + d.current.surah + ':' + d.current.ayah + '</b>';
   const key = d.current.surah + ':' + d.current.ayah;
   // активный аят + соседи (near) — только при смене аята
   if (liveActiveKey !== key) {
@@ -827,11 +806,6 @@ function handleMsg(d) {
     // первое чтение (scan) — можно показать кандидатов раскрытыми (текста ещё нет)
     if (cands.length) renderCandidates(cands, cands[0].surah + ':' + cands[0].ayah, { autoOpen: true });
   } else if (d.phase === 'track' && d.current) {
-    if (d.memorize && d.deviation) {
-      if (!devOn) { devOn = true; beep(); }             // сигнал только на ФРОНТЕ отклонения (не каждый тик)
-    } else {
-      devOn = false;
-    }
     liveMode = 'track';
     updateLive(d);                                       // двигаем подсветку+скролл, DOM суры не перерисовываем
     // scan→track: свернуть ОДИН раз (первое чтение показали, дальше — тихий свёрнутый оверлей).

@@ -16,8 +16,8 @@ KEY = "forced"
 LABEL = "Forced align (MMS)"
 NOTE = ("MMS CTC forced align: точные границы по тексту аятов; ПОЛНОСТЬЮ независим — сам находит "
         "диапазон из своей акустики (ASR не нужен)")
-SELECTABLE = False
-AUTO = True
+SELECTABLE = True        # плоский независимый распознаватель (выбирается в форме, запускается сам)
+AUTO = False             # больше НЕ авто-пост-шаг — равноправен с остальными (владелец)
 ISOLATE = True
 ALIGNED = True
 PRIORITY = 20
