@@ -408,6 +408,11 @@ function buildAsrbar(d){
     man.title='ручной элайнер: правка привязки слов мышью';
     man.href=(API||'')+'/r/'+REC_ID+'/manual'+(ASR?'?asr='+encodeURIComponent(ASR):'');
     bar.appendChild(man);
+    // ссылка на разметчик повторов (WH «Мануал 2») — отметить только повторы, тайминги ставит forced
+    const mk=document.createElement('a'); mk.className='asr'; mk.textContent='🔁 повторы';
+    mk.title='разметка повторов: отметить что/сколько раз перечитано → авто-выравнивание';
+    mk.href=(API||'')+'/r/'+REC_ID+'/marks'+(ASR?'?asr='+encodeURIComponent(ASR):'');
+    bar.appendChild(mk);
   }
   bar.style.display = '';
 }

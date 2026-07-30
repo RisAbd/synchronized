@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ru" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>разметка повторов · synchronized</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Scheherazade+New:wght@400;700&family=Amiri:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root { color-scheme: light dark;
+    --bg:#faf7f0; --fg:#201d16; --muted:#9a917f; --line:rgba(120,110,90,.18);
+    --accent:#b8891a; --sel:#3f7fb0; --mk:#2e8b45; --card:#fffdf7; --chip:#f0ead9;
+    --arab-font:"Scheherazade New","Amiri","Times New Roman",serif; --ayah-size:2.1rem; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#100f0b; --fg:#efe8d6; --muted:#7c745f; --line:rgba(200,190,160,.14);
+      --accent:#e4bf4a; --sel:#5aa0d0; --mk:#5ed07f; --card:#191710; --chip:#211e15; } }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; background:var(--bg); color:var(--fg); font-family:system-ui,sans-serif; }
+  body { overscroll-behavior-y:contain; overflow-x:hidden; }
+  header { position:sticky; top:0; z-index:20; background:var(--card);
+    border-bottom:1px solid var(--line); box-shadow:0 3px 14px rgba(0,0,0,.14); }
+  .top { display:flex; align-items:center; gap:10px; padding:6px 12px; }
+  .back { text-decoration:none; color:var(--muted); font:600 24px system-ui; padding:0 6px; border-radius:8px; }
+  .title { flex:1; min-width:0; }
+  .title b { display:block; font:600 14px system-ui; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .title span { font:11px system-ui; color:var(--muted); }
+  audio { display:block; width:100%; height:36px; padding:0 8px 6px; }
+  .bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px;
+    padding:8px 12px; font:12px system-ui; color:var(--muted); border-top:1px solid var(--line); }
+  .bar .btn { cursor:pointer; background:var(--chip); border:1px solid var(--line);
+    color:var(--fg); font:600 12px system-ui; padding:5px 12px; border-radius:8px; }
+  .bar .btn:active { opacity:.7; }
+  .bar .btn.go { background:var(--mk); color:#fff; border-color:transparent; }
+  .bar .btn.warn { color:#c0492f; }
+  .bar input.cnt { width:52px; font:600 13px system-ui; background:var(--card); color:var(--fg);
+    border:1px solid var(--line); border-radius:8px; padding:4px 6px; }
+  .hint { padding:6px 12px; font:12px system-ui; color:var(--muted); background:var(--bg); }
+  #marks { padding:2px 12px 8px; display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { display:inline-flex; align-items:center; gap:6px; background:var(--chip);
+    border:1px solid var(--line); border-radius:20px; padding:3px 6px 3px 10px; font:12px system-ui; }
+  .chip b { color:var(--mk); } .chip .x { cursor:pointer; color:var(--muted); font:700 14px system-ui;
+    padding:0 4px; border-radius:50%; } .chip .x:active { color:#c0492f; }
+  #text { padding:2vh 20px 40vh; max-width:900px; margin:0 auto; direction:rtl;
+    font-family:var(--arab-font); font-size:var(--ayah-size); line-height:calc(var(--ayah-size) * 2.2);
+    text-align:justify; text-align-last:center; -webkit-user-select:none; user-select:none; }
+  .stitle { display:block; text-align:center; color:var(--accent);
+    font:600 clamp(1rem,4vw,1.3rem) system-ui; margin:20px 0 10px; opacity:.7; }
+  .num { font:600 .55em system-ui; color:var(--muted); margin:0 .3em; opacity:.7; }
+  .w { cursor:pointer; border-radius:8px; padding:.02em .16em; transition:background .1s, color .1s; }
+  .w.sel { background:var(--sel); color:#fff; }
+  .w.mk  { background:color-mix(in srgb, var(--mk) 30%, transparent); }
+  .w .badge { font:700 .42em system-ui; color:var(--mk); vertical-align:super; margin-right:.15em; }
+  #loading,#err { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    text-align:center; color:var(--muted); font:15px system-ui; padding:20px; }
+  #toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:var(--card);
+    border:1px solid var(--line); border-radius:10px; padding:10px 16px; font:13px system-ui;
+    box-shadow:0 6px 24px rgba(0,0,0,.24); opacity:0; transition:opacity .25s; pointer-events:none; z-index:40; }
+  #toast.on { opacity:1; }
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <a class="back" id="back" href="#" title="назад">‹</a>
+    <div class="title"><b id="ttl">…</b><span id="sub"></span></div>
+  </div>
+  <audio id="audio" controls preload="metadata"></audio>
+  <div class="bar">
+    <span>повтор ×</span><input class="cnt" id="cnt" type="number" min="2" value="2">
+    <button class="btn" id="addBtn">➕ отметить повтор</button>
+    <button class="btn warn" id="clrSel">сброс выделения</button>
+    <span style="flex:1"></span>
+    <button class="btn" id="fdec">A−</button><button class="btn" id="finc">A+</button>
+    <button class="btn go" id="saveBtn">💾 выровнять</button>
+  </div>
+  <div class="hint">Слушай и кликай слова: 1-й клик — начало повтора, 2-й — конец (один и тот же клик = одно слово).
+    Задай, сколько раз прочитан кусок, → «отметить повтор». Отметь ВСЕ повторы и нажми «выровнять» —
+    тайминги проставит forced-align.</div>
+  <div id="marks"></div>
+</header>
+
+<div id="text"></div>
+<div id="loading">загрузка…</div>
+<div id="err" style="display:none"></div>
+<div id="toast"></div>
+
+<script>
+const QS = new URLSearchParams(location.search);
+const REC_ID = QS.get('rec');
+const ASR = QS.get('asr');
+const API = (QS.get('api') || '').replace(/\/$/, '');
+const DATA_URL = REC_ID ? (API + '/r/' + REC_ID + '/data.json' + (ASR ? '?asr='+encodeURIComponent(ASR) : '')) : null;
+
+const audio = document.getElementById('audio');
+const textEl = document.getElementById('text');
+const marksEl = document.getElementById('marks');
+const cntEl = document.getElementById('cnt');
+let DATA = null;
+let flat = [];               // [{s,a,wi,word}] в порядке чтения
+let spans = [];              // span-элементы по flat-индексу
+let verses = [];             // [[s,a]] уникальные в порядке чтения
+let marks = [];              // [{start,end,count}]
+let selA = null, selB = null; // текущее выделение (flat-индексы)
+
+const ARN = ['٠','١','٢','٣','٤','٥','٦','٧','٨','٩'];
+const toArabic = n => String(n).split('').map(c => ARN[+c] ?? c).join('');
+const fmt = s => { s=Math.round(s||0); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); };
+
+function fail(m){ document.getElementById('loading').style.display='none';
+  const e=document.getElementById('err'); e.style.display='flex'; e.textContent=m; }
+function toast(m){ const t=document.getElementById('toast'); t.textContent=m; t.classList.add('on');
+  clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove('on'),2600); }
+
+async function init(){
+  if(!DATA_URL){ fail('не задана запись (?rec=…)'); return; }
+  document.getElementById('back').href = API + '/r/' + REC_ID + '/' + (ASR?('?asr='+encodeURIComponent(ASR)):'');
+  let d;
+  try { const r = await fetch(DATA_URL); if(!r.ok) throw 0; d = await r.json(); }
+  catch(e){ fail('не удалось загрузить данные (нужен готовый прогон у записи)'); return; }
+  DATA = d;
+  document.title = (d.title||'запись') + ' · разметка повторов';
+  document.getElementById('ttl').textContent = d.title || ('запись #'+REC_ID);
+  document.getElementById('sub').textContent = (d.reciter?d.reciter+' · ':'') + fmt(d.duration||0);
+  audio.src = API + DATA.audio;
+  render();
+  initFont();
+  wire();
+  document.getElementById('loading').style.display='none';
+}
+
+function render(){
+  flat = []; spans = []; verses = [];
+  textEl.innerHTML = '';
+  for(const sec of (DATA.sections||[])){
+    const st = document.createElement('span'); st.className='stitle';
+    st.textContent = sec.title || ('сура '+sec.surah); textEl.appendChild(st);
+    for(const v of (sec.ayat||[])){
+      verses.push([sec.surah, v.ayah]);
+      const words = v.words || (v.text||'').split(/\s+/).filter(Boolean);
+      words.forEach((w,wi)=>{
+        const s=document.createElement('span'); s.className='w'; s.textContent=w;
+        s.dataset.i = flat.length;
+        flat.push({s:sec.surah, a:v.ayah, wi, word:w});
+        spans.push(s); textEl.appendChild(s); textEl.appendChild(document.createTextNode(' '));
+      });
+      const num=document.createElement('span'); num.className='num';
+      num.textContent='﴿'+toArabic(v.ayah)+'﴾'; textEl.appendChild(num);
+    }
+  }
+  textEl.onclick = e => { const t=e.target.closest('.w'); if(t) onWord(+t.dataset.i); };
+  paint();
+}
+
+function onWord(i){
+  if(selA===null){ selA=selB=i; }
+  else if(selA!==null && selB!==null && selA===selB && i!==selA){ selB=i; }
+  else { selA=selB=i; }                                  // новое выделение
+  if(selB<selA){ const t=selA; selA=selB; selB=t; }
+  paint();
+}
+function clearSel(){ selA=selB=null; paint(); }
+
+function inMark(i){ return marks.some(m=>i>=m.start && i<=m.end); }
+
+function addMark(){
+  if(selA===null){ toast('сначала выдели кусок кликом по словам'); return; }
+  const c = Math.max(2, parseInt(cntEl.value)||2);
+  for(let i=selA;i<=selB;i++){ if(inMark(i)){ toast('пересекается с уже отмеченным повтором'); return; } }
+  marks.push({start:selA,end:selB,count:c});
+  marks.sort((x,y)=>x.start-y.start);
+  selA=selB=null; paint();
+}
+function delMark(idx){ marks.splice(idx,1); paint(); }
+
+function paint(){
+  spans.forEach((s,i)=>{ s.className='w'
+    + (selA!==null && i>=selA && i<=selB ? ' sel':'')
+    + (inMark(i) ? ' mk':''); s.querySelector('.badge')?.remove(); });
+  // бейдж ×N на первом слове каждой метки
+  marks.forEach(m=>{ const b=document.createElement('span'); b.className='badge';
+    b.textContent='×'+m.count; spans[m.start].prepend(b); });
+  marksEl.innerHTML='';
+  if(!marks.length){ marksEl.innerHTML='<span style="font:12px system-ui;color:var(--muted)">повторов пока нет — по умолчанию каждое слово читается один раз</span>'; }
+  marks.forEach((m,idx)=>{
+    const words = flat.slice(m.start,m.end+1).map(f=>f.word).join(' ');
+    const c=document.createElement('span'); c.className='chip'; c.dir='rtl';
+    c.innerHTML='<b>×'+m.count+'</b> '+words+' <span class="x" dir="ltr">✕</span>';
+    c.querySelector('.x').onclick=()=>delMark(idx);
+    marksEl.appendChild(c);
+  });
+}
+
+function initFont(){
+  const root=document.documentElement;
+  let sz=parseFloat(localStorage.getItem('sync.marksize')); if(!(sz>0)) sz=2.1;
+  const apply=()=>{ root.style.setProperty('--ayah-size',sz.toFixed(2)+'rem'); localStorage.setItem('sync.marksize',String(sz)); };
+  apply();
+  document.getElementById('fdec').onclick=()=>{ sz=Math.max(1.2,sz-0.15); apply(); };
+  document.getElementById('finc').onclick=()=>{ sz=Math.min(4.5,sz+0.15); apply(); };
+}
+
+function wire(){
+  document.getElementById('addBtn').onclick=addMark;
+  document.getElementById('clrSel').onclick=clearSel;
+  document.getElementById('saveBtn').onclick=save;
+}
+
+async function save(){
+  const btn=document.getElementById('saveBtn');
+  btn.disabled=true; btn.textContent='⏳ выравниваю…';
+  try{
+    const body=new URLSearchParams();
+    body.set('verses', JSON.stringify(verses));
+    body.set('marks', JSON.stringify(marks));
+    const r=await fetch(API+'/r/'+REC_ID+'/marks/save',{method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'}, body});
+    const j=await r.json();
+    if(!j.ok){ toast('ошибка: '+(j.error||'?')); }
+    else { toast('запущено — тайминги считаются, открой плеер (прогон «marks»)');
+      setTimeout(()=>{ location.href = API+'/r/'+REC_ID+'/?asr=marks'; }, 1600); }
+  }catch(e){ toast('сеть недоступна: '+e.message); }
+  finally{ btn.disabled=false; btn.textContent='💾 выровнять'; }
+}
+
+init();
+</script>
+</body>
+</html>
