@@ -40,10 +40,15 @@ def run(rec, audio, quran, out_dir: Path, stage=None) -> dict:
     if stage:
         stage("align")
     E, stride, wav, id2ch = falign.emissions(str(audio))
-    # локализация диапазона из СВОЕЙ акустики MMS (романизованный скелет ↔ романизованный индекс)
+    # локализация из СВОЕЙ акустики MMS (романизованный скелет ↔ романизованный индекс).
+    # МУЛЬТИ-СЕГМЕНТ (find_segments, НЕ find_range): аудио НИКОГДА не один непрерывный кусок Корана —
+    # намаз = такбир · Фатиха · сура · Фатиха · сура; find_range (один диапазон) на таком клеит Ан'ам
+    # на Бакару (Фатиха тянет соседнюю длинную суру). find_segments находит ВСЕ читаемые места по
+    # похожести (директива владельца 26.07, [[multi-segment-quran-find]]) — как у w2v. При переводе
+    # forced в независимые (сессия 17) по недосмотру остался find_range → на намазе логика ломалась.
     dec = falign.whole_decode_skeleton(E, stride, id2ch)
     index = match_align.build_romanized_index(quran)
-    rng = match_align.find_range(None, quran, {}, {}, index=index, dec=dec, k=match_align._K_ROM)
+    rng = match_align.find_segments(None, quran, {}, {}, index=index, dec=dec, k=match_align._K_ROM)
     if not rng:
         raise RuntimeError("forced: не удалось определить диапазон из акустики MMS")
     verses = [(s, a, quran.surah(s).verses[a - 1].text) for s, a in rng]
@@ -51,7 +56,16 @@ def run(rec, audio, quran, out_dir: Path, stage=None) -> dict:
     sync_map = falign.align_verses(E, stride, wav, verses)
     meta = sync_map.setdefault("meta", {})
     meta["range_source"] = "forced-self"
-    meta["range"] = f"{rng[0][0]}:{rng[0][1]}..{rng[-1][0]}:{rng[-1][1]}"
+    # сегменты как непрерывные пробеги (Фатиха | Ан'ам | … — намаз даёт несколько)
+    segs, run = [], [rng[0]]
+    for prev, cur in zip(rng, rng[1:]):
+        if cur[0] == prev[0] and cur[1] == prev[1] + 1:
+            run.append(cur)
+        else:
+            segs.append(run); run = [cur]
+    segs.append(run)
+    meta["range"] = " | ".join(f"{s[0][0]}:{s[0][1]}..{s[-1][0]}:{s[-1][1]}" for s in segs)
+    meta["segments"] = len(segs)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
