@@ -466,6 +466,31 @@ document.addEventListener('click', e => {
     liveFontPanel.classList.remove('open');
 });
 
+// ── редакция текста (мусхаф): Tanzil (дефолт) / Diyanet (тур.), ОБЩИЙ ключ sync.edition с плеером
+// (владелец tg_7171: «вернуть выбор мусхафа»). Переключатель появляется в панели «⚙ Шрифт», когда бэк
+// прислал суру с text_diyanet (иначе тур. текста нет — переключателя нет, как в плеере). ──
+let LIVE_EDITION = localStorage.getItem('sync.edition') || 'tanzil';
+let liveEditionInited = false;
+const ayahText = v => (LIVE_EDITION === 'diyanet' && v.text_diyanet) ? v.text_diyanet : (v.text || '');
+function initLiveEdition(p) {
+  if (liveEditionInited || !p || !p.ayat || !p.ayat.some(v => v.text_diyanet)) return;
+  liveEditionInited = true;
+  const head = document.createElement('div'); head.className = 'fhead sep'; head.textContent = 'Текст (редакция)';
+  const row = document.createElement('div'); row.className = 'sizerow';
+  const mk = (id, label) => {
+    const b = document.createElement('button'); b.textContent = label; b.dataset.ed = id; b.style.flex = '1';
+    if (LIVE_EDITION === id) b.style.fontWeight = '700';
+    b.onclick = e => { e.stopPropagation(); if (LIVE_EDITION === id) return;
+      LIVE_EDITION = id; localStorage.setItem('sync.edition', id);
+      row.querySelectorAll('button').forEach(x => x.style.fontWeight = x.dataset.ed === id ? '700' : '400');
+      if (livePassageData) { livePassageSurah = null; renderPassage(livePassageData); }  // форс ре-рендер
+    };
+    return b;
+  };
+  row.appendChild(mk('tanzil', 'Tanzil')); row.appendChild(mk('diyanet', 'Diyanet (тур.)'));
+  liveFontPanel.appendChild(head); liveFontPanel.appendChild(row);
+}
+
 function sendMemorize() {                                // синхронизировать режим с сервером (после reset/реконнекта)
   if (liveWs && liveWs.readyState === 1) liveWs.send('memorize:' + (liveMemorize.checked ? '1' : '0'));
 }
@@ -587,12 +612,15 @@ const arNum = n => String(n).split('').map(c => ARN[+c] || c).join('');
 let liveAyahEl = {}, liveWordEl = {};                    // ключ surah:ayah → элемент аята / массив слов
 let liveActiveKey = null, liveActiveEl = null, liveHotEl = null, liveNear = [], liveTargetEl = null;
 let livePassageSurah = null;                             // какая сура сейчас отрисована (не перерисовывать зря)
+let livePassageData = null;                              // последняя присланная сура (ре-рендер при смене редакции)
 let liveRaf = 0;
 
 function renderPassage(p) {
   // отрисовать ВСЮ суру целиком (стабильный DOM). Вызывается лишь при СМЕНЕ суры (бэк шлёт passage
   // только тогда). Внутри одной суры трек-тики DOM не трогают — двигают классы подсветки.
-  if (!p || !p.ayat || livePassageSurah === p.surah) return;
+  if (!p || !p.ayat) return;
+  livePassageData = p; initLiveEdition(p);               // мусхаф-переключатель (если есть text_diyanet)
+  if (livePassageSurah === p.surah) return;
   livePassageSurah = p.surah;
   liveAyahEl = {}; liveWordEl = {}; liveActiveKey = null; liveActiveEl = null; liveHotEl = null;
   liveNear = []; liveTargetEl = null;
@@ -601,7 +629,7 @@ function renderPassage(p) {
   h.textContent = 'سورة ' + (p.title || p.surah); liveReader.appendChild(h);
   for (const v of p.ayat) {
     const el = document.createElement('span'); el.className = 'ayah';   // инлайн → сплошной поток
-    const words = (v.text || '').split(/\s+/).filter(Boolean);
+    const words = ayahText(v).split(/\s+/).filter(Boolean);
     const spans = words.map(w => {
       const s = document.createElement('span'); s.className = 'w'; s.textContent = w;
       el.appendChild(s); el.appendChild(document.createTextNode(' '));

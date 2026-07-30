@@ -51,8 +51,14 @@ def _surah_payload(q, s):
     каждый ответ бэка (владелец 30.07: перерисовка дёргала позицию текста на экране, терялось место)."""
     try:
         su = q.surah(s)
-        return {"surah": s, "title": getattr(su, "title", str(s)),
-                "ayat": [{"ayah": v.ayah, "text": v.text} for v in su.verses]}
+        ayat = []
+        for v in su.verses:
+            item = {"ayah": v.ayah, "text": v.text}
+            dv = getattr(v, "text_diyanet", "") or ""   # тур. мусхаф (Diyanet) — если есть в quran.db
+            if dv:
+                item["text_diyanet"] = dv
+            ayat.append(item)
+        return {"surah": s, "title": getattr(su, "title", str(s)), "ayat": ayat}
     except Exception:
         return None
 
