@@ -353,6 +353,12 @@ _SEG_MIN_MATCHED = 45     # ВТОРИЧНЫЙ (peeled) сегмент: мин. 
 _SEG_GAP = int(os.environ.get("SYNC_SEG_GAP", "50") or 50)  # разрыв (симв.) между big-блоками, за которым
 # ведущий одиночный блок primary считаем спуриозным ранним матчем → ФОЛБЭК-пил расширяет префикс мимо него
 # (только когда тайтовый пил ничего не дал; чистые реки не задеты). rec9-корановская: блок-26 vs тело-129
+_SEG_HOLE = int(os.environ.get("SYNC_SEG_HOLE", "60") or 60)  # мин. ВНУТРЕННЯЯ дыра тела (симв.) для пила
+# вложенного чтения (намаз: Ан'ам … Фатиха(2я) … Ан'ам — 2-я Фатиха в дыре между кусками одной суры)
+_SEG_HOLE_RATIO = float(os.environ.get("SYNC_SEG_HOLERATIO", "0.48") or 0.48)  # СТРОГИЙ порог вложенного
+_SEG_HOLE_FRAC = float(os.environ.get("SYNC_SEG_HOLEFRAC", "0.48") or 0.48)    # (ratio + доля matched/дыра):
+# истинная Фатиха rec16 = 0.58/0.59; ложные матчи в дырах мелодичного распева (rec9 Худ 11:25-29) ≤0.36/0.41
+# → порог разделяет с запасом. Слабый гейт _SEG_RATIO_MIN тут НЕ годится (ложно рубит суру на распеве).
                           # (16:98 matched≈30), басмалу, такбиры, шум по краям — они дают КОРОТКОЕ
                           # совпадение; истинная Фатиха ~79 matched. Primary (доминирующий) — без порога.
                           # к ложному пику (рефрен/истиаза-интро) без регресса частичных чтений
@@ -807,7 +813,8 @@ def find_segments(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
         d0 = big[0].a if big else 0
         d1 = (big[-1].a + big[-1].size) if big else len(sub)
         acc_before = len(accepted)
-        accepted.append({"lo": lo, "hi": hi, "pos": off + d0, "seg": seg})
+        accepted.append({"lo": lo, "hi": hi, "pos": off + d0, "seg": seg,
+                         "off": off, "big": big})
         if d0 >= _SEG_MIN_DEC:              # непокрытый ПРЕФИКС декода → отдельный сегмент (Фатиха)
             _recurse(sub[:d0], off, depth + 1)
         # ФОЛБЭК расширенного префикса: тайтовый пил [0:d0] НИЧЕГО не дал, а ведущий big-блок оторван
@@ -836,6 +843,65 @@ def find_segments(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
         step = _SEG_WIN // 2
         for off in range(0, len(dec) - step, step):
             _recurse(dec[off:off + _SEG_WIN], off, 1)
+
+    # ПИЛ ВНУТРЕННИХ ДЫР ТЕЛА (намаз: Ан'ам … Фатиха(2я) … Ан'ам — вложенное чтение ДРУГОЙ суры внутри
+    # тела primary, между кусками одной суры). Для каждого принятого сегмента ищем КРУПНУЮ внутреннюю дыру
+    # (разрыв между big-блоками ≥ _SEG_HOLE); если в ней когерентное чтение ДРУГОЙ суры — расщепляем
+    # сегмент по дыре (пропущенные аяты исключаются) и вставляем вложенное чтение с верной позицией.
+    # Repeat-aware: тот же диапазон (2-я Фатиха) в ДРУГОЙ позиции легален — _overlaps здесь не применяем.
+    # Гейт вложенного (matched≥45/big≥1/ratio) + фильтр «другая сура» режут разрыв-внутри-той-же-суры.
+    # Чистые реки: внутренние дыры либо < _SEG_HOLE, либо find_range даёт ТУ ЖЕ суру → не расщепляются.
+    import bisect
+    split_out = []
+    for a in accepted:
+        big_a = a.get("big") or []
+        seg_a = a["seg"]; off_a = a.get("off", 0)
+        if len(big_a) < 2 or len(seg_a) < 2:
+            split_out.append(a); continue
+        cum = []; c = 0
+        for sa in seg_a:
+            cum.append(c); c += len(fa_skel[sa2flat[sa]]) if sa in sa2flat else 0
+        holes = [(big_a[i + 1].a - (big_a[i].a + big_a[i].size), i)
+                 for i in range(len(big_a) - 1)
+                 if big_a[i + 1].a - (big_a[i].a + big_a[i].size) >= _SEG_HOLE]
+        done = False
+        for _, i in sorted(holes, reverse=True):
+            ge = big_a[i].a + big_a[i].size; gs = big_a[i + 1].a
+            sub_hole = dec[off_a + ge: off_a + gs]
+            if len(sub_hole) < max(k, _SEG_MIN_DEC):
+                continue
+            emb = find_range(emissions, quran, idx2ch, ch2idx, index=idx, k=k, dec=sub_hole)
+            if not emb:
+                continue
+            emb = list(emb)
+            if {s for s, _ in emb} & {s for s, _ in seg_a}:
+                continue                        # та же сура → это разрыв внутри чтения, не вложенное
+            est = _seg_text(emb)
+            esm = difflib.SequenceMatcher(None, sub_hole, est, autojunk=False)
+            eblk = esm.get_matching_blocks()
+            ebig = [b for b in eblk if b.size >= _SEG_MINBLOCK]
+            ematched = sum(b.size for b in eblk)
+            if (esm.ratio() < _SEG_HOLE_RATIO or ematched < _SEG_MIN_MATCHED or not ebig
+                    or ematched < _SEG_HOLE_FRAC * len(sub_hole)):
+                continue                        # слабый/размазанный → распев той же суры, не вложенное чтение
+            tb = big_a[i].b + big_a[i].size     # текст-позиция конца ДО дыры
+            ta = big_a[i + 1].b                 # текст-позиция начала ПОСЛЕ дыры
+            jb = bisect.bisect_right(cum, tb - 1) - 1
+            ja = bisect.bisect_right(cum, ta) - 1
+            if jb < 0 or ja >= len(seg_a) or ja <= jb:
+                continue                        # нет реального пропуска аятов → не расщепляем
+            before = seg_a[:jb + 1]; after = seg_a[ja:]
+            split_out.append({"lo": sa2flat[before[0]], "hi": sa2flat[before[-1]],
+                              "pos": a["pos"], "seg": before})
+            split_out.append({"lo": sa2flat[emb[0]], "hi": sa2flat[emb[-1]],
+                              "pos": off_a + ge + ebig[0].a, "seg": emb})
+            split_out.append({"lo": sa2flat[after[0]], "hi": sa2flat[after[-1]],
+                              "pos": off_a + gs, "seg": after})
+            done = True
+            break
+        if not done:
+            split_out.append(a)
+    accepted = split_out
     accepted.sort(key=lambda a: a["pos"])   # порядок ЧТЕНИЯ (по позиции в декоде)
     verses: list[tuple[int, int]] = []
     for a in accepted:
