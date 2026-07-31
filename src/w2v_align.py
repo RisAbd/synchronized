@@ -280,6 +280,87 @@ def _ctc_viterbi_repeats(E, labels, lab_word, blank: int, R: int, P: float):
     return path
 
 
+def _gate_match(word_timeline, timeline, char_timeline, E, stride_ms, idx2ch, ch2idx, skel_map):
+    """Гейт по ПОСЛОВНОМУ АКУСТИЧЕСКОМУ СОВПАДЕНИЮ (директива владельца: «детектить чистую речь,
+    шум/чужую речь не мапить»). Для каждого слова жадно декодим ЕГО кадры (argmax→скелет) и сверяем
+    со скелетом слова из текста. Не-Коран отсекается ЕДИНЫМ сигналом: тишина/такбир → декод пустой →
+    sim≈0; саламы/дуа → декод чужих букв → sim низкий; настоящее слово → sim высокий.
+    Замер rec16: рецитация sim_медиана 0.59, не-Коран (такбир44-61/саламы357+) 0.25.
+    НО жадный декод ШУМЕН пословно (31% реальных слов <0.34) → порог по ОДНОМУ слову рубит легит.
+    Поэтому режем ПО РЕГИОНУ: сглаживаем sim по ±W соседним словам и дропаем СПЛОШНЫЕ низкие руны
+    (такбир/саламы — связные зоны), а одиночное шумное-но-реальное слово держат его соседи.
+    Плюс обрезаем t_end на входе в тишину (для гашения между кусками).
+    ⚠️ ПО УМОЛЧАНИЮ ВЫКЛ (SYNC_W2V_VAD=1 — опт-ин): align-then-filter пережимает (дропает Quran-слова,
+    мис-плейснутые forced'ом на шум/саламы, вместо ПЕРЕСТАНОВКИ) → теряет контент. Правильный путь —
+    детектить чистые окна ДО выравнивания (архитектура владельца), не фильтровать после. Гейт оставлен
+    для исследования; включать осознанно."""
+    if os.environ.get("SYNC_W2V_VAD", "0") != "1" or not word_timeline:
+        return word_timeline, timeline, char_timeline
+    import numpy as np, difflib
+    special = {ch2idx.get(t) for t in ("<pad>", "<s>", "</s>", "<unk>", "|", "-", "ـ")} - {None}
+    blank_id = ch2idx.get("<pad>", 0)
+    dt = stride_ms / 1000.0
+    argmax = E.argmax(axis=1)
+    active = 1.0 - np.exp(E)[:, blank_id]
+    n = len(argmax)
+    THR = float(os.environ.get("SYNC_W2V_MATCHTHR", "0.38"))  # порог сглаженного sim «это Коран здесь»
+    W = int(os.environ.get("SYNC_W2V_MATCHWIN", "3"))         # ±W слов для сглаживания
+    SILN = float(os.environ.get("SYNC_W2V_VADSIL", "0.6"))    # тишина (с) для обрезки t_end
+    silf = max(1, int(round(SILN / dt)))
+
+    def fr(t):
+        return max(0, min(n - 1, int(round(t / dt))))
+
+    def decode(f0, f1):
+        out, prev = [], -1
+        for f in range(max(0, f0), min(f1, n)):
+            c = int(argmax[f])
+            if c != prev and c not in special:
+                ch = idx2ch.get(c, "")
+                if ch and ch not in _HARAKAT:
+                    out.append(ch)
+            prev = c
+        return "".join(out)
+
+    def first_silence(t0, t1):
+        f0, f1, run = fr(t0), fr(t1), 0
+        for f in range(f0, f1 + 1):
+            if active[f] < 0.08:
+                run += 1
+                if run >= silf:
+                    return (f - run + 1) * dt
+            else:
+                run = 0
+        return None
+
+    # обрезка t_end + пословный sim
+    sims = []
+    for e in word_timeline:
+        te = e.get("t_end")
+        if te is not None:
+            fs = first_silence(e["t"], te)
+            if fs is not None:
+                if fs > e["t"] + 0.05:
+                    e["t_end"] = round(fs, 3); te = e["t_end"]
+                else:
+                    del e["t_end"]; te = None
+        span_end = te if te is not None else e["t"] + 0.25
+        dec = decode(fr(e["t"]), fr(span_end) + 1)
+        exp = skel_map.get((e["surah"], e["ayah"], e["wi"]), "")
+        sims.append(difflib.SequenceMatcher(None, dec, exp).ratio() if exp else 1.0)
+    # сглаживание по ±W словам и дроп низких регионов
+    kept = []
+    for i, e in enumerate(word_timeline):
+        lo, hi = max(0, i - W), min(len(sims), i + W + 1)
+        if sum(sims[lo:hi]) / (hi - lo) >= THR:
+            kept.append(e)
+    keptay = {(e["surah"], e["ayah"]) for e in kept}
+    keptw = {(e["surah"], e["ayah"], e["wi"]) for e in kept}
+    timeline = [x for x in timeline if (x["surah"], x["ayah"]) in keptay]
+    char_timeline = [c for c in char_timeline if (c["surah"], c["ayah"], c["wi"]) in keptw]
+    return kept, timeline, char_timeline
+
+
 def forced_align(E, stride_ms: float, verses, idx2ch: dict, ch2idx: dict,
                  audio_path, snap: bool | None = None, slots=None) -> dict:
     """СВОЙ CTC-forced-align диапазона аятов к аудио по готовым эмиссиям E (Viterbi). GPU не нужен
@@ -411,6 +492,10 @@ def forced_align(E, stride_ms: float, verses, idx2ch: dict, ch2idx: dict,
         te = word_timeline[i].get("t_end")
         if te is not None and te <= word_timeline[i]["t"]:
             del word_timeline[i]["t_end"]
+
+    skel_map = {(s, a, wi): "".join(c for c in ar if c not in _HARAKAT) for (s, a, wi, ar) in ref}
+    word_timeline, timeline, char_timeline = _gate_match(
+        word_timeline, timeline, char_timeline, E, stride_ms, idx2ch, ch2idx, skel_map)
 
     meta = {
         "aligner": "wav2vec2-ctc-viterbi",
@@ -732,6 +817,10 @@ def repeat_align(E, stride_ms: float, verses, idx2ch: dict, ch2idx: dict,
         te = word_timeline[i].get("t_end")
         if te is not None and te <= word_timeline[i]["t"]:
             del word_timeline[i]["t_end"]
+
+    skel_map = {(s, a, wi): "".join(c for c in ar if c not in _HARAKAT) for (s, a, wi, ar) in ref}
+    word_timeline, timeline, char_timeline = _gate_match(
+        word_timeline, timeline, char_timeline, E, stride_ms, idx2ch, ch2idx, skel_map)
 
     n_rep = sum(1 for f in rep_flags if f)
     meta = {"aligner": "wav2vec2-ctc-viterbi-repeats", "align_model": _MODEL_NAME,

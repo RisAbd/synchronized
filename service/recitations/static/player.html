@@ -551,10 +551,29 @@ function setActiveAyah(key){
   }
 }
 
+// порог тишины: слово кончилось (t>t_end) и следующее дальше этого → между кусками намаза
+// (такбир/тишина/таслим) или долгая пауза → НИЧЕГО не подсвечиваем (не липнем на последнее слово).
+const BLANK_GAP = 1.5;
+function blankHighlight(){
+  hotEls.forEach(x=>{ x.classList.remove('hot','lit'); x.style.removeProperty('--wi');
+    x.style.removeProperty('--prog'); x.style.background=''; }); hotEls=[];
+  if(activeAyahEl) activeAyahEl.classList.remove('active');
+  nearEls.forEach(x=>x.classList.remove('near')); nearEls=[];
+  activeAyah=null; activeAyahEl=null;
+  badge.classList.add('idle');
+}
+
 function update(t){
   if(WT.length){                              // --- пословный режим ---
     const i=bsearch(WT, t); if(i<0) return;
     const e=WT[i], si=(e.si||0), key=si+':'+e.surah+':'+e.ayah;
+    // ГАШЕНИЕ не-Корана: текущее слово кончилось и следующее далеко (или его нет) → такбир/тишина/
+    // таслим между/после кусков — подсветку НЕ держим на последнем слове (жалоба владельца:
+    // «такбиры и шумы мапятся на фатиху»). Пауза внутри чтения тоже гасится — это верно (не читаем).
+    const nxt = WT[i+1];
+    if(e.t_end!=null && t > e.t_end + BLANK_GAP && (!nxt || (nxt.t - t) > BLANK_GAP)){
+      blankHighlight(); return;
+    }
     badge.classList.remove('idle');
     badgeSurah.textContent='سورة '+(surahTitle[e.surah]||e.surah);
     badgeAyah.textContent=e.surah+':'+e.ayah;
