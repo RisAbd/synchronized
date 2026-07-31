@@ -758,7 +758,7 @@ def find_range(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
 
 def find_segments(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
                   index=None, k: int = _K, dec: str | None = None,
-                  verbose: bool = False) -> list[tuple[int, int]]:
+                  verbose: bool = False, return_spans: bool = False):
     """МУЛЬТИ-СЕГМЕНТНЫЙ поиск (директива владельца 26.07): аудио НИКОГДА не один непрерывный кусок
     Корана — бывает Фатиха + основная сура + такбиры, разные суры/аяты вперемешку (записи с намаза).
     Один общий алгоритм должен находить ВСЕ читаемые места по похожести текста. Возвращает плоский
@@ -813,8 +813,8 @@ def find_segments(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
         d0 = big[0].a if big else 0
         d1 = (big[-1].a + big[-1].size) if big else len(sub)
         acc_before = len(accepted)
-        accepted.append({"lo": lo, "hi": hi, "pos": off + d0, "seg": seg,
-                         "off": off, "big": big})
+        accepted.append({"lo": lo, "hi": hi, "pos": off + d0, "pos_end": off + d1,
+                         "seg": seg, "off": off, "big": big})
         if d0 >= _SEG_MIN_DEC:              # непокрытый ПРЕФИКС декода → отдельный сегмент (Фатиха)
             _recurse(sub[:d0], off, depth + 1)
         # ФОЛБЭК расширенного префикса: тайтовый пил [0:d0] НИЧЕГО не дал, а ведущий big-блок оторван
@@ -892,11 +892,12 @@ def find_segments(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
                 continue                        # нет реального пропуска аятов → не расщепляем
             before = seg_a[:jb + 1]; after = seg_a[ja:]
             split_out.append({"lo": sa2flat[before[0]], "hi": sa2flat[before[-1]],
-                              "pos": a["pos"], "seg": before})
+                              "pos": a["pos"], "pos_end": off_a + ge, "seg": before})
             split_out.append({"lo": sa2flat[emb[0]], "hi": sa2flat[emb[-1]],
-                              "pos": off_a + ge + ebig[0].a, "seg": emb})
+                              "pos": off_a + ge + ebig[0].a,
+                              "pos_end": off_a + ge + ebig[-1].a + ebig[-1].size, "seg": emb})
             split_out.append({"lo": sa2flat[after[0]], "hi": sa2flat[after[-1]],
-                              "pos": off_a + gs, "seg": after})
+                              "pos": off_a + gs, "pos_end": a["pos_end"], "seg": after})
             done = True
             break
         if not done:
@@ -907,9 +908,14 @@ def find_segments(emissions: np.ndarray, quran, idx2ch: dict, ch2idx: dict,
     for a in accepted:
         verses.extend(a["seg"])
     if verbose:
-        parts = [f"{a['seg'][0][0]}:{a['seg'][0][1]}..{a['seg'][-1][0]}:{a['seg'][-1][1]}@{a['pos']}"
-                 for a in accepted]
+        parts = [f"{a['seg'][0][0]}:{a['seg'][0][1]}..{a['seg'][-1][0]}:{a['seg'][-1][1]}"
+                 f"@{a['pos']}-{a.get('pos_end', a['pos'])}" for a in accepted]
         print(f"сегменты ({len(accepted)}): " + " | ".join(parts))
+    if return_spans:
+        # per-сегмент декод-спан [pos, pos_end] (для оконного выравнивания: маппить кусок ТОЛЬКО в
+        # его временном окне, разрывы такбир/саламы между кусками оставить непокрытыми).
+        return [{"seg": a["seg"], "pos": a["pos"], "pos_end": a.get("pos_end", a["pos"])}
+                for a in accepted]
     return verses
 
 
