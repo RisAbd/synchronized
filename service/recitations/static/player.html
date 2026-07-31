@@ -370,7 +370,9 @@ async function init(){
   // карта слово→ПЕРВЫЙ таймкод (WT монотонен по t → первое вхождение = раннее чтение; при
   // возвратах чтеца (П8) у слова несколько точек — берём самую раннюю). Для клик-навигации (П13).
   firstT = new Map();
-  for(const e of WT){ const k=e.surah+':'+e.ayah+':'+e.wi; if(!firstT.has(k)) firstT.set(k, e.t); }
+  // ключ несёт si (номер КУСКА чтения): один аят может читаться в разных кусках (повтор Фатихи в
+  // намазе) — у каждого вхождения свой si → своё время, клик по 2-й Фатихе ведёт на её время.
+  for(const e of WT){ const k=(e.si||0)+':'+e.surah+':'+e.ayah+':'+e.wi; if(!firstT.has(k)) firstT.set(k, e.t); }
 
   renderText();
   initEdition();
@@ -459,16 +461,16 @@ function renderText(){
       // dataset.k = каноничный ключ surah:ayah:wi → клик по слову ищет его таймкод (П13)
       if(diy){
         const dmap = v.dmap || [];
-        tw.forEach((_,wi)=>{ const dj=(dmap[wi]||[])[0]; const k=sec.surah+':'+v.ayah+':'+wi;
+        tw.forEach((_,wi)=>{ const dj=(dmap[wi]||[])[0]; const k=sec.si+':'+sec.surah+':'+v.ayah+':'+wi;
           if(dj!=null && spans[dj]){ wordEl[k]=spans[dj];
             if(!spans[dj].dataset.k) spans[dj].dataset.k=k; } });
       } else {
-        spans.forEach((s,wi)=>{ const k=sec.surah+':'+v.ayah+':'+wi;
+        spans.forEach((s,wi)=>{ const k=sec.si+':'+sec.surah+':'+v.ayah+':'+wi;
           wordEl[k]=s; s.dataset.k=k; });
       }
       const num=document.createElement('span'); num.className='num';
       num.textContent='﴿'+toArabic(v.ayah)+'﴾'; el.appendChild(num);
-      textEl.appendChild(el); ayahEl[sec.surah+':'+v.ayah]=el;
+      textEl.appendChild(el); ayahEl[sec.si+':'+sec.surah+':'+v.ayah]=el;
       textEl.appendChild(document.createTextNode(' '));
     }
   }
@@ -552,7 +554,7 @@ function setActiveAyah(key){
 function update(t){
   if(WT.length){                              // --- пословный режим ---
     const i=bsearch(WT, t); if(i<0) return;
-    const e=WT[i], key=e.surah+':'+e.ayah;
+    const e=WT[i], si=(e.si||0), key=si+':'+e.surah+':'+e.ayah;
     badge.classList.remove('idle');
     badgeSurah.textContent='سورة '+(surahTitle[e.surah]||e.surah);
     badgeAyah.textContent=e.surah+':'+e.ayah;
@@ -563,7 +565,7 @@ function update(t){
       x.style.removeProperty('--prog'); x.style.background=''; }); hotEls=[];
     const R=3;
     for(let dwi=-R; dwi<=R; dwi++){
-      const el=wordEl[e.surah+':'+e.ayah+':'+(e.wi+dwi)];
+      const el=wordEl[si+':'+e.surah+':'+e.ayah+':'+(e.wi+dwi)];
       if(!el) continue;
       if(dwi===0){ el.classList.add('hot'); }
       else { el.style.setProperty('--wi', (1 - Math.abs(dwi)/(R+1)).toFixed(2)); el.classList.add('lit'); }
@@ -574,7 +576,7 @@ function update(t){
     // даёт визуальное напряжение (ждёшь переход/остановку) → убрали, светим слово целиком.
     // Буква+харакат (П5, char_timeline у нас ЕСТЬ) — ОТЛОЖЕНО: спаны могут ломать арабскую вязь;
     // вернёмся после ручного ввода (проверить порчу рендера, иначе — маркер-оверлей поверх слова).
-    const hotEl = wordEl[e.surah+':'+e.ayah+':'+e.wi];
+    const hotEl = wordEl[si+':'+e.surah+':'+e.ayah+':'+e.wi];
     // прогресс чтения слова → ширина жёлтой полоски под ним (t_end реальный, иначе онсет следующего)
     if(hotEl){
       let end=e.t_end; if(end==null){ const nx=WT[i+1]; end = nx ? nx.t : (e.t+0.4); }
@@ -586,7 +588,7 @@ function update(t){
   }
   // --- запасной аятный режим (если нет word_timeline) ---
   const i=bsearch(TL, t); if(i<0) return;
-  const e=TL[i], key=e.surah+':'+e.ayah;
+  const e=TL[i], key=(e.si||0)+':'+e.surah+':'+e.ayah;
   badge.classList.remove('idle');
   badgeSurah.textContent='سورة '+(surahTitle[e.surah]||e.surah);
   badgeAyah.textContent=e.surah+':'+e.ayah;

@@ -28,58 +28,80 @@ def _ayah_spans(timeline: list[dict]) -> dict[int, tuple[int, int]]:
     return spans
 
 
+def _reading_runs(timeline: list[dict]) -> list[dict]:
+    """Разбить чтение на НЕПРЕРЫВНЫЕ куски (run) В ПОРЯДКЕ ЧТЕНИЯ. Новый run при смене суры ИЛИ
+    непоследовательном аяте (повтор — аят пошёл назад; скачок — пропуск аятов). Так намаз
+    (Фатиха→Ан'ам→Фатиха→Ан'ам) даёт 4 куска, повтор Фатихи — отдельная секция, а не слипается.
+    Каждому элементу timeline присваивается si — индекс его куска. Возвращает список
+    {si, surah, lo, hi} в порядке чтения."""
+    runs: list[dict] = []
+    for e in timeline:
+        s, a = e["surah"], e["ayah"]
+        # расширяем текущий кусок, пока аят в пределах его размаха [lo, hi+1]: так МЕЛКИЕ возвраты
+        # чтеца (P8: перечитал слово/аят внутри куска) НЕ дробят секцию. Новый кусок — при смене суры
+        # ИЛИ скачке за пределы (a < lo-возврат ЦЕЛЫМ блоком назад, или a > hi+1 пропуск): это уже
+        # другой кусок чтения (директива владельца: целые куски = отдельные секции, мелкие возвраты — нет).
+        if runs and runs[-1]["surah"] == s and runs[-1]["lo"] <= a <= runs[-1]["hi"] + 1:
+            runs[-1]["lo"] = min(runs[-1]["lo"], a)
+            runs[-1]["hi"] = max(runs[-1]["hi"], a)
+            e["si"] = len(runs) - 1
+        else:
+            runs.append({"si": len(runs), "surah": s, "lo": a, "hi": a})
+            e["si"] = len(runs) - 1
+    return runs
+
+
 def build_data(sync_map: dict, quran: Quran, audio_src: str) -> dict:
     """Данные для плеера: аудио + timeline + разделы текста + оглавление (chapters).
-    Единый формат и для standalone-плеера, и для веб-фронта."""
-    timeline = sync_map["timeline"]
-    spans = _ayah_spans(timeline)
+    Единый формат и для standalone-плеера, и для веб-фронта.
 
-    # разделы текста: по каждой затронутой суре — аяты от min до max.
-    # words — разбивка отображаемого текста на слова; индекс слова совпадает с word_index
-    # канона (нормализация не меняет число/порядок слов), поэтому по нему подсвечиваем слово.
+    Разделы (sections) строятся по ПОСЛЕДОВАТЕЛЬНОСТИ ЧТЕНИЯ (run'ам), а НЕ по per-сура диапазону:
+    аудио бывает не один непрерывный кусок (намаз: Фатиха→Ан'ам→Фатиха→Ан'ам; повторы; куски не
+    по порядку). Каждый run = своя секция (с индексом si); один и тот же аят может встречаться в
+    нескольких секциях (повтор). word_timeline несёт si → фронт подсвечивает нужное вхождение,
+    а не прыгает на первое по (сура:аят)."""
+    wt_src = sync_map.get("word_timeline") or []
+    # runs строим по word_timeline (детальная последовательность чтения); если его нет — по timeline.
+    seq = wt_src if wt_src else sync_map["timeline"]
+    runs = _reading_runs(seq)
+
+    # разделы текста: по каждому RUN — его аяты lo..hi. words — разбивка на слова; индекс слова
+    # совпадает с word_index канона (нормализация не меняет число/порядок слов) → по нему подсветка.
     sections = []
-    for surah in sorted(spans):
-        lo, hi = spans[surah]
+    for r in runs:
+        surah, lo, hi = r["surah"], r["lo"], r["hi"]
         s = quran.surah(surah)
         ayat = []
         for a in range(lo, hi + 1):
             v = quran.verse(surah, a)
-            # word_tokens роняет токены-вакфы/паузы (отдельные знаки-неслова в тексте Tanzil):
-            # их не выравниваем и не подсвечиваем. Индексация wi совпадает с align.py/aligner.
             words = word_tokens(v.text)
             item = {"ayah": a, "text": v.text, "words": words}
-            # П9: вторая редакция (Diyanet) для переключения текста в плеере. word_timeline
-            # индексирован по словам Tanzil (wi) → отдаём карту wi→[индексы слов Diyanet],
-            # чтобы подсветка легла на слова Diyanet даже при ином дроблении. forced не трогаем.
             if getattr(v, "text_diyanet", ""):
                 dwords = word_tokens(v.text_diyanet)
                 item["text_diyanet"] = v.text_diyanet
                 item["words_diyanet"] = dwords
                 item["dmap"] = map_editions(words, dwords)
             ayat.append(item)
-        # ﷽ перед сурой в режиме Diyanet: его текст басмалу НЕ содержит (в отличие от Tanzil),
-        # поэтому дорисовываем заголовком по флагу — но только если показан аят 1 (lo==1),
-        # т.к. басмала стоит перед первым аятом. Tanzil-режим ﷽ не рисует (уже в тексте).
-        sections.append({"surah": surah, "title": s.title, "ayat": ayat,
+        sections.append({"si": r["si"], "surah": surah, "title": s.title, "ayat": ayat,
                          "bismillah_diyanet": bool(getattr(s, "bismillah_pre_diyanet", False))
                                               and lo == 1})
 
-    # оглавление: точки смены суры (для навигации-«chapters»)
+    # оглавление: точки смены КУСКА (для навигации) — по si, чтобы повтор давал отдельную главу
     chapters = []
-    for e in timeline:
-        if not chapters or chapters[-1]["surah"] != e["surah"]:
-            chapters.append({"t": e["t"], "surah": e["surah"], "ayah": e["ayah"],
-                             "title": quran.surah(e["surah"]).title})
+    for e in seq:
+        if not chapters or chapters[-1].get("si") != e.get("si"):
+            chapters.append({"t": e["t"], "si": e.get("si", 0), "surah": e["surah"],
+                             "ayah": e["ayah"], "title": quran.surah(e["surah"]).title})
 
     return {
         "audio": audio_src,
-        "timeline": [{"t": e["t"], "surah": e["surah"], "ayah": e["ayah"]} for e in timeline],
-        # t_end (если есть, forced его даёт) тащим на фронт: плеер по нему замораживает
-        # karaoke-заливку слова на паузах (не «ползёт» прогресс, пока чтец молчит/договаривает).
-        # rep=True — точка-перечитка (возврат чтеца, П8): тащим флаг на фронт/в аудит, чтобы
-        # отличать повтор от первого прочтения (плеер может пометить, аудит — посчитать).
-        "word_timeline": [{k: w[k] for k in ("t", "t_end", "surah", "ayah", "wi", "rep") if k in w}
-                          for w in sync_map.get("word_timeline", [])],
+        "timeline": [{"t": e["t"], "surah": e["surah"], "ayah": e["ayah"], "si": e.get("si", 0)}
+                     for e in sync_map["timeline"]] if not wt_src else
+                    [{"t": w["t"], "surah": w["surah"], "ayah": w["ayah"], "si": w.get("si", 0)}
+                     for w in wt_src],
+        "word_timeline": [{**{k: w[k] for k in ("t", "t_end", "surah", "ayah", "wi", "rep") if k in w},
+                           "si": w.get("si", 0)}
+                          for w in wt_src],
         "sections": sections,
         "chapters": chapters,
     }
@@ -148,10 +170,10 @@ for (const sec of DATA.sections) {
   for (const v of sec.ayat) {
     const d = document.createElement('span');
     d.className = 'ayah';
-    d.id = 'a-' + sec.surah + '-' + v.ayah;
+    d.id = 'a-' + sec.si + '-' + sec.surah + '-' + v.ayah;
     d.innerHTML = v.text + ' <span class="num">﴿' + toArabic(v.ayah) + '﴾</span> ';
     textEl.appendChild(d);
-    elById[sec.surah + ':' + v.ayah] = d;
+    elById[sec.si + ':' + sec.surah + ':' + v.ayah] = d;   // ключ несёт si (кусок чтения) → повтор не слипается
   }
 }
 function toArabic(n){ return String(n).replace(/[0-9]/g, d => '٠١٢٣٤٥٦٧٨٩'[d]); }
@@ -172,7 +194,7 @@ function update(){
   const i = currentIndex(t);
   if (i < 0){ posEl.textContent = fmt(t); return; }
   const e = TL[i];
-  const key = e.surah + ':' + e.ayah;
+  const key = (e.si||0) + ':' + e.surah + ':' + e.ayah;
   posEl.textContent = sectitle(e.surah) + ' ' + e.surah + ':' + e.ayah + '  ·  ' + fmt(t);
   if (key === activeKey) return;
   if (activeEl) activeEl.classList.remove('active');
