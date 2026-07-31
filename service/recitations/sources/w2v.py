@@ -73,6 +73,12 @@ def _edge_trim(E, spans, stride, idx2ch, ch2idx):
     import numpy as np
     if os.environ.get("SYNC_W2V_EDGE_TRIM", "1") == "0" or not spans:
         return E, None
+    # окна сегментов (pos/pos_end) надёжны ТОЛЬКО на корановской модели (мелодичную Фатиху декодит).
+    # На ОБЫЧНОЙ модели pos первого/последнего куска неточен → срез съел бы реальный Коран (rec9:
+    # Фатиха читается с 0.5с, но обычная модель её декодит слабо → pos≈21с → edge_trim сдвигал старт
+    # Фатихи 0.5→21с). Потому: без SYNC_W2V_MODEL — НЕ трогаем (обычные реки байт-в-байт, без среза).
+    if not os.environ.get("SYNC_W2V_MODEL") and os.environ.get("SYNC_W2V_EDGE_FORCE", "0") != "1":
+        return E, None
     # только МУЛЬТИСЕГМЕНТ (намаз: Фатиха+сура+такбиры) — там края = такбир/саламы. Чистые односегментные
     # реки (одна сура подряд) НЕ трогаем: их края — тишина, текущее поведение владелец считает нормой.
     if len(spans) < 2 and os.environ.get("SYNC_W2V_EDGE_FORCE", "0") != "1":
@@ -128,6 +134,76 @@ def _cap_tail(sync_map, t_end_max: float):
         sync_map[key] = kept
 
 
+def _perwindow_align(E, spans, quran, stride, idx2ch, ch2idx, audio_path, index):
+    """ПООКОННЫЙ независимый align каждого сегмента намаза (костяк «не маппить не-Коран», шаг 2).
+
+    Прод-путь (_align_with_repeats) гонит ОДИН монотонный Viterbi по ВСЕЙ эмиссии → крайние слова
+    куска растягиваются на такбир МЕЖДУ кусками (rec16: 2-я Фатиха размазана по 50с такбира, падает
+    на 161с вместо реальных 208.5с). Здесь: каждый сегмент выравниваем ОТДЕЛЬНО, ТОЛЬКО в его окне
+    [t0..t1] (t0=pos, t1=pos_end из find_segments по времени greedy-декода); правый край дотягиваем к
+    старту следующего, пока разрыв декодится как ХВОСТ текста сегмента (заниженный pos_end у мелодичной
+    Фатихи). Между окнами — ДЫРЫ (такбир: слов нет → плеер гасит подсветку). snap=False: на срезе
+    эмиссии времена от 0, snap искал бы тишину по полному аудио → наврал бы; сдвигаем на t0 после.
+
+    Требует НАДЁЖНЫХ окон → зовём ТОЛЬКО на корановской модели (мелодичную Фатиху декодит; обычная —
+    нет, окна поплывут). Возвращает объединённый sync_map или None (если окна не собрались)."""
+    import difflib
+    import numpy as np
+    import match_align
+    import w2v_align
+
+    special = {ch2idx.get(t) for t in ("<pad>", "<s>", "</s>", "<unk>", "|", "-", "ـ")} - {None}
+    _, ctimes = match_align.greedy_skeleton(E, idx2ch, special, times=True, stride_ms=stride)
+    N = len(ctimes)
+    if N == 0:
+        return None
+    _Cs, _c2fa, _kidx, _flat, _fa_skel = index
+    fa2i = {sa: i for i, sa in enumerate(_flat)}
+    dur = E.shape[0] * stride / 1000.0
+    GAP_MIN = float(os.environ.get("SYNC_W2V_PERWIN_GAP", "2.0") or 2.0)
+    EXT_RATIO = float(os.environ.get("SYNC_W2V_PERWIN_EXT", "0.30") or 0.30)
+
+    skel_dec, _ = match_align.greedy_skeleton(E, idx2ch, special, times=True, stride_ms=stride)
+
+    def dec_slice(t0, t1):
+        return "".join(skel_dec[i] for i in range(N) if t0 <= ctimes[i] <= t1)
+
+    def seg_skel(seg):
+        return "".join(_fa_skel[fa2i[(s, a)]] for s, a in seg if (s, a) in fa2i)
+
+    starts = [ctimes[max(0, min(sp["pos"], N - 1))] for sp in spans]
+    merged = {"word_timeline": [], "timeline": [], "char_timeline": []}
+    for i, sp in enumerate(spans):
+        seg = sp["seg"]
+        t0 = starts[i]
+        t1 = ctimes[max(0, min(sp["pos_end"], N - 1))]
+        nxt = starts[i + 1] if i + 1 < len(spans) else dur
+        if nxt - t1 > GAP_MIN:                       # дотянуть правый край, если разрыв = хвост текста
+            gap = dec_slice(t1, nxt)
+            tail = seg_skel(seg)[-40:]
+            r = difflib.SequenceMatcher(None, gap, tail).ratio() if (gap and tail) else 0.0
+            if r >= EXT_RATIO:
+                t1 = nxt
+        t1 = min(t1, nxt)
+        if t1 - t0 < 0.3:
+            continue
+        f0 = max(0, int(t0 * 1000.0 / stride))
+        f1 = min(E.shape[0], int(t1 * 1000.0 / stride))
+        verses = [(s, a, quran.surah(s).verses[a - 1].text) for s, a in seg]
+        sm = w2v_align.forced_align(E[f0:f1], stride, verses, idx2ch, ch2idx, audio_path, snap=False)
+        for key in ("word_timeline", "timeline", "char_timeline"):
+            for w in sm.get(key) or []:
+                w["t"] = round(w["t"] + t0, 3)
+                if w.get("t_end") is not None:
+                    w["t_end"] = round(w["t_end"] + t0, 3)
+                merged[key].append(w)
+    if not merged["word_timeline"]:
+        return None
+    merged["meta"] = {"aligner": "wav2vec2-ctc-viterbi", "align_model": os.environ.get("SYNC_W2V_MODEL", ""),
+                      "perwindow": True, "windows": len(spans)}
+    return merged
+
+
 def _fmt_segments(rng) -> str:
     """компактная запись сегментов: разрывы по номерам аятов → отдельные куски (1:1-1:7, 17:1-17:60)."""
     parts, s0 = [], 0
@@ -163,11 +239,25 @@ def run(rec, audio, quran, out_dir: Path, stage=None) -> dict:
         raise RuntimeError("w2v: не удалось определить диапазон из акустики")
     rng = [sa for sp in spans for sa in sp["seg"]]           # плоский список аятов в порядке чтения
     verses = [(s, a, quran.surah(s).verses[a - 1].text) for s, a in rng]
-    # срез краёв не-Коран (такбир/саламы) → слова не растягиваются на них (см. _edge_trim)
-    E_al, edge = _edge_trim(E, spans, stride, idx2ch, ch2idx)
-    sync_map, rep_info = _align_with_repeats(E_al, stride, verses, idx2ch, ch2idx, str(audio))
-    if edge:
-        _cap_tail(sync_map, edge["window"][1])   # последнее слово «держится» до конца аудио явно — обрезать до окна
+
+    # ПООКОННЫЙ путь (шаг 2 костяка «не маппить не-Коран») — ТОЛЬКО намаз на корановской модели:
+    # мультисегмент (≥2 куска) + задана SYNC_W2V_MODEL (мелодичную Фатиху декодит → окна кусков точные).
+    # Каждый кусок ровняется в своём окне, внутренние такбиры между кусками — пусто. Обычные реки и
+    # rec9 (Фатиха+Исра на обычной модели, окна поплыли бы) идут СТАРЫМ путём (edge_trim), НЕ трогаю.
+    edge = None
+    rep_info = {}
+    sync_map = None
+    perwin = (len(spans) >= 2 and os.environ.get("SYNC_W2V_MODEL")
+              and os.environ.get("SYNC_W2V_PERWIN", "1") != "0")
+    if perwin:
+        sync_map = _perwindow_align(E, spans, quran, stride, idx2ch, ch2idx, str(audio), index)
+        if sync_map is not None:
+            rep_info = {"repeats_mode": "perwindow-forced", "windows": len(spans)}
+    if sync_map is None:                              # односегмент / обычная модель / пооконный не собрался
+        E_al, edge = _edge_trim(E, spans, stride, idx2ch, ch2idx)
+        sync_map, rep_info = _align_with_repeats(E_al, stride, verses, idx2ch, ch2idx, str(audio))
+        if edge:
+            _cap_tail(sync_map, edge["window"][1])   # последнее слово «держится» до конца аудио явно — обрезать до окна
     meta = sync_map.setdefault("meta", {})
     meta["range_source"] = "w2v-self"
     meta["range"] = _fmt_segments(rng)
