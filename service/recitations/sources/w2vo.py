@@ -39,18 +39,26 @@ def run(rec, audio, quran, out_dir: Path, stage=None) -> dict:
     import match_align
     import w2v_align
 
+    from . import w2v as _w2v          # общий срез краёв не-Корана (_edge_trim/_cap_tail)
+
     E, stride, idx2ch, ch2idx = w2v_align.emissions(str(audio))
     index = match_align.build_index(quran)
-    rng = match_align.find_segments(E, quran, idx2ch, ch2idx, index=index)
-    if not rng:
+    spans = match_align.find_segments(E, quran, idx2ch, ch2idx, index=index, return_spans=True)
+    if not spans:
         raise RuntimeError("w2vo: не удалось определить диапазон из акустики")
+    rng = [sa for sp in spans for sa in sp["seg"]]
     verses = [(s, a, quran.surah(s).verses[a - 1].text) for s, a in rng]
-    slots = w2v_align.greedy_repeat_slots(E, verses, ch2idx, stride)
-    sync_map = w2v_align.forced_align(E, stride, verses, idx2ch, ch2idx, str(audio), slots=slots)
+    slots = w2v_align.greedy_repeat_slots(E, verses, ch2idx, stride)   # слоты повторов — по исходному E
+    E_al, edge = _w2v._edge_trim(E, spans, stride, idx2ch, ch2idx)     # forced_align — по маскированному
+    sync_map = w2v_align.forced_align(E_al, stride, verses, idx2ch, ch2idx, str(audio), slots=slots)
+    if edge:
+        _w2v._cap_tail(sync_map, edge["window"][1])
     meta = sync_map.setdefault("meta", {})
     meta["range_source"] = "w2v-self"
     meta["repeats_mode"] = "oracle-greedy-forced"
     meta["repeats_inserted"] = sum(1 for s in slots if s[4])
+    if edge:
+        meta["edge_trim"] = edge
 
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
