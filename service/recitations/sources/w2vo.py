@@ -48,17 +48,32 @@ def run(rec, audio, quran, out_dir: Path, stage=None) -> dict:
         raise RuntimeError("w2vo: не удалось определить диапазон из акустики")
     rng = [sa for sp in spans for sa in sp["seg"]]
     verses = [(s, a, quran.surah(s).verses[a - 1].text) for s, a in rng]
-    slots = w2v_align.greedy_repeat_slots(E, verses, ch2idx, stride)   # слоты повторов — по исходному E
-    E_al, edge = _w2v._edge_trim(E, spans, stride, idx2ch, ch2idx)     # forced_align — по маскированному
-    sync_map = w2v_align.forced_align(E_al, stride, verses, idx2ch, ch2idx, str(audio), slots=slots)
-    if edge:
-        _w2v._cap_tail(sync_map, edge["window"][1])
-    meta = sync_map.setdefault("meta", {})
+    import os
+    # НАМАЗ (мультисегмент + корановская модель): пооконный align — как в w2v, чтобы w2vo и w2v были
+    # согласованы при сравнении на слух (иначе w2vo размазывает Фатиху-2 по такбиру). Повторы ВНУТРИ
+    # намазового куска редки (Фатиха не перечитывается) → slots-оракул тут не нужен. Одиночные реки
+    # (перечитки чтеца) идут ОРАКУЛ-путём slots (ради чего w2vo и существует).
+    perwin = (len(spans) >= 2 and os.environ.get("SYNC_W2V_MODEL")
+              and os.environ.get("SYNC_W2V_PERWIN", "1") != "0")
+    sync_map = None
+    if perwin:
+        sync_map = _w2v._perwindow_align(E, spans, quran, stride, idx2ch, ch2idx, str(audio), index)
+    if sync_map is not None:
+        meta = sync_map.setdefault("meta", {})
+        meta["repeats_mode"] = "perwindow-forced"
+        meta["windows"] = len(spans)
+    else:
+        slots = w2v_align.greedy_repeat_slots(E, verses, ch2idx, stride)   # слоты повторов — по исходному E
+        E_al, edge = _w2v._edge_trim(E, spans, stride, idx2ch, ch2idx)     # forced_align — по маскированному
+        sync_map = w2v_align.forced_align(E_al, stride, verses, idx2ch, ch2idx, str(audio), slots=slots)
+        if edge:
+            _w2v._cap_tail(sync_map, edge["window"][1])
+        meta = sync_map.setdefault("meta", {})
+        meta["repeats_mode"] = "oracle-greedy-forced"
+        meta["repeats_inserted"] = sum(1 for s in slots if s[4])
+        if edge:
+            meta["edge_trim"] = edge
     meta["range_source"] = "w2v-self"
-    meta["repeats_mode"] = "oracle-greedy-forced"
-    meta["repeats_inserted"] = sum(1 for s in slots if s[4])
-    if edge:
-        meta["edge_trim"] = edge
 
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "sync-map.json").write_text(json.dumps(sync_map, ensure_ascii=False, indent=2))
